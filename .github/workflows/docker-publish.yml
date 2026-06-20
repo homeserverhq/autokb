@@ -43,8 +43,8 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/autokb-app:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}/autokb-app:latest
+            ghcr.io/${{ github.repository }}-app:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}-app:latest
           labels: ${{ steps.meta.outputs.labels }},org.opencontainers.image.source=https://github.com{{ github.repository }}
 
   build-mcp:
@@ -84,6 +84,6 @@ jobs:
           file: ./mcp/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/autokb-mcp:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}/autokb-mcp:latest
+            ghcr.io/${{ github.repository }}-mcp:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}-mcp:latest
           labels: ${{ steps.meta.outputs.labels }},org.opencontainers.image.source=https://github.com{{ github.repository }}

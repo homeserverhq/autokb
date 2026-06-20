@@ -20,7 +20,6 @@ AutoKB connects to diverse data sources through a hot-swappable plugin architect
 - **Schema-Immutable Contracts** — Plugin `get_schema()` output is SHA-256 hashed and treated as an immutable contract. Breaking schema changes are detected, blocked, and reported via SMTP — existing subscriptions are never silently invalidated.
 - **Live SSE Updates** — PostgreSQL `LISTEN`/`NOTIFY` bridges every state change to browser and MCP clients in real time. No polling required.
 - **SMTP Notifications** — Configurable email alerts for heartbeat timeouts, runtime errors, schema validation failures, schema-breaking changes, and watchdog force-releases.
-- **TOON Optimization** — Token-Optimized Object Notation compresses bulk API responses by 30–60%, reducing LLM context window usage and cost.
 - **Forward-Compatible Schema Evolution** — Three reserved `_extra_param_*` fields in every plugin schema allow future credential additions without requiring operators to recreate subscriptions.
 
 ---

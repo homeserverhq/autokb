@@ -1,0 +1,125 @@
+
+services:
+  autokb-db:
+    image: mirror.gcr.io/postgres:15.0-bullseye
+    container_name: autokb-db
+    hostname: autokb-db
+    restart: unless-stopped
+    env_file: stack.env
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256mb
+    networks:
+      - int-autokb-net
+    volumes:
+      - ./autokb/db:/var/lib/postgresql/data
+
+  autokb-manager:
+    image: ghcr.io/homeserverhq/autokb:latest
+    container_name: autokb-manager
+    hostname: autokb-manager
+    restart: unless-stopped
+    env_file: stack.env
+    command: python /src/manager/manager.py
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+      - dock-internalmail-net
+    volumes:
+      - v-autokb-output:/output
+      - v-autokb-assets:/assets
+      - v-autokb-plugins:/src/plugins
+      - v-autokb-logs:/logs
+
+  autokb-worker:
+    image: ghcr.io/homeserverhq/autokb:latest
+    container_name: autokb-worker
+    hostname: autokb-worker
+    restart: unless-stopped
+    env_file: stack.env
+    command: python /src/worker/worker.py
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+    volumes:
+      - v-autokb-output:/output
+      - v-autokb-plugins:/src/plugins
+      - v-autokb-logs:/logs
+
+  autokb-web:
+    image: ghcr.io/homeserverhq/autokb:latest
+    container_name: autokb-web
+    hostname: autokb-web
+    restart: unless-stopped
+    env_file: stack.env
+    command: gunicorn web.app:app --bind 0.0.0.0:80 --worker-class aiohttp.worker.GunicornWebWorker
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+    volumes:
+      - v-autokb-assets:/assets
+      - v-autokb-logs:/logs
+
+  autokb-mcp:
+    image: ghcr.io/homeserverhq/mcp:latest
+    container_name: autokb-mcp
+    hostname: autokb-mcp
+    restart: unless-stopped
+    env_file: stack.env
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - v-autokb-logs:/logs
+
+  autokb-redis:
+    image: mirror.gcr.io/valkey/valkey:alpine3.23
+    container_name: autokb-redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: redis-server
+    networks:
+      - int-autokb-net
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+
+volumes:
+  v-autokb-plugins:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./autokb/src/plugins
+  v-autokb-assets:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./autokb/assets
+  v-autokb-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./autokb/logs
+  v-autokb-output:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./autokb/output
+
+networks:
+  int-autokb-net:
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default

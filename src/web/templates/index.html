@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoKB</title>
+  <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
+  <link rel="stylesheet" href="/static/styles.css?v=38" />
+</head>
+<body>
+  <!-- Login page -->
+  <div id="login-view" class="login-container" style="display: none;">
+    <form class="login-form" id="login-form">
+      <div class="login-brand">
+        <img src="/assets/autokb.png" alt="AutoKB logo" class="login-logo" />
+        <span>AutoKB</span>
+      </div>
+      <p class="subtitle">Sign in to continue</p>
+      <input type="text" id="login-username" placeholder="Username" autocomplete="username" />
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" />
+      <button type="submit" class="btn btn-primary">Sign In</button>
+      <p id="login-error" class="error-msg" style="display: none;"></p>
+    </form>
+  </div>
+
+  <!-- Main app -->
+  <div id="app-view" style="display: none;">
+    <header class="app-header">
+      <div class="brand"><img src="/assets/autokb.png" alt="AutoKB logo" class="brand-logo" />AutoKB</div>
+      <div class="user-info">
+        <span id="username-display"></span>
+        <button class="btn btn-secondary" id="logout-btn">Logout</button>
+      </div>
+    </header>
+    <div class="app-body">
+      <nav class="sidebar">
+        <a href="#/dashboard" class="nav-link active" data-view="dashboard">Dashboard</a>
+        <a href="#/data-sources" class="nav-link" data-view="data-sources">Data Sources</a>
+        <a href="#/all-subscriptions" class="nav-link" data-view="all-subscriptions">Subscriptions</a>
+        <a href="#/activity" class="nav-link" data-view="activity">Recent Activity</a>
+        <a href="#/devlab" class="nav-link" data-view="devlab">Developer Lab</a>
+      </nav>
+      <main class="main-area">
+        <section id="view-dashboard" class="view">
+          <h2>Dashboard</h2>
+          <div class="dashboard-layout">
+            <article id="dashboard-readme" class="dashboard-readme">
+              <h3>What is AutoKB?</h3>
+              <p>
+                AutoKB is a distributed, event-driven ETL orchestration engine. It connects to
+                diverse data sources via a drop-in plugin system; each plugin pulls data,
+                transforms it, and writes chunks (markdown, JSON, or text) to a per-subscription
+                output directory. Downstream knowledge base importers consume those files.
+              </p>
+
+              <h3>How to use an existing plugin</h3>
+              <ol>
+                <li>Open <strong>Data Sources</strong> in the sidebar. Each tile is a registered plugin.</li>
+                <li>Click a plugin tile to see its subscriptions, then click <strong>+ Create New Subscription</strong>.</li>
+                <li>Fill in the required fields (like connection details or URLs) and save.</li>
+              </ol>
+
+              <h3>How to create your own plugin</h3>
+              <ol>
+                <li>Open <strong>Developer Lab</strong> in the sidebar.</li>
+                <li>Below the code editor you'll find the <strong>Plugin Development Guide</strong> —
+                    a complete walkthrough for building a plugin. You can copy it and use it as a
+                    skill prompt for an AI coding assistant.</li>
+                <li>Write or paste your plugin code in the editor, give it a name, and optionally
+                    upload a <code>.png</code> icon (max 512&times;512).</li>
+                <li>Click <strong>Test</strong> to check for errors, then <strong>Save</strong> to
+                    deploy. Your plugin appears in Data Sources within seconds.</li>
+              </ol>
+            </article>
+            <aside id="dashboard-stats" class="dashboard-stats">
+              <div class="stats-card">
+                <div class="stats-row" data-stat="total-subs">
+                  <span class="stats-label">Total Subscriptions</span>
+                  <span class="stats-value" id="stat-total-subs">&mdash;</span>
+                </div>
+                <div class="stats-row" data-stat="total-plugins">
+                  <span class="stats-label">Total Plugins</span>
+                  <span class="stats-value" id="stat-total-plugins">&mdash;</span>
+                </div>
+                <div class="stats-row" data-stat="by-status">
+                  <span class="stats-label">By Status</span>
+                  <div class="status-bar" id="stat-status-bar"></div>
+                </div>
+                <div class="stats-row" data-stat="by-type">
+                  <span class="stats-label">By Type</span>
+                  <span class="stats-value" id="stat-by-type">&mdash;</span>
+                </div>
+                <div class="stats-row stats-row-link" data-stat="last-error">
+                  <span class="stats-label">Last Error</span>
+                  <span class="stats-value" id="stat-last-error">&mdash;</span>
+                </div>
+                <div class="stats-row" data-stat="activity-24h">
+                  <span class="stats-label">24h Activity</span>
+                  <span class="stats-value" id="stat-activity">&mdash;</span>
+                </div>
+                <div class="stats-row" data-stat="health">
+                  <span class="stats-label">Health</span>
+                  <span class="stats-value stats-health" id="stat-health">
+                    <span class="health-pill" data-sys="db"><span class="health-dot"></span>Database</span>
+                    <span class="health-pill" data-sys="redis"><span class="health-dot"></span>Redis</span>
+                    <span class="health-pill" data-sys="registry"><span class="health-dot"></span>Plugin Registry</span>
+                  </span>
+                </div>
+                <div class="stats-error" id="stats-error" style="display: none;">
+                  <span>Could not load stats.</span>
+                  <a href="#" id="stats-reload">Reload</a>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </section>
+        <section id="view-data-sources" class="view" style="display: none;">
+          <h2>Data Sources</h2>
+          <div id="plugin-grid" class="plugin-grid"></div>
+        </section>
+        <section id="view-subscriptions-all" class="view" style="display: none;">
+          <div class="sub-header">
+            <h2>Subscriptions</h2>
+          </div>
+          <div class="all-subs-table">
+            <div class="all-subs-row all-subs-header">
+              <span class="all-subs-col-name sortable" data-sort="name">Subscription</span>
+              <span class="all-subs-col-plugin sortable" data-sort="plugin_id">Plugin</span>
+              <span class="all-subs-col-status sortable" data-sort="status">Status</span>
+              <span class="all-subs-col-access sortable" data-sort="access_level">Access Level</span>
+              <span class="all-subs-col-activity sortable" data-sort="activity_24h">Activity</span>
+              <span class="all-subs-col-updated sortable" data-sort="last_updated">Updated</span>
+              <span class="all-subs-col-edit">Edit</span>
+              <span class="all-subs-col-toggle">Enable</span>
+              <span class="all-subs-col-update">Update</span>
+            </div>
+            <div id="all-subs-list" class="all-subs-body"></div>
+          </div>
+        </section>
+        <section id="view-subscriptions" class="view" style="display: none;">
+          <div class="sub-header">
+            <button class="btn btn-secondary" id="back-to-dashboard">&larr; Back</button>
+            <div class="plugin-title-group">
+              <img id="plugin-icon" class="plugin-icon-header" src="" alt="" />
+              <h2 id="plugin-title"></h2>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-primary" id="new-subscription-btn">+ Create New Subscription</button>
+              <button class="btn btn-warning" id="edit-plugin-btn">Edit Plugin</button>
+              <button class="btn btn-destructive" id="delete-plugin-btn" disabled>Delete Plugin</button>
+            </div>
+          </div>
+          <h3>Description</h3>
+          <div id="plugin-description" class="plugin-description"></div>
+          <h3>Subscriptions</h3>
+          <div id="subscription-list" class="subscription-list"></div>
+        </section>
+        <section id="view-activity" class="view" style="display: none;">
+          <div class="sub-header">
+            <h2>Recent Activity</h2>
+            <button class="btn btn-destructive" id="clear-log-btn">Clear All History</button>
+          </div>
+          <div class="activity-table">
+            <div class="activity-row activity-header">
+              <span class="col-view">View</span>
+              <span class="col-plugin sortable" data-sort="plugin_id">Plugin</span>
+              <span class="col-name sortable" data-sort="subscription_name">Subscription</span>
+              <span class="col-time sortable" data-sort="executed_at">Timestamp</span>
+              <span class="col-status sortable" data-sort="exit_code">Status</span>
+            </div>
+            <div id="activity-list" class="activity-body"></div>
+          </div>
+        </section>
+        <section id="view-event-detail" class="view" style="display: none;">
+          <div class="sub-header">
+            <button class="btn btn-secondary" id="event-detail-back">&larr; Back</button>
+            <h2>Event Details</h2>
+          </div>
+          <div class="event-detail" id="event-detail-body"></div>
+        </section>
+        <section id="view-devlab" class="view" style="display: none;">
+          <h2>Developer Lab</h2>
+          <p class="sub-row-meta">See the Plugin Development Guide below. Use it as a skill for your AI agent to build a plugin.</p>
+          <div id="devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
+          <div class="devlab-form">
+            <label>Plugin Name</label>
+            <input type="text" id="devlab-name" placeholder="myPlugin" maxlength="32" />
+            <label>Plugin Code</label>
+            <textarea id="devlab-code" rows="20" placeholder="Paste your plugin code here..."></textarea>
+            <label>Icon (optional, .png, max 512x512)</label>
+            <input type="file" id="devlab-icon" accept="image/png" />
+            <div class="devlab-buttons">
+              <button class="btn btn-primary" id="devlab-test-btn">Test</button>
+              <button class="btn btn-primary" id="devlab-save-btn">Save</button>
+            </div>
+            <div id="devlab-result" class="devlab-result"></div>
+          </div>
+          <hr />
+          <div class="devlab-guide">
+            <div class="devlab-guide-header">
+              <button class="btn btn-secondary" id="devlab-guide-copy">Copy</button>
+            </div>
+            <div id="devlab-guide-content" class="devlab-guide-content"></div>
+          </div>
+        </section>
+        <!-- Form modal -->
+        <div id="form-modal" class="modal" style="display: none;">
+          <div class="modal-content">
+            <h3 id="form-title">Create Subscription</h3>
+            <form id="sub-form">
+              <div id="form-fields"></div>
+              <div class="form-buttons">
+                <button type="button" class="btn btn-secondary" id="form-cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/static/marked.min.js"></script>
+  <script src="/static/app.js?v=38"></script>
+</body>
+</html>

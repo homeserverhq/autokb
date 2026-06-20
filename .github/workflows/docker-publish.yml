@@ -81,7 +81,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ./mcp
-          file: ./Dockerfile
+          file: ./mcp/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository }}/autokb-mcp:${{ github.ref_name }}

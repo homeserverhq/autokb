@@ -1,11 +1,22 @@
 import os
 import sys
 from contextvars import ContextVar
-from typing import Any, Optional, Literal
+from typing import Annotated, Any, Optional, Literal
 
+from croniter import croniter
 from fastmcp import FastMCP, Context
 from pydantic import BaseModel
+from pydantic.functional_validators import AfterValidator
 from toon_mcp import json_to_toon
+
+
+def _validate_cron_expr(v: Optional[str]) -> Optional[str]:
+    if v is not None and not croniter.is_valid(v):
+        raise ValueError(f"Invalid cron expression: {v}")
+    return v
+
+
+CronExpr = Annotated[Optional[str], AfterValidator(_validate_cron_expr)]
 
 from .client import AutoKBClient
 
@@ -61,7 +72,7 @@ class CreateSubscriptionParam(BaseModel):
     plugin_id: str
     name: str
     config: dict = {}
-    cron: Optional[str] = None
+    cron: CronExpr = None
     access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None
     description: Optional[str] = None
 
@@ -69,7 +80,7 @@ class CreateSubscriptionParam(BaseModel):
 class EditSubscriptionParam(BaseModel):
     sub_id: str
     config: dict = {}
-    cron: Optional[str] = None
+    cron: CronExpr = None
     access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None
 
 
@@ -105,7 +116,7 @@ class GetPluginSchemaParam(BaseModel):
 class CreateBibleSubscriptionParam(BaseModel):
     name: str
     version: str = "eng_kjv"
-    cron: Optional[str] = "0 0 1 1 *"
+    cron: CronExpr = "0 0 1 1 *"
     access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None
 
 
@@ -115,7 +126,7 @@ class CreateYouTubeSubscriptionParam(BaseModel):
     language: str = "en"
     api_key: Optional[str] = None
     max_videos: int = 0
-    cron: Optional[str] = "0 0 * * 0"
+    cron: CronExpr = "0 0 * * 0"
     access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None
 
 
@@ -127,7 +138,7 @@ class CreateIMAPSubscriptionParam(BaseModel):
     folder: str = "INBOX"
     user: Optional[str] = None
     password: Optional[str] = None
-    cron: Optional[str] = None
+    cron: CronExpr = None
     access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None
 
 
@@ -136,7 +147,7 @@ class CreateCrawl4AISubscriptionParam(BaseModel):
     url: str
     max_depth: int = 10
     max_pages: int = 0
-    cron: Optional[str] = "0 0 * * 0"
+    cron: CronExpr = "0 0 * * 0"
     access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None
 
 
@@ -165,7 +176,7 @@ async def create_subscription(
         plugin_id: Plugin ID to create a subscription for.
         name: Subscription name.
         config: Plugin configuration as a JSON object.
-        cron: Cron expression for scheduled execution.
+        cron: Cron expression for scheduled execution (e.g. "0 0 * * *").
         access_level: public or private.
         description: Subscription description.
     """
@@ -199,7 +210,7 @@ async def edit_subscription(
     Args:
         sub_id: Subscription ID to edit.
         config: Plugin configuration as a JSON object.
-        cron: Cron expression for scheduled execution.
+        cron: Cron expression for scheduled execution (e.g. "0 0 * * *").
         access_level: public or private.
     """
     if access_level:
@@ -385,7 +396,7 @@ async def create_bible_subscription(
     Args:
         name: Subscription name (e.g. "KJV Bible Download").
         version: Bible version code (e.g. "eng_kjv", "BSB", "AAB"). Use get_bible_versions tool to see all available versions.
-        cron: Cron expression. Bible data rarely changes — yearly recommended (default "0 0 1 1 *").
+        cron: Cron expression for scheduled execution (e.g. "0 0 1 1 *").
         access_level: public or private.
     """
     if access_level:
@@ -423,7 +434,7 @@ async def create_youtube_subscription(
         language: Transcript language code (e.g. "en", "es", "fr").
         api_key: YouTube Data API v3 key (optional, enables metadata and faster enumeration).
         max_videos: Max recent videos to process (0 = all videos).
-        cron: Cron expression. Weekly recommended to pick up new uploads (default "0 0 * * 0").
+        cron: Cron expression for scheduled execution (e.g. "0 0 * * 0").
         access_level: public or private.
     """
     if access_level:
@@ -473,7 +484,7 @@ async def create_imap_subscription(
         folder: IMAP folder to watch (default "INBOX").
         user: IMAP username or email address.
         password: IMAP password.
-        cron: Cron expression for scheduled execution.
+        cron: Cron expression for scheduled execution (e.g. "0 0 * * *").
         access_level: public or private.
     """
     if access_level:
@@ -519,7 +530,7 @@ async def create_crawl4ai_subscription(
         url: Base URL of the website to crawl (e.g. https://example.com).
         max_depth: Crawl depth beyond the start page (0 = no limit, default 10).
         max_pages: Maximum pages to crawl (0 = unlimited).
-        cron: Cron expression. Weekly recommended to pick up content changes (default "0 0 * * 0").
+        cron: Cron expression for scheduled execution (e.g. "0 0 * * 0").
         access_level: public or private.
     """
     if access_level:

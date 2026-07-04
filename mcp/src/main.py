@@ -155,7 +155,7 @@ async def create_subscription(
     name: str,
     config: dict = {},
     cron: Optional[str] = None,
-    access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None,
+    access_level: Optional[Literal["public", "private"]] = None,
     description: Optional[str] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
@@ -166,9 +166,11 @@ async def create_subscription(
         name: Subscription name.
         config: Plugin configuration as a JSON object.
         cron: Cron expression for scheduled execution.
-        access_level: Access level: PRIVATE or PUBLIC.
+        access_level: public or private.
         description: Subscription description.
     """
+    if access_level:
+        access_level = access_level.upper()
     params = CreateSubscriptionParam(
         plugin_id=plugin_id, name=name, config=config,
         cron=cron, access_level=access_level, description=description,
@@ -189,7 +191,7 @@ async def edit_subscription(
     sub_id: str,
     config: dict = {},
     cron: Optional[str] = None,
-    access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None,
+    access_level: Optional[Literal["public", "private"]] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Update configuration for an existing subscription. Name cannot be changed.
@@ -198,8 +200,10 @@ async def edit_subscription(
         sub_id: Subscription ID to edit.
         config: Plugin configuration as a JSON object.
         cron: Cron expression for scheduled execution.
-        access_level: Access level: PRIVATE or PUBLIC.
+        access_level: public or private.
     """
+    if access_level:
+        access_level = access_level.upper()
     params = EditSubscriptionParam(
         sub_id=sub_id, config=config, cron=cron, access_level=access_level,
     )
@@ -372,7 +376,7 @@ async def create_bible_subscription(
     name: str,
     version: str = "eng_kjv",
     cron: Optional[str] = "0 0 1 1 *",
-    access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None,
+    access_level: Optional[Literal["public", "private"]] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Create a Bible download subscription.
@@ -381,8 +385,10 @@ async def create_bible_subscription(
         name: Subscription name (e.g. "KJV Bible Download").
         version: Bible version code (e.g. "eng_kjv", "BSB", "AAB"). Use get_bible_versions tool to see all available versions.
         cron: Cron expression. Bible data rarely changes — yearly recommended (default "0 0 1 1 *").
-        access_level: Access level: PRIVATE or PUBLIC.
+        access_level: public or private.
     """
+    if access_level:
+        access_level = access_level.upper()
     params = CreateBibleSubscriptionParam(
         name=name, version=version, cron=cron, access_level=access_level,
     )
@@ -405,7 +411,7 @@ async def create_youtube_subscription(
     api_key: Optional[str] = None,
     max_videos: int = 0,
     cron: Optional[str] = "0 0 * * 0",
-    access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None,
+    access_level: Optional[Literal["public", "private"]] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Create a YouTube channel transcript subscription.
@@ -417,8 +423,10 @@ async def create_youtube_subscription(
         api_key: YouTube Data API v3 key (optional, enables metadata and faster enumeration).
         max_videos: Max recent videos to process (0 = all videos).
         cron: Cron expression. Weekly recommended to pick up new uploads (default "0 0 * * 0").
-        access_level: Access level: PRIVATE or PUBLIC.
+        access_level: public or private.
     """
+    if access_level:
+        access_level = access_level.upper()
     params = CreateYouTubeSubscriptionParam(
         name=name, channel_id=channel_id, language=language,
         api_key=api_key, max_videos=max_videos, cron=cron,
@@ -451,7 +459,7 @@ async def create_imap_subscription(
     user: Optional[str] = None,
     password: Optional[str] = None,
     cron: Optional[str] = None,
-    access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None,
+    access_level: Optional[Literal["public", "private"]] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Create an IMAP email folder watch subscription.
@@ -465,8 +473,10 @@ async def create_imap_subscription(
         user: IMAP username or email address.
         password: IMAP password.
         cron: Cron expression for scheduled execution.
-        access_level: Access level: PRIVATE or PUBLIC.
+        access_level: public or private.
     """
+    if access_level:
+        access_level = access_level.upper()
     params = CreateIMAPSubscriptionParam(
         name=name, host=host, port=port, use_ssl=use_ssl,
         folder=folder, user=user, password=password,
@@ -498,7 +508,7 @@ async def create_crawl4ai_subscription(
     max_depth: int = 10,
     max_pages: int = 0,
     cron: Optional[str] = "0 0 * * 0",
-    access_level: Optional[Literal["PRIVATE", "PUBLIC"]] = None,
+    access_level: Optional[Literal["public", "private"]] = None,
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Create a website crawl subscription using Crawl4AI.
@@ -509,8 +519,10 @@ async def create_crawl4ai_subscription(
         max_depth: Crawl depth beyond the start page (0 = no limit, default 10).
         max_pages: Maximum pages to crawl (0 = unlimited).
         cron: Cron expression. Weekly recommended to pick up content changes (default "0 0 * * 0").
-        access_level: Access level: PRIVATE or PUBLIC.
+        access_level: public or private.
     """
+    if access_level:
+        access_level = access_level.upper()
     params = CreateCrawl4AISubscriptionParam(
         name=name, url=url, max_depth=max_depth,
         max_pages=max_pages, cron=cron, access_level=access_level,

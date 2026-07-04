@@ -253,15 +253,16 @@ async def trigger_manual_update(
 @mcp.tool(tags={'write', 'subscriptions', 'autokb'})
 async def set_subscription_status(
     sub_id: str,
-    status: Literal["ENABLED", "DISABLED"],
+    status: Literal["enabled", "disabled"],
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Enable or disable a subscription. Disabling will prevent execution.
 
     Args:
         sub_id: Subscription ID.
-        status: New status: ENABLED or DISABLED.
+        status: enabled or disabled.
     """
+    status = status.upper()
     params = SetSubscriptionStatusParam(sub_id=sub_id, status=status)
     return await get_client().set_subscription_status(
         sub_id=params.sub_id,

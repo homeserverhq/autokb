@@ -5,6 +5,7 @@ from typing import Annotated, Any, Optional, Literal
 
 from croniter import croniter
 from fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel
 from pydantic.functional_validators import AfterValidator
 from toon_mcp import json_to_toon
@@ -160,7 +161,9 @@ class GetBibleVersionsParam(BaseModel):
 # =============================================================================
 
 
-@mcp.tool(tags={'write', 'subscriptions', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Create Subscription', readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+)
 async def create_subscription(
     plugin_id: str,
     name: str,
@@ -197,7 +200,9 @@ async def create_subscription(
     )
 
 
-@mcp.tool(tags={'write', 'subscriptions', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Edit Subscription', readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def edit_subscription(
     sub_id: str,
     config: dict = {},
@@ -227,7 +232,9 @@ async def edit_subscription(
     )
 
 
-@mcp.tool(tags={'write', 'subscriptions', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Delete Subscription', readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
+)
 async def delete_subscription(
     sub_id: str,
     ctx: Context = None,
@@ -244,7 +251,9 @@ async def delete_subscription(
     )
 
 
-@mcp.tool(tags={'write', 'subscriptions', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Trigger Manual Update', readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+)
 async def trigger_manual_update(
     sub_id: str,
     ctx: Context = None,
@@ -261,7 +270,9 @@ async def trigger_manual_update(
     )
 
 
-@mcp.tool(tags={'write', 'subscriptions', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Set Subscription Status', readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def set_subscription_status(
     sub_id: str,
     status: Literal["enabled", "disabled"],
@@ -282,7 +293,9 @@ async def set_subscription_status(
     )
 
 
-@mcp.tool(tags={'read', 'subscriptions', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='List Subscriptions', readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def list_subscriptions(
     plugin_id: Optional[str] = None,
     ctx: Context = None,
@@ -300,7 +313,9 @@ async def list_subscriptions(
     return {"items": json_to_toon(raw)}
 
 
-@mcp.tool(tags={'read', 'subscriptions', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Get Subscription Status', readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def get_subscription_status(
     sub_id: str,
     ctx: Context = None,
@@ -322,7 +337,9 @@ async def get_subscription_status(
 # =============================================================================
 
 
-@mcp.tool(tags={'read', 'plugins', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='List Plugins', readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def list_plugins(
     ctx: Context = None,
 ) -> dict[str, Any]:
@@ -331,7 +348,9 @@ async def list_plugins(
     return {"items": json_to_toon(raw)}
 
 
-@mcp.tool(tags={'read', 'plugins', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Get Plugin Details', readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def get_plugin_details(
     plugin_id: str,
     ctx: Context = None,
@@ -348,7 +367,9 @@ async def get_plugin_details(
     )
 
 
-@mcp.tool(tags={'read', 'plugins', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Get Plugin Schema', readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def get_plugin_schema(
     plugin_id: str,
     ctx: Context = None,
@@ -370,7 +391,9 @@ async def get_plugin_schema(
 # =============================================================================
 
 
-@mcp.tool(tags={'read', 'health', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Get System Health', readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def get_system_health(
     ctx: Context = None,
 ) -> dict[str, Any]:
@@ -383,7 +406,9 @@ async def get_system_health(
 # =============================================================================
 
 
-@mcp.tool(tags={'write', 'bible', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Create Bible Subscription', readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+)
 async def create_bible_subscription(
     name: str,
     version: str = "eng_kjv",
@@ -415,7 +440,9 @@ async def create_bible_subscription(
     )
 
 
-@mcp.tool(tags={'write', 'youtube', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Create YouTube Subscription', readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+)
 async def create_youtube_subscription(
     name: str,
     channel_id: str,
@@ -461,7 +488,9 @@ async def create_youtube_subscription(
     )
 
 
-@mcp.tool(tags={'write', 'imap', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Create IMAP Subscription', readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+)
 async def create_imap_subscription(
     name: str,
     host: str,
@@ -513,7 +542,9 @@ async def create_imap_subscription(
     )
 
 
-@mcp.tool(tags={'write', 'crawl4ai', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Create Crawl4AI Subscription', readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+)
 async def create_crawl4ai_subscription(
     name: str,
     url: str,
@@ -555,7 +586,9 @@ async def create_crawl4ai_subscription(
     )
 
 
-@mcp.tool(tags={'read', 'bible', 'autokb'})
+@mcp.tool(
+    tags={'primary', 'autokb'}, annotations=ToolAnnotations(title='Get Bible Versions', readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+)
 async def get_bible_versions(
     language: Optional[str] = None,
     ctx: Context = None,

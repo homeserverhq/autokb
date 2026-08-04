@@ -98,8 +98,15 @@ class BaseSubscription(ABC):
                     os.remove(target_path)
             shutil.copytree(temp_file_path, target_path)
             shutil.rmtree(temp_file_path)
+            for root, dirs, files in os.walk(target_path):
+                for f in files:
+                    os.chmod(os.path.join(root, f), 0o400)
+                for d in dirs:
+                    os.chmod(os.path.join(root, d), 0o700)
+            os.chmod(target_path, 0o700)
         else:
             shutil.move(temp_file_path, target_path)
+            os.chmod(target_path, 0o400)
         return target_path
 
     def get_destination_path(self) -> str:

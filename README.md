@@ -1,9 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/autokb.png">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/akb_full_logo.png">
   <img alt="AutoKB Logo" src="assets/autokb.png" width="64" height="64">
 </picture>
-
-# AutoKB
 
 **Distributed, Event-Driven ETL Orchestration Engine**
 

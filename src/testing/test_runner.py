@@ -31,6 +31,21 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+# DKB-specific imports
+from utils.constants import (
+    OPERATION_FULL, OPERATION_DKB_ONLY,
+    STATE_ENABLED, STATE_ENQUEUED, STATE_ERROR, STATE_DISABLED,
+)
+from utils.database import (
+    AKBDatafile, DKBService, DKBDatastore,
+    DatabaseManager, DatastoreDatafile, DatastoreSubscription,
+    run_migrations,
+)
+from utils.dkb_service_base import BaseDKBService, compute_file_hash
+from utils.dkb_registry import DKBRegistry
+from utils.queue_utils import QueueManager, _encode_item, _decode_item, P_QUEUE_KEY, S_QUEUE_KEY
+from utils.misc_utils import uuid7
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -1541,6 +1556,625 @@ def test_dkb_only_recon() -> Tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# DKB unit test helpers and functions
+# ---------------------------------------------------------------------------
+
+DKB_DATABASE_URL = os.environ.get("DATABASE_URL",
+                                   "postgresql://autokb:autokb@autokb-db:5432/autokb")
+DKB_REDIS_URL = os.environ.get("REDIS_URL", "redis://autokb-redis:6379/0")
+DKB_TEST_OUTPUT = "/tmp/dkb_test_output"
+
+
+def _dkb_db():
+    return DatabaseManager(DKB_DATABASE_URL, component="test_dkb_runner")
+
+
+def _dkb_queue():
+    return QueueManager(DKB_REDIS_URL)
+
+
+_MOCK_REMOTE_ID = "remote-file-123"
+_MOCK_DATASTORE_ID = "remote-ds-abc"
+
+
+class _MockDKBService(BaseDKBService):
+    """Concrete DKB service for testing — records all calls."""
+    metadata = {"name": "MockDKB", "description": "Test DKB service", "icon": "mock.png"}
+
+    def __init__(self, datastore_row, db):
+        super().__init__(datastore_row, db)
+        self.calls = []
+
+    def add_datafile(self, path: str) -> str:
+        self.calls.append(("add_datafile", path, self.remote_datastore_id))
+        return _MOCK_REMOTE_ID
+
+    def update_datafile(self, remote_datafile_id: str, path: str) -> None:
+        self.calls.append(("update_datafile", remote_datafile_id, path))
+
+    def remove_datafile(self, remote_datafile_id: str) -> None:
+        self.calls.append(("remove_datafile", remote_datafile_id))
+
+    def add_datastore(self) -> str:
+        self.calls.append(("add_datastore",))
+        return _MOCK_DATASTORE_ID
+
+    def remove_datastore(self) -> None:
+        self.calls.append(("remove_datastore",))
+
+    def clear_datastore(self) -> None:
+        self.calls.append(("clear_datastore",))
+
+
+def _dkb_create_fixtures(db):
+    """Create a DKB service, datastore, and subscription for tests."""
+    with db.get_session() as s:
+        from utils.database import Subscription, PluginRegistryState
+        test_plugin = s.query(PluginRegistryState).filter(
+            PluginRegistryState.plugin_id == "test_plugin").first()
+        if not test_plugin:
+            s.add(PluginRegistryState(
+                plugin_id="test_plugin", schema_hash="abc123",
+                last_loaded=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc),
+            ))
+        sub = s.query(Subscription).filter(
+            Subscription.plugin_id == "test_plugin",
+            Subscription.name == "test_sub").first()
+        if not sub:
+            sub = Subscription(
+                id=str(uuid7()), plugin_id="test_plugin", name="test_sub",
+                config={}, status=STATE_ENABLED, access_level="PRIVATE",
+                sub_type="SCHEDULED", cron="0 0 * * *",
+            )
+            s.add(sub)
+            s.flush()
+        sub_id = sub.id
+    svc = db.upsert_dkb_service("TestService", "Test Description")
+    ds = db.create_datastore(svc.id, "TestDS", "https://example.com", "test-key", {})
+    db.link_datastore_subscriptions(ds.id, [sub_id], status=STATE_ENABLED)
+    return sub_id, ds
+
+
+def _dkb_api_delete(path):
+    import urllib.request, urllib.error
+    req = urllib.request.Request(f"http://localhost:80{path}", method="DELETE")
+    req.add_header("X-Api-Key", BACKEND_KEY)
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+
+
+def _write_output_file_test(name, content):
+    path = os.path.join("/output", "test_plugin", "test_sub", name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+    return path
+
+
+# ---- 1. Database CRUD tests ----
+
+def _dkb_test_svc_crud(db, sub, ds):
+    svc = db.upsert_dkb_service("MyService", "desc")
+    if not svc.id:
+        return False, "service id None"
+    fetched = db.get_dkb_service(svc.id)
+    if fetched.name != "MyService":
+        return False, f"expected MyService got {fetched.name}"
+    svc2 = db.upsert_dkb_service("MyService", "updated")
+    if svc2.id != svc.id:
+        return False, "upsert idempotency failed"
+    services = db.list_dkb_services()
+    if svc.id not in [s.id for s in services]:
+        return False, "service not in list"
+    with db.get_session() as s:
+        s.query(DKBService).filter(DKBService.id == svc.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_ds_crud(db, sub, ds):
+    svc = db.upsert_dkb_service("Svc", "")
+    ds2 = db.create_datastore(svc.id, "MyDS", "https://example.com/api", "secret_key", {"extra": "value"})
+    if not ds2.id:
+        return False, "ds id None"
+    fetched = db.get_datastore(ds2.id)
+    if fetched.name != "MyDS":
+        return False, f"expected MyDS got {fetched.name}"
+    if fetched.api_url != "https://example.com/api":
+        return False, "api_url mismatch"
+    if fetched.api_key == "secret_key":
+        return False, "api_key not encrypted"
+    decrypted = db.decrypt_datastore_api_key(fetched)
+    if decrypted != "secret_key":
+        return False, "decrypt failed"
+    updated = db.update_datastore(ds2.id, name="MyDS-Updated")
+    if updated.name != "MyDS-Updated":
+        return False, "update failed"
+    db.set_datastore_remote_id(ds2.id, "remote-xyz")
+    fetched2 = db.get_datastore(ds2.id)
+    if fetched2.remote_datastore_id != "remote-xyz":
+        return False, "remote_id not set"
+    with db.get_session() as s:
+        s.query(DKBDatastore).filter(DKBDatastore.id == ds2.id).delete()
+        s.query(DKBService).filter(DKBService.id == svc.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_link_crud(db, sub, ds):
+    svc = db.upsert_dkb_service("Svc", "")
+    ds2 = db.create_datastore(svc.id, "DS", "url", "key", {})
+    db.link_datastore_subscriptions(ds2.id, [sub], status="ENABLED")
+    links = db.list_datastore_subscriptions(ds2.id)
+    if len(links) != 1:
+        return False, f"expected 1 link got {len(links)}"
+    if links[0].subscription_id != sub:
+        return False, "sub_id mismatch"
+    if links[0].status != "ENABLED":
+        return False, "status mismatch"
+    subs_for = db.list_datastores_for_subscription(sub)
+    if not subs_for:
+        return False, "no datastores for sub"
+    db.set_datastore_subscription_status(ds2.id, sub, "ERROR", message="oops")
+    links2 = db.list_datastore_subscriptions(ds2.id)
+    if links2[0].status != "ERROR":
+        return False, "status not updated"
+    if links2[0].last_message != "oops":
+        return False, "message mismatch"
+    db.delete_datastore_subscription(ds2.id, sub)
+    links3 = db.list_datastore_subscriptions(ds2.id)
+    if len(links3) != 0:
+        return False, "link not deleted"
+    with db.get_session() as s:
+        s.query(DKBDatastore).filter(DKBDatastore.id == ds2.id).delete()
+        s.query(DKBService).filter(DKBService.id == svc.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_datafile_crud(db, sub, ds):
+    test_path = os.path.join(DKB_TEST_OUTPUT, "test_file.md")
+    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
+    with open(test_path, "w") as f:
+        f.write("# Hello\nWorld\n")
+    size = os.path.getsize(test_path)
+    mtime = os.path.getmtime(test_path)
+    h = compute_file_hash(test_path)
+    df = db.get_or_create_datafile(sub, test_path, size, mtime, h)
+    if not df.id:
+        return False, "df id None"
+    if df.path != test_path:
+        return False, "path mismatch"
+    df2 = db.get_or_create_datafile(sub, test_path, size, mtime, h)
+    if df2.id != df.id:
+        return False, "get_or_create not idempotent"
+    df3 = db.get_datafile_by_path(test_path)
+    if not df3:
+        return False, "lookup by path failed"
+    db.update_datafile_stats(df.id, 100, 1000.0, "newhash")
+    df4 = db.get_datafile(df.id)
+    if df4.size != 100:
+        return False, "size not updated"
+    files = db.list_datafiles_for_subscription(sub)
+    if df.id not in [f.id for f in files]:
+        return False, "df not in sub list"
+    db.delete_datafile(df.id)
+    df5 = db.get_datafile(df.id)
+    if df5 is not None:
+        return False, "df not deleted"
+    return True, "OK"
+
+
+def _dkb_test_ds_df_crud(db, sub, ds):
+    test_path = os.path.join(DKB_TEST_OUTPUT, "df_test.md")
+    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
+    with open(test_path, "w") as f:
+        f.write("data")
+    h = compute_file_hash(test_path)
+    df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
+                                   os.path.getmtime(test_path), h)
+    db.insert_datastore_datafile(ds.id, df.id, "remote-001", h)
+    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    if not ds_df:
+        return False, "ds_df not created"
+    if ds_df.remote_datafile_id != "remote-001":
+        return False, "remote_id mismatch"
+    db.update_datastore_datafile_hash(ds.id, df.id, "newhash456")
+    ds_df2 = db.get_datastore_datafile(ds.id, df.id)
+    if ds_df2.hash != "newhash456":
+        return False, "hash not updated"
+    items = db.list_datafiles_for_datastore(ds.id)
+    if len(items) != 1:
+        return False, f"expected 1 item got {len(items)}"
+    db.delete_datastore_datafile(ds.id, df.id)
+    ds_df3 = db.get_datastore_datafile(ds.id, df.id)
+    if ds_df3 is not None:
+        return False, "ds_df not deleted"
+    with db.get_session() as s:
+        s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+# ---- 2. Queue JSON tests ----
+
+def _dkb_test_queue_encoding():
+    import json
+    for op in (OPERATION_FULL, OPERATION_DKB_ONLY):
+        enc = _encode_item("sub-123", op)
+        dec = _decode_item(enc)
+        if dec["sub_id"] != "sub-123" or dec["operation"] != op:
+            return False, f"encode/decode failed for {op}"
+    return True, "OK"
+
+
+def _dkb_test_queue_roundtrip():
+    q = _dkb_queue()
+    test_key = "test_isolated_q_runner"
+    q.client.delete(test_key)
+    try:
+        q.client.lpush(test_key, _encode_item("sub-a", OPERATION_FULL))
+        q.client.lpush(test_key, _encode_item("sub-b", OPERATION_DKB_ONLY))
+        q.client.lpush(test_key, _encode_item("sub-a", OPERATION_DKB_ONLY))
+        items = q.client.lrange(test_key, 0, -1)
+        parsed = [_decode_item(i) for i in items]
+        sub_a_full = [p for p in parsed if p and p["sub_id"] == "sub-a" and p["operation"] == OPERATION_FULL]
+        if len(sub_a_full) != 1:
+            return False, f"expected 1 sub-a FULL got {len(sub_a_full)}"
+        sub_a_dkb = [p for p in parsed if p and p["sub_id"] == "sub-a" and p["operation"] == OPERATION_DKB_ONLY]
+        if len(sub_a_dkb) != 1:
+            return False, f"expected 1 sub-a DKB_ONLY got {len(sub_a_dkb)}"
+        keep = [i for i in items if _decode_item(i) and _decode_item(i)["sub_id"] != "sub-a"]
+        removed = len(items) - len(keep)
+        if removed != 2:
+            return False, f"expected 2 removed got {removed}"
+        sub_b_full = [p for p in [_decode_item(i) for i in keep] if p and p["sub_id"] == "sub-b" and p["operation"] == OPERATION_FULL]
+        if len(sub_b_full) != 0:
+            return False, "sub-b should be DKB_ONLY"
+        return True, "OK"
+    finally:
+        q.client.delete(test_key)
+
+
+# ---- 3. DKB registry test ----
+
+def _dkb_test_registry_load():
+    reg = DKBRegistry(dkbs_dir="/src/dkbservices", component="test_dkb_runner_reg")
+    reg.reload_all()
+    records = reg.list_records()
+    names = [r.service_name for r in records]
+    if "openWebUI" not in names:
+        return False, "openWebUI not in registry"
+    if "cognee" not in names:
+        return False, "cognee not in registry"
+    return True, "OK"
+
+
+# ---- 4. Service base class tests ----
+
+def _dkb_test_compute_hash():
+    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
+    test_path = os.path.join(DKB_TEST_OUTPUT, "hash_test.txt")
+    content = b"Hello World! " * 1000
+    with open(test_path, "wb") as f:
+        f.write(content)
+    import hashlib
+    h = compute_file_hash(test_path)
+    expected = hashlib.sha256(content).hexdigest()
+    if h != expected:
+        return False, "hash mismatch"
+    return True, "OK"
+
+
+def _dkb_test_base_add_datafile(db, sub, ds):
+    ds_row = db.get_datastore(ds.id)
+    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
+    svc = _MockDKBService(ds_row, db)
+    svc.remote_datastore_id = "mock-remote-id"
+    test_path = os.path.join(DKB_TEST_OUTPUT, "base_add.md")
+    with open(test_path, "w") as f:
+        f.write("test content")
+    svc.base_add_datafile(sub, test_path)
+    df = db.get_datafile_by_path(test_path)
+    if not df:
+        return False, "df not created via base_add_datafile"
+    if ("add_datafile", test_path, "mock-remote-id") not in svc.calls:
+        return False, "add_datafile not called"
+    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    if not ds_df:
+        return False, "ds_df not created"
+    with db.get_session() as s:
+        s.query(DatastoreDatafile).filter(
+            DatastoreDatafile.datastore_id == ds.id,
+            DatastoreDatafile.datafile_id == df.id).delete()
+        s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_base_update_datafile(db, sub, ds):
+    ds_row = db.get_datastore(ds.id)
+    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
+    svc = _MockDKBService(ds_row, db)
+    svc.remote_datastore_id = "mock-remote-id"
+    test_path = os.path.join(DKB_TEST_OUTPUT, "base_update.md")
+    with open(test_path, "w") as f:
+        f.write("original")
+    h = compute_file_hash(test_path)
+    df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
+                                   os.path.getmtime(test_path), h)
+    db.insert_datastore_datafile(ds.id, df.id, "remote-old", h)
+    new_hash = "newhash123"
+    svc.base_update_datafile(df.id, new_hash)
+    if ("update_datafile", "remote-old", test_path) not in svc.calls:
+        return False, "update_datafile not called"
+    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    if ds_df.hash != new_hash:
+        return False, "hash not updated"
+    with db.get_session() as s:
+        s.query(DatastoreDatafile).filter(
+            DatastoreDatafile.datastore_id == ds.id,
+            DatastoreDatafile.datafile_id == df.id).delete()
+        s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_base_remove_datafile(db, sub, ds):
+    ds_row = db.get_datastore(ds.id)
+    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
+    svc = _MockDKBService(ds_row, db)
+    svc.remote_datastore_id = "mock-remote-id"
+    test_path = os.path.join(DKB_TEST_OUTPUT, "base_remove.md")
+    with open(test_path, "w") as f:
+        f.write("remove me")
+    h = compute_file_hash(test_path)
+    df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
+                                   os.path.getmtime(test_path), h)
+    db.insert_datastore_datafile(ds.id, df.id, "remote-del", h)
+    svc.base_remove_datafile(df.id)
+    if ("remove_datafile", "remote-del") not in svc.calls:
+        return False, "remove_datafile not called"
+    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    if ds_df is not None:
+        return False, "ds_df not removed"
+    with db.get_session() as s:
+        s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_base_add_datastore(db, sub, ds):
+    ds_row = db.get_datastore(ds.id)
+    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
+    if ds_row.remote_datastore_id is not None:
+        return False, "expected no remote_id before add_datastore"
+    svc = _MockDKBService(ds_row, db)
+    svc.base_add_datastore()
+    if ("add_datastore",) not in svc.calls:
+        return False, "add_datastore not called"
+    refreshed = db.get_datastore(ds.id)
+    if refreshed.remote_datastore_id != _MOCK_DATASTORE_ID:
+        return False, "remote_datastore_id not set"
+    return True, "OK"
+
+
+# ---- 5. Recon engine tests ----
+
+def _dkb_test_recon_add(db, sub, ds):
+    from unittest.mock import MagicMock, patch
+    with patch("worker.dkb_recon._get_service") as mock_get:
+        from worker.dkb_recon import reconcile_subscription_datastores
+        mock_svc = MagicMock()
+        mock_svc.remote_datastore_id = "mock-remote"
+        mock_svc.name = "TestSvc"
+        mock_svc.base_add_datafile = MagicMock()
+        mock_svc.base_update_datafile = MagicMock()
+        mock_svc.base_remove_datafile = MagicMock()
+        mock_get.return_value = mock_svc
+        _write_output_file_test("article.md", "# Test\nContent here.")
+        sub_row = db.get_subscription(sub)
+        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
+        if not mock_svc.base_add_datafile.called:
+            return False, "base_add_datafile not called"
+    return True, "OK"
+
+
+def _dkb_test_recon_remove(db, sub, ds):
+    from unittest.mock import MagicMock, patch
+    test_path = os.path.join(DKB_TEST_OUTPUT, "test_plugin", "test_sub", "old.md")
+    os.makedirs(os.path.dirname(test_path), exist_ok=True)
+    with open(test_path, "w") as f:
+        f.write("old content")
+    h = compute_file_hash(test_path)
+    os.remove(test_path)
+    df = db.get_or_create_datafile(sub, test_path, 100, 1000.0, h)
+    db.insert_datastore_datafile(ds.id, df.id, "remote-old", h)
+    with patch("worker.dkb_recon._get_service") as mock_get:
+        from worker.dkb_recon import reconcile_subscription_datastores
+        mock_svc = MagicMock()
+        mock_svc.remote_datastore_id = "mock-remote"
+        mock_svc.name = "TestSvc"
+        mock_svc.base_add_datafile = MagicMock()
+        mock_svc.base_remove_datafile = MagicMock()
+        mock_get.return_value = mock_svc
+        sub_row = db.get_subscription(sub)
+        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
+        if not mock_svc.base_remove_datafile.called:
+            return False, "base_remove_datafile not called"
+    with db.get_session() as s:
+        s.query(DatastoreDatafile).filter(
+            DatastoreDatafile.datastore_id == ds.id,
+            DatastoreDatafile.datafile_id == df.id).delete()
+        s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_recon_skip_disabled(db, sub, ds):
+    from unittest.mock import MagicMock, patch
+    db.set_datastore_subscription_status(ds.id, sub, STATE_DISABLED)
+    _write_output_file_test("enabled_only.md", "should be skipped")
+    with patch("worker.dkb_recon._get_service") as mock_get:
+        from worker.dkb_recon import reconcile_subscription_datastores
+        mock_svc = MagicMock()
+        mock_get.return_value = mock_svc
+        sub_row = db.get_subscription(sub)
+        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
+        mock_svc.base_add_datafile.assert_not_called()
+        mock_svc.base_remove_datafile.assert_not_called()
+    # Re-enable for next test's cleanup
+    db.set_datastore_subscription_status(ds.id, sub, STATE_ENABLED)
+    return True, "OK"
+
+
+def _dkb_test_recon_error(db, sub, ds):
+    from unittest.mock import MagicMock, patch
+    ds_row = db.get_datastore(ds.id)
+    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
+    svc = _MockDKBService(ds_row, db)
+    svc.remote_datastore_id = "mock-remote"
+    svc.add_datafile = MagicMock(side_effect=RuntimeError("API failure"))
+    svc.add_datastore = MagicMock()
+    _write_output_file_test("error_test.md", "will fail")
+    with patch("worker.dkb_recon._get_service") as mock_get:
+        from worker.dkb_recon import reconcile_subscription_datastores
+        mock_get.return_value = svc
+        sub_row = db.get_subscription(sub)
+        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
+        links = db.list_datastore_subscriptions(ds.id)
+        if links[0].status != STATE_ENABLED:
+            return False, "link should stay ENABLED after per-file error"
+    with db.get_session() as s:
+        leaked_path = f"/output/test_plugin/test_sub/error_test.md"
+        df = s.query(AKBDatafile).filter(AKBDatafile.path == leaked_path).first()
+        if df:
+            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _run_dkb_unit_tests():
+    """Run all DKB unit tests inline, return (passed, total, results)."""
+    tests = [
+        ("DKB CRUD — service", lambda db, sub, ds: _dkb_test_svc_crud(db, sub, ds)),
+        ("DKB CRUD — datastore", lambda db, sub, ds: _dkb_test_ds_crud(db, sub, ds)),
+        ("DKB CRUD — subscription link", lambda db, sub, ds: _dkb_test_link_crud(db, sub, ds)),
+        ("DKB CRUD — datafile", lambda db, sub, ds: _dkb_test_datafile_crud(db, sub, ds)),
+        ("DKB CRUD — datastore datafile", lambda db, sub, ds: _dkb_test_ds_df_crud(db, sub, ds)),
+        ("DKB Queue — encoding", None),
+        ("DKB Queue — roundtrip", None),
+        ("DKB Registry — load", None),
+        ("DKB Service — compute hash", None),
+        ("DKB Service — base_add_datafile", lambda db, sub, ds: _dkb_test_base_add_datafile(db, sub, ds)),
+        ("DKB Service — base_update_datafile", lambda db, sub, ds: _dkb_test_base_update_datafile(db, sub, ds)),
+        ("DKB Service — base_remove_datafile", lambda db, sub, ds: _dkb_test_base_remove_datafile(db, sub, ds)),
+        ("DKB Service — base_add_datastore", lambda db, sub, ds: _dkb_test_base_add_datastore(db, sub, ds)),
+        ("DKB Recon — adds new file", lambda db, sub, ds: _dkb_test_recon_add(db, sub, ds)),
+        ("DKB Recon — removes deleted file", lambda db, sub, ds: _dkb_test_recon_remove(db, sub, ds)),
+        ("DKB Recon — skips disabled DS", lambda db, sub, ds: _dkb_test_recon_skip_disabled(db, sub, ds)),
+        ("DKB Recon — error on failure", lambda db, sub, ds: _dkb_test_recon_error(db, sub, ds)),
+    ]
+
+    results = []
+    db = _dkb_db()
+    queue = _dkb_queue()
+    try:
+        run_migrations(DKB_DATABASE_URL)
+        for key in (P_QUEUE_KEY, S_QUEUE_KEY):
+            while queue.client.llen(key):
+                queue.client.rpop(key)
+
+        for name, fn in tests:
+            try:
+                if fn is None:
+                    ok, msg = _dkb_test_queue_encoding() if "encoding" in name else \
+                              _dkb_test_queue_roundtrip() if "roundtrip" in name else \
+                              _dkb_test_registry_load() if "Registry" in name else \
+                              (_dkb_test_compute_hash(), "OK")
+                else:
+                    # Create fresh fixtures per test
+                    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
+                    sub_id, ds = _dkb_create_fixtures(db)
+                    try:
+                        ok, msg = fn(db, sub_id, ds)
+                    finally:
+                        # Cleanup per-test fixtures
+                        _dkb_api_delete(f"/api/dkb_datastores/{ds.id}")
+                        with db.get_session() as s:
+                            s.query(DKBService).filter(
+                                DKBService.name == "TestService").delete()
+                    if os.path.isdir(DKB_TEST_OUTPUT):
+                        shutil.rmtree(DKB_TEST_OUTPUT)
+                    output_sub_dir = os.path.join("/output", "test_plugin", "test_sub")
+                    if os.path.isdir(output_sub_dir):
+                        shutil.rmtree(output_sub_dir)
+            except Exception as exc:
+                ok = False
+                msg = f"EXCEPTION: {exc!r}"
+            results.append((name, ok, msg))
+            status = "✅" if ok else "❌"
+            _log(f"  {status} DKB Unit — {name}: {msg}")
+    finally:
+        db.dispose()
+
+    passed = sum(1 for _, ok, _ in results if ok)
+    total = len(results)
+
+    # --- Leak check: runs AFTER all unit tests and their tearDowns ---
+    leaked: list[str] = []
+    db2 = _dkb_db()
+    try:
+        with db2.get_session() as s:
+            svc_names = ("TestService", "MyService", "Svc")
+            ds_names = ("TestDS", "MyDS", "MyDS-Updated", "DS")
+            leaked_svcs = s.query(DKBService).filter(
+                DKBService.name.in_(svc_names)).all()
+            for svc in leaked_svcs:
+                leaked.append(f"DKBService(id={svc.id[:8]}, name={svc.name!r})")
+            svc_ids = [svc.id for svc in leaked_svcs]
+            leaked_dss = s.query(DKBDatastore).filter(
+                DKBDatastore.name.in_(ds_names)).all()
+            for ds in leaked_dss:
+                leaked.append(f"DKBDatastore(id={ds.id[:8]}, name={ds.name!r})")
+            ds_ids = [ds.id for ds in leaked_dss]
+            leaked_files = s.query(AKBDatafile).filter(
+                AKBDatafile.path.like("/tmp/dkb_test_output%") |
+                AKBDatafile.path.like("/output/test_plugin/test_sub%")
+            ).all()
+            for f in leaked_files:
+                leaked.append(f"AKBDatafile(id={f.id[:8]}, path={f.path!r})")
+            file_ids = [f.id for f in leaked_files]
+            if ds_ids:
+                s.query(DatastoreDatafile).filter(
+                    DatastoreDatafile.datastore_id.in_(ds_ids)).delete(synchronize_session=False)
+                s.query(DatastoreSubscription).filter(
+                    DatastoreSubscription.datastore_id.in_(ds_ids)).delete(synchronize_session=False)
+                s.query(DKBDatastore).filter(
+                    DKBDatastore.id.in_(ds_ids)).delete(synchronize_session=False)
+            if file_ids:
+                s.query(DatastoreDatafile).filter(
+                    DatastoreDatafile.datafile_id.in_(file_ids)).delete(synchronize_session=False)
+                s.query(AKBDatafile).filter(
+                    AKBDatafile.id.in_(file_ids)).delete(synchronize_session=False)
+            if svc_ids:
+                s.query(DKBService).filter(
+                    DKBService.id.in_(svc_ids)).delete(synchronize_session=False)
+    finally:
+        db2.dispose()
+
+    if leaked:
+        _log(f"\n[LEAK] Found {len(leaked)} leftover DKB test artifact(s):")
+        for l in leaked:
+            _log(f"  [LEAK] {l}")
+        _log("[LEAK] Artifacts have been cleaned up.")
+        # The leak check is a failure — append it
+        results.append(("LEAK CHECK", False, f"{len(leaked)} artifact(s) leaked"))
+    else:
+        _log("[LEAK] No leftover artifacts — all tests cleaned up properly.")
+        results.append(("LEAK CHECK", True, "clean"))
+
+    total += 1
+    _passed = sum(1 for _, ok, _ in results if ok)
+    return _passed, total, results
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1742,21 +2376,14 @@ def main() -> int:
     if passed != total:
         return 1
 
-    # Run DKB unit tests
-    _log("\n=== Running DKB unit tests (test_dkb.py) ===")
-    import subprocess
-    result = subprocess.run(
-        [sys.executable, "/src/testing/test_dkb.py", "confirm"],
-        capture_output=True, text=True, timeout=120,
-    )
-    # Print output only on failure (keep the summary clean)
-    if result.returncode != 0:
-        _log(f"DKB unit tests FAILED (exit={result.returncode})")
-        for line in result.stdout.splitlines():
-            if "FAIL" in line or "ERROR" in line:
-                _log(f"  {line}")
+    # Run DKB unit tests (inline)
+    _log("\n=== Running DKB unit tests ===")
+    dkb_passed, dkb_total, dkb_results = _run_dkb_unit_tests()
+    if dkb_passed != dkb_total:
+        _log(f"DKB unit tests: {dkb_passed}/{dkb_total} passed")
+        results.extend(dkb_results)
         return 1
-    _log("DKB unit tests OK")
+    _log(f"DKB unit tests: {dkb_passed}/{dkb_total} passed ✓")
     return 0
 
 

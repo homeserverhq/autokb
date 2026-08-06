@@ -39,6 +39,7 @@ from utils.constants import (
 from utils.database import (
     AKBDatafile, DKBService, DKBDatastore,
     DatabaseManager, DatastoreDatafile, DatastoreSubscription,
+    EventLog, PluginRegistryState, Subscription,
     run_migrations,
 )
 from utils.dkb_service_base import BaseDKBService, compute_file_hash
@@ -158,6 +159,19 @@ def api_delete(path: str) -> Any:
     r = requests.delete(f"{MANAGER_URL}{path}", headers=_api_headers(), timeout=30)
     r.raise_for_status()
     return r.json() if r.content else None
+
+
+def _delete_sub(sub_id: str) -> None:
+    """Delete a subscription via the normal API. 404 is fine (already gone)."""
+    try:
+        r = requests.delete(
+            f"{MANAGER_URL}/api/subscriptions/{sub_id}",
+            headers=_api_headers(), timeout=10,
+        )
+        if r.status_code not in (200, 204, 404):
+            _log(f"warning: DELETE subscription {sub_id} returned {r.status_code}: {r.text[:120]}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"warning: failed to delete subscription {sub_id}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -307,15 +321,18 @@ def _rm_output_dir(sub_name: str):
 def test_happy_path() -> Tuple[bool, str]:
     name = _unique("happy")
     sub = create_sub("happyPathPlugin", name, {"title": "Hello"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=30)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
-    # Check EventLog
-    ev = wait_for_event(sub["id"], timeout=15)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "success (exit_code=0, status=ENABLED)"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=30)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
+        # Check EventLog
+        ev = wait_for_event(sub["id"], timeout=15)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "success (exit_code=0, status=ENABLED)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_event_happy() -> Tuple[bool, str]:
@@ -324,16 +341,19 @@ def test_event_happy() -> Tuple[bool, str]:
     # EVENT_BASED plugins need to be triggered via monitor. The manager's
     # monitor loop runs every ~2s; we give it a few iterations to fire.
     # Wait for status to flip from ENABLED to ENQUEUED then back.
-    deadline = time.time() + 30
-    triggered = False
-    while time.time() < deadline:
-        cur = get_sub(sub["id"])
-        if cur.get("status") in ("ENQUEUED", "IN_PROGRESS"):
-            triggered = True
-        if triggered and cur.get("status") in ("ENABLED", "ERROR"):
-            return cur["status"] == "ENABLED", f"final status={cur['status']}"
-        time.sleep(0.5)
-    return False, "monitor never triggered getData"
+    try:
+        deadline = time.time() + 30
+        triggered = False
+        while time.time() < deadline:
+            cur = get_sub(sub["id"])
+            if cur.get("status") in ("ENQUEUED", "IN_PROGRESS"):
+                triggered = True
+            if triggered and cur.get("status") in ("ENABLED", "ERROR"):
+                return cur["status"] == "ENABLED", f"final status={cur['status']}"
+            time.sleep(0.5)
+        return False, "monitor never triggered getData"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_event_often() -> Tuple[bool, str]:
@@ -344,21 +364,24 @@ def test_event_often() -> Tuple[bool, str]:
     # monitor call (self._last_fire is None → return True immediately),
     # so the subscription should transition to ENQUEUED/IN_PROGRESS
     # within a few seconds.
-    deadline = time.time() + 20
-    triggered = False
-    while time.time() < deadline:
-        cur = get_sub(sub["id"])
-        if cur.get("status") in ("ENQUEUED", "IN_PROGRESS"):
-            triggered = True
-        if triggered and cur.get("status") in ("ENABLED", "ERROR"):
-            if cur["status"] == "ENABLED":
-                ev = wait_for_event(sub["id"], timeout=10)
-                if ev.get("exit_code") == 0:
-                    return True, "fired immediately on enable (exit_code=0)"
-                return False, f"exit_code={ev.get('exit_code')}, expected 0"
-            return False, f"final status={cur['status']}, expected ENABLED"
-        time.sleep(0.5)
-    return False, "monitor never triggered within 20s"
+    try:
+        deadline = time.time() + 20
+        triggered = False
+        while time.time() < deadline:
+            cur = get_sub(sub["id"])
+            if cur.get("status") in ("ENQUEUED", "IN_PROGRESS"):
+                triggered = True
+            if triggered and cur.get("status") in ("ENABLED", "ERROR"):
+                if cur["status"] == "ENABLED":
+                    ev = wait_for_event(sub["id"], timeout=10)
+                    if ev.get("exit_code") == 0:
+                        return True, "fired immediately on enable (exit_code=0)"
+                    return False, f"exit_code={ev.get('exit_code')}, expected 0"
+                return False, f"final status={cur['status']}, expected ENABLED"
+            time.sleep(0.5)
+        return False, "monitor never triggered within 20s"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_cron_randomize() -> Tuple[bool, str]:
@@ -366,21 +389,27 @@ def test_cron_randomize() -> Tuple[bool, str]:
     import re
     name_s = _unique("cronSched")
     sub_s = create_sub("cronRandomizePlugin", name_s, {"label": "scheduled"}, cron="0 * * * *")
-    cron_s = sub_s.get("cron", "")
-    if cron_s == "0 * * * *":
-        return False, f"SCHEDULED cron was not randomized: {cron_s!r}"
-    if not re.match(r"^\d+ \* \* \* \*$", cron_s):
-        return False, f"SCHEDULED cron has unexpected format: {cron_s!r}"
+    try:
+        cron_s = sub_s.get("cron", "")
+        if cron_s == "0 * * * *":
+            return False, f"SCHEDULED cron was not randomized: {cron_s!r}"
+        if not re.match(r"^\d+ \* \* \* \*$", cron_s):
+            return False, f"SCHEDULED cron has unexpected format: {cron_s!r}"
 
-    name_e = _unique("cronEvent")
-    sub_e = create_sub("eventHappyPlugin", name_e, {"topic": "news"}, cron="0 0 * * *")
-    cron_e = sub_e.get("cron", "")
-    if cron_e == "0 0 * * *":
-        return False, f"EVENT_BASED cron was not randomized: {cron_e!r}"
-    if not re.match(r"^\d+ \d+ \* \* \*$", cron_e):
-        return False, f"EVENT_BASED cron has unexpected format: {cron_e!r}"
+        name_e = _unique("cronEvent")
+        sub_e = create_sub("eventHappyPlugin", name_e, {"topic": "news"}, cron="0 0 * * *")
+        try:
+            cron_e = sub_e.get("cron", "")
+            if cron_e == "0 0 * * *":
+                return False, f"EVENT_BASED cron was not randomized: {cron_e!r}"
+            if not re.match(r"^\d+ \d+ \* \* \*$", cron_e):
+                return False, f"EVENT_BASED cron has unexpected format: {cron_e!r}"
 
-    return True, f"SCHEDULED={cron_s!r}, EVENT_BASED={cron_e!r}"
+            return True, f"SCHEDULED={cron_s!r}, EVENT_BASED={cron_e!r}"
+        finally:
+            _delete_sub(sub_e["id"])
+    finally:
+        _delete_sub(sub_s["id"])
 
 
 def test_delete_subscription_and_plugin() -> Tuple[bool, str]:
@@ -433,57 +462,69 @@ def test_delete_subscription_and_plugin() -> Tuple[bool, str]:
 def test_no_heartbeat() -> Tuple[bool, str]:
     name = _unique("nohb")
     sub = create_sub("noHeartbeatPlugin", name, {"label": "x"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=30)
-    if final["status"] != "ERROR":
-        return False, f"expected ERROR, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 2:
-        return False, f"expected exit_code=2, got {ev['exit_code']}"
-    return True, "timeout (exit_code=2, status=ERROR)"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=30)
+        if final["status"] != "ERROR":
+            return False, f"expected ERROR, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 2:
+            return False, f"expected exit_code=2, got {ev['exit_code']}"
+        return True, "timeout (exit_code=2, status=ERROR)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_long_running_success() -> Tuple[bool, str]:
     name = _unique("lrs")
     sub = create_sub("longRunningSuccessPlugin", name, {"name": "long"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=45)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "long running success (exit_code=0)"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=45)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "long running success (exit_code=0)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_long_running_failure() -> Tuple[bool, str]:
     name = _unique("lrf")
     sub = create_sub("longRunningFailurePlugin", name, {"fail_at": 50}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=30)
-    if final["status"] != "ERROR":
-        return False, f"expected ERROR, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 1:
-        return False, f"expected exit_code=1, got {ev['exit_code']}"
-    if "RuntimeError" not in ev["exit_string"]:
-        return False, f"expected RuntimeError in exit_string, got {ev['exit_string']!r}"
-    return True, f"runtime error (exit_code=1, exit_string={ev['exit_string']!r})"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=30)
+        if final["status"] != "ERROR":
+            return False, f"expected ERROR, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 1:
+            return False, f"expected exit_code=1, got {ev['exit_code']}"
+        if "RuntimeError" not in ev["exit_string"]:
+            return False, f"expected RuntimeError in exit_string, got {ev['exit_string']!r}"
+        return True, f"runtime error (exit_code=1, exit_string={ev['exit_string']!r})"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_crash() -> Tuple[bool, str]:
     name = _unique("crash")
     sub = create_sub("crashPlugin", name, {"reason": "test"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=15)
-    if final["status"] != "ERROR":
-        return False, f"expected ERROR, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 1:
-        return False, f"expected exit_code=1, got {ev['exit_code']}"
-    if "Exception" not in ev["exit_string"] or "Something went wrong" not in ev["exit_string"]:
-        return False, f"unexpected exit_string: {ev['exit_string']!r}"
-    return True, f"crash (exit_code=1, exit_string={ev['exit_string']!r})"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=15)
+        if final["status"] != "ERROR":
+            return False, f"expected ERROR, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 1:
+            return False, f"expected exit_code=1, got {ev['exit_code']}"
+        if "Exception" not in ev["exit_string"] or "Something went wrong" not in ev["exit_string"]:
+            return False, f"unexpected exit_string: {ev['exit_string']!r}"
+        return True, f"crash (exit_code=1, exit_string={ev['exit_string']!r})"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_cancellation() -> Tuple[bool, str]:
@@ -494,25 +535,28 @@ def test_cancellation() -> Tuple[bool, str]:
     exit_code=0 + status=DISABLED → no EventLog entry."""
     name = _unique("cancel")
     sub = create_sub("cancellationPlugin", name, {"iterations": 200}, cron="0 * * * *")
-    _log(f"  cancel sub_id={sub['id']} status_at_create={sub['status']}")
-    trigger_sub(sub["id"])
-    _log(f"  triggered, polling for IN_PROGRESS")
     try:
-        wait_for_status(sub["id"], lambda s: s == "IN_PROGRESS", timeout=15)
-    except TimeoutError:
-        cur = get_sub(sub["id"])
-        _log(f"  IN_PROGRESS timeout. current_status={cur['status']} last_error={cur.get('last_error')}")
-        raise
-    _log(f"  got IN_PROGRESS, sleeping 0.5s then setting DISABLED")
-    time.sleep(0.5)
-    set_status(sub["id"], "DISABLED")
-    _log(f"  set DISABLED, waiting for status to remain DISABLED")
-    final = wait_for_status(sub["id"], lambda s: s == "DISABLED", timeout=15)
-    time.sleep(2.0)
-    rows = get_event_log(sub["id"])
-    if rows:
-        return False, f"expected no EventLog entry on cancellation, found {len(rows)}"
-    return True, "cancellation (no EventLog, status=DISABLED)"
+        _log(f"  cancel sub_id={sub['id']} status_at_create={sub['status']}")
+        trigger_sub(sub["id"])
+        _log(f"  triggered, polling for IN_PROGRESS")
+        try:
+            wait_for_status(sub["id"], lambda s: s == "IN_PROGRESS", timeout=15)
+        except TimeoutError:
+            cur = get_sub(sub["id"])
+            _log(f"  IN_PROGRESS timeout. current_status={cur['status']} last_error={cur.get('last_error')}")
+            raise
+        _log(f"  got IN_PROGRESS, sleeping 0.5s then setting DISABLED")
+        time.sleep(0.5)
+        set_status(sub["id"], "DISABLED")
+        _log(f"  set DISABLED, waiting for status to remain DISABLED")
+        final = wait_for_status(sub["id"], lambda s: s == "DISABLED", timeout=15)
+        time.sleep(2.0)
+        rows = get_event_log(sub["id"])
+        if rows:
+            return False, f"expected no EventLog entry on cancellation, found {len(rows)}"
+        return True, "cancellation (no EventLog, status=DISABLED)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 SCHEMA_BREAKING_V1_CODE = '''
@@ -663,6 +707,7 @@ def test_schema_breaking() -> Tuple[bool, str]:
     Self-restoring: always seeds the file with V1 first, and restores V1
     in a finally block so the next test run starts from a known state.
     """
+    sub = None
     try:
         # Step 1: Ensure the plugin file is V1 and the manager has loaded it.
         # (If a previous run left V2 on disk, this resets it.)
@@ -711,6 +756,8 @@ def test_schema_breaking() -> Tuple[bool, str]:
     finally:
         # Step 4: Always restore V1 so the next run starts from a known state.
         try:
+            if sub is not None:
+                _delete_sub(sub["id"])
             _write_plugin_file_directly("schemaBreakingPlugin", SCHEMA_BREAKING_V1_CODE)
             _wait_for_plugin_loaded("schemaBreakingPlugin", timeout=20)
         except Exception as exc:  # noqa: BLE001
@@ -721,59 +768,71 @@ def test_password() -> Tuple[bool, str]:
     name = _unique("pwd")
     api_key_value = "supersecret-key-123"
     sub = create_sub("passwordPlugin", name, {"apiKey": api_key_value}, cron="0 * * * *")
-    # Verify password is NOT in the GET response
-    cur = get_sub(sub["id"])
-    if "apiKey" in (cur.get("config") or {}):
-        return False, "password field leaked in GET response"
-    # Run it
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=20)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "password encrypted at rest, decrypted at exec, hidden from API"
+    try:
+        # Verify password is NOT in the GET response
+        cur = get_sub(sub["id"])
+        if "apiKey" in (cur.get("config") or {}):
+            return False, "password field leaked in GET response"
+        # Run it
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=20)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "password encrypted at rest, decrypted at exec, hidden from API"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_empty_output() -> Tuple[bool, str]:
     name = _unique("empty")
     sub = create_sub("emptyOutputPlugin", name, {"marker": "m"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "empty output (exit_code=0, status=ENABLED)"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "empty output (exit_code=0, status=ENABLED)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_large_output() -> Tuple[bool, str]:
     name = _unique("large")
     # Use a small number of files to keep this fast in the test env
     sub = create_sub("largeOutputPlugin", name, {"file_count": 5}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=60)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "large output (exit_code=0, status=ENABLED)"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=60)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "large output (exit_code=0, status=ENABLED)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_delayed_init() -> Tuple[bool, str]:
     name = _unique("delay")
     sub = create_sub("delayedInitPlugin", name, {"label": "x"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "delayed init (exit_code=0, status=ENABLED)"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "delayed init (exit_code=0, status=ENABLED)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_custom_route() -> Tuple[bool, str]:
@@ -790,11 +849,14 @@ def test_custom_route() -> Tuple[bool, str]:
     # Also test that the normal getData path works
     name = _unique("custom")
     sub = create_sub("customRoutePlugin", name, {"echo": "hi"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']}"
-    return True, "custom route mounted + accessible"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']}"
+        return True, "custom route mounted + accessible"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_invalid_name() -> Tuple[bool, str]:
@@ -815,11 +877,14 @@ def test_monitor_never_trigger() -> Tuple[bool, str]:
     # EVENT_BASED plugins with cron fallback will get triggered by the
     # scheduler when the cron is due. We just need to verify the system
     # is healthy and the subscription didn't crash.
-    time.sleep(3.0)
-    cur = get_sub(sub["id"])
-    if cur["status"] == "ERROR":
-        return False, f"unexpected ERROR: {cur.get('last_error')!r}"
-    return True, f"monitor always False, status={cur['status']}, no crash"
+    try:
+        time.sleep(3.0)
+        cur = get_sub(sub["id"])
+        if cur["status"] == "ERROR":
+            return False, f"unexpected ERROR: {cur.get('last_error')!r}"
+        return True, f"monitor always False, status={cur['status']}, no crash"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_monitor_error() -> Tuple[bool, str]:
@@ -827,15 +892,18 @@ def test_monitor_error() -> Tuple[bool, str]:
     # log + retry indefinitely without crashing.
     name = _unique("me")
     sub = create_sub("monitorErrorPlugin", name, {"label": "x"}, cron="0 0 * * *")
-    time.sleep(5.0)
-    cur = get_sub(sub["id"])
-    if cur["status"] == "ERROR":
-        return False, f"unexpected ERROR: {cur.get('last_error')!r}"
-    # Confirm the manager is still alive
-    h = api_get("/api/health")
-    if h.get("status") != "ok":
-        return False, f"health degraded: {h}"
-    return True, "monitor exception → retry loop, system still healthy"
+    try:
+        time.sleep(5.0)
+        cur = get_sub(sub["id"])
+        if cur["status"] == "ERROR":
+            return False, f"unexpected ERROR: {cur.get('last_error')!r}"
+        # Confirm the manager is still alive
+        h = api_get("/api/health")
+        if h.get("status") != "ok":
+            return False, f"health degraded: {h}"
+        return True, "monitor exception → retry loop, system still healthy"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_config_validation() -> Tuple[bool, str]:
@@ -848,35 +916,41 @@ def test_config_validation() -> Tuple[bool, str]:
         "secret": "hidden-value",
     }
     sub = create_sub("configValidationPlugin", name, cfg, cron="0 * * * *")
-    cur = get_sub(sub["id"])
-    if cur.get("status") == "ERROR":
-        return False, f"unexpected ERROR: {cur.get('last_error')!r}"
-    # Verify password field hidden
-    if "secret" in (cur.get("config") or {}):
-        return False, "password field leaked in GET response"
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "all field types validated + executed"
+    try:
+        cur = get_sub(sub["id"])
+        if cur.get("status") == "ERROR":
+            return False, f"unexpected ERROR: {cur.get('last_error')!r}"
+        # Verify password field hidden
+        if "secret" in (cur.get("config") or {}):
+            return False, "password field leaked in GET response"
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=15)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "all field types validated + executed"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_non_zero_exit() -> Tuple[bool, str]:
     name = _unique("nze")
     sub = create_sub("nonZeroExitPlugin", name, {"label": "x"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=15)
-    if final["status"] != "ERROR":
-        return False, f"expected ERROR, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 1:
-        return False, f"expected exit_code=1, got {ev['exit_code']}"
-    if "exit code 1" not in ev["exit_string"].lower():
-        return False, f"expected generic fallback, got {ev['exit_string']!r}"
-    return True, f"non-zero exit (exit_code=1, exit_string={ev['exit_string']!r})"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=15)
+        if final["status"] != "ERROR":
+            return False, f"expected ERROR, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 1:
+            return False, f"expected exit_code=1, got {ev['exit_code']}"
+        if "exit code 1" not in ev["exit_string"].lower():
+            return False, f"expected generic fallback, got {ev['exit_string']!r}"
+        return True, f"non-zero exit (exit_code=1, exit_string={ev['exit_string']!r})"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_zombie() -> Tuple[bool, str]:
@@ -888,36 +962,42 @@ def test_zombie() -> Tuple[bool, str]:
     entry with exit_code=2."""
     name = _unique("zombie")
     sub = create_sub("zombiePlugin", name, {"label": "x"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    wait_for_status(sub["id"], lambda s: s == "IN_PROGRESS", timeout=15)
-    time.sleep(0.5)
-    set_status(sub["id"], "DISABLED")
-    # The zombie keeps running. The plugin's progress_callback never
-    # calls the DB to detect DISABLED, so the only way to stop it is the
-    # watcher's DB status check on its next tick — which records the
-    # force-kill as an EventLog entry with exit_code=2.
-    ev = wait_for_event(sub["id"], timeout=30)
-    if ev["exit_code"] != 2:
-        return False, f"expected exit_code=2 (watcher force-kill), got {ev['exit_code']}"
-    final = get_sub(sub["id"])
-    if final["status"] != "DISABLED":
-        return False, f"expected DISABLED preserved, got {final['status']}"
-    return True, "zombie force-killed by watcher (exit_code=2), DISABLED preserved"
+    try:
+        trigger_sub(sub["id"])
+        wait_for_status(sub["id"], lambda s: s == "IN_PROGRESS", timeout=15)
+        time.sleep(0.5)
+        set_status(sub["id"], "DISABLED")
+        # The zombie keeps running. The plugin's progress_callback never
+        # calls the DB to detect DISABLED, so the only way to stop it is the
+        # watcher's DB status check on its next tick — which records the
+        # force-kill as an EventLog entry with exit_code=2.
+        ev = wait_for_event(sub["id"], timeout=30)
+        if ev["exit_code"] != 2:
+            return False, f"expected exit_code=2 (watcher force-kill), got {ev['exit_code']}"
+        final = get_sub(sub["id"])
+        if final["status"] != "DISABLED":
+            return False, f"expected DISABLED preserved, got {final['status']}"
+        return True, "zombie force-killed by watcher (exit_code=2), DISABLED preserved"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_move_to_dest_error() -> Tuple[bool, str]:
     name = _unique("mde")
     sub = create_sub("moveToDestErrorPlugin", name, {"label": "x"}, cron="0 * * * *")
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=15)
-    if final["status"] != "ERROR":
-        return False, f"expected ERROR, got {final['status']}"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 1:
-        return False, f"expected exit_code=1, got {ev['exit_code']}"
-    if "ValueError" not in ev["exit_string"]:
-        return False, f"expected ValueError in exit_string, got {ev['exit_string']!r}"
-    return True, f"ValueError caught (exit_code=1, exit_string={ev['exit_string']!r})"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ERROR", "ENABLED"), timeout=15)
+        if final["status"] != "ERROR":
+            return False, f"expected ERROR, got {final['status']}"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 1:
+            return False, f"expected exit_code=1, got {ev['exit_code']}"
+        if "ValueError" not in ev["exit_string"]:
+            return False, f"expected ValueError in exit_string, got {ev['exit_string']!r}"
+        return True, f"ValueError caught (exit_code=1, exit_string={ev['exit_string']!r})"
+    finally:
+        _delete_sub(sub["id"])
 
 
 def test_long_name_plugin() -> Tuple[bool, str]:
@@ -931,14 +1011,17 @@ def test_long_name_plugin() -> Tuple[bool, str]:
         {"label": "x"},
         cron="0 * * * *",
     )
-    trigger_sub(sub["id"])
-    final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=30)
-    if final["status"] != "ENABLED":
-        return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
-    ev = wait_for_event(sub["id"], timeout=10)
-    if ev["exit_code"] != 0:
-        return False, f"expected exit_code=0, got {ev['exit_code']}"
-    return True, "32-char name plugin loaded, sub created, run succeeded (exit_code=0)"
+    try:
+        trigger_sub(sub["id"])
+        final = wait_for_status(sub["id"], lambda s: s in ("ENABLED", "ERROR"), timeout=30)
+        if final["status"] != "ENABLED":
+            return False, f"expected ENABLED, got {final['status']} (last_error={final.get('last_error')!r})"
+        ev = wait_for_event(sub["id"], timeout=10)
+        if ev["exit_code"] != 0:
+            return False, f"expected exit_code=0, got {ev['exit_code']}"
+        return True, "32-char name plugin loaded, sub created, run succeeded (exit_code=0)"
+    finally:
+        _delete_sub(sub["id"])
 
 
 # ---------------------------------------------------------------------------
@@ -1092,6 +1175,7 @@ def test_edit_plugin_match() -> Tuple[bool, str]:
     """
     plugin = "editMatchPlugin"
     # Self-restoring: always leave V1 on disk so the next run is clean.
+    sub = None
     try:
         # Stage 1: seed V1 directly to disk (bypasses the dev_lab's edit
         # check so the test is independent of any prior hash stored in
@@ -1155,6 +1239,8 @@ def test_edit_plugin_match() -> Tuple[bool, str]:
     finally:
         # Restore V1 on disk so the next run starts from a known state.
         try:
+            if sub is not None:
+                _delete_sub(sub["id"])
             _write_plugin_file_directly(plugin, EDIT_MATCH_V1_CODE)
             _wait_for_plugin_loaded(plugin, timeout=20)
         except Exception as exc:  # noqa: BLE001
@@ -1173,6 +1259,7 @@ def test_edit_plugin_mismatch() -> Tuple[bool, str]:
     the output is still VERSION_1).
     """
     plugin = "editMatchPlugin"
+    sub = None
     try:
         # Stage 1: seed V1 directly to disk (same rationale as the match test).
         ok, msg = _write_plugin_file_directly(plugin, EDIT_MATCH_V1_CODE)
@@ -1240,6 +1327,8 @@ def test_edit_plugin_mismatch() -> Tuple[bool, str]:
         return True, "V3 (different schema) rejected; on-disk file + sub output unchanged"
     finally:
         try:
+            if sub is not None:
+                _delete_sub(sub["id"])
             _write_plugin_file_directly(plugin, EDIT_MATCH_V1_CODE)
             _wait_for_plugin_loaded(plugin, timeout=20)
         except Exception as exc:  # noqa: BLE001
@@ -1411,11 +1500,13 @@ def test_dkb_full_pipeline() -> Tuple[bool, str]:
     uid = str(time.time()).replace(".", "")[-8:]
     sub_name = f"e2e-full-{uid}"
     ds_name = f"e2e-full-ds-{uid}"
+    sub_id = None
+    ds_id = None
     try:
         sub = create_sub("testDKBWriterPlugin", sub_name, {}, cron="0 0 * * *")
+        sub_id = sub["id"]
     except Exception as exc:
         return False, f"DKB full: create_sub failed: {exc}"
-    sub_id = sub["id"]
 
     try:
         svcs = api_get("/api/dkb_services")
@@ -1438,44 +1529,53 @@ def test_dkb_full_pipeline() -> Tuple[bool, str]:
         except Exception: pass
         return False, f"DKB full: setup failed: {exc}"
 
-    # Place a manual file to verify recon picks it up
-    _write_output_file(sub_name, "manual.md", "Manually placed.\n")
-
-    # Trigger FULL
     try:
-        trigger_sub(sub_id)
-    except Exception as exc:
-        return False, f"DKB full: trigger failed: {exc}"
+        # Place a manual file to verify recon picks it up
+        _write_output_file(sub_name, "manual.md", "Manually placed.\n")
 
-    # Wait for datastore_subscription → ENABLED
-    deadline = time.time() + 120
-    last_status = None
-    while time.time() < deadline:
+        # Trigger FULL
         try:
-            ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
-            subs_detail = ds_det.get("subscriptions", [])
-            if subs_detail:
-                last_status = subs_detail[0].get("status", "")
-                if last_status == "ENABLED":
-                    break
+            trigger_sub(sub_id)
+        except Exception as exc:
+            return False, f"DKB full: trigger failed: {exc}"
+
+        # Wait for datastore_subscription → ENABLED
+        deadline = time.time() + 120
+        last_status = None
+        while time.time() < deadline:
+            try:
+                ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
+                subs_detail = ds_det.get("subscriptions", [])
+                if subs_detail:
+                    last_status = subs_detail[0].get("status", "")
+                    if last_status == "ENABLED":
+                        break
+            except Exception:
+                pass
+            time.sleep(2)
+        if last_status != "ENABLED":
+            return False, f"DKB full: ds_sub did not reach ENABLED (last={last_status})"
+
+        # Verify DKB service calls
+        calls = _read_dkb_calls()
+        add_files = [c for c in calls if c[0] == "add_datafile"]
+        found = " ".join(c[1] for c in add_files)
+        if "manual.md" not in found:
+            return False, f"DKB full: manual.md not added: {found[:200]}"
+        if "hello.md" not in found:
+            return False, f"DKB full: hello.md not added: {found[:200]}"
+        if "world.md" not in found:
+            return False, f"DKB full: world.md not added: {found[:200]}"
+
+        return True, f"DKB full pipeline OK ({len(add_files)} files added)"
+    finally:
+        try:
+            if ds_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/dkb_datastores/{ds_id}", headers=_api_headers(), timeout=10)
         except Exception:
             pass
-        time.sleep(2)
-    if last_status != "ENABLED":
-        return False, f"DKB full: ds_sub did not reach ENABLED (last={last_status})"
-
-    # Verify DKB service calls
-    calls = _read_dkb_calls()
-    add_files = [c for c in calls if c[0] == "add_datafile"]
-    found = " ".join(c[1] for c in add_files)
-    if "manual.md" not in found:
-        return False, f"DKB full: manual.md not added: {found[:200]}"
-    if "hello.md" not in found:
-        return False, f"DKB full: hello.md not added: {found[:200]}"
-    if "world.md" not in found:
-        return False, f"DKB full: world.md not added: {found[:200]}"
-
-    return True, f"DKB full pipeline OK ({len(add_files)} files added)"
+        if sub_id is not None:
+            _delete_sub(sub_id)
 
 
 def test_dkb_only_recon() -> Tuple[bool, str]:
@@ -1484,11 +1584,13 @@ def test_dkb_only_recon() -> Tuple[bool, str]:
     uid = str(time.time()).replace(".", "")[-8:]
     sub_name = f"e2e-dkbonly-{uid}"
     ds_name = f"e2e-dkbonly-ds-{uid}"
+    sub_id = None
+    ds_id = None
     try:
         sub = create_sub("testDKBWriterPlugin", sub_name, {}, cron="0 0 * * *")
+        sub_id = sub["id"]
     except Exception as exc:
         return False, f"DKB-only: create_sub failed: {exc}"
-    sub_id = sub["id"]
 
     try:
         svcs = api_get("/api/dkb_services")
@@ -1507,52 +1609,61 @@ def test_dkb_only_recon() -> Tuple[bool, str]:
         except Exception: pass
         return False, f"DKB-only: setup failed: {exc}"
 
-    # Place a file — plugin won't run so this is the only file
-    _write_output_file(sub_name, "only_file.md", "DKB-only test.\n")
-
-    # Snapshot sub heartbeat to verify upstream didn't run
-    sub_before = api_get(f"/api/subscriptions/{sub_id}")
-    hb_before = sub_before.get("last_heartbeat", "") or ""
-
-    # Trigger DKB_ONLY via datastore update
     try:
-        api_post(f"/api/dkb_datastores/{ds_id}/update", {})
-    except Exception as exc:
-        return False, f"DKB-only: trigger failed: {exc}"
+        # Place a file — plugin won't run so this is the only file
+        _write_output_file(sub_name, "only_file.md", "DKB-only test.\n")
 
-    # Wait for ds_sub → ENABLED
-    deadline = time.time() + 60
-    last_status = None
-    while time.time() < deadline:
+        # Snapshot sub heartbeat to verify upstream didn't run
+        sub_before = api_get(f"/api/subscriptions/{sub_id}")
+        hb_before = sub_before.get("last_heartbeat", "") or ""
+
+        # Trigger DKB_ONLY via datastore update
         try:
-            ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
-            subs_detail = ds_det.get("subscriptions", [])
-            if subs_detail:
-                last_status = subs_detail[0].get("status", "")
-                if last_status == "ENABLED":
-                    break
+            api_post(f"/api/dkb_datastores/{ds_id}/update", {})
+        except Exception as exc:
+            return False, f"DKB-only: trigger failed: {exc}"
+
+        # Wait for ds_sub → ENABLED
+        deadline = time.time() + 60
+        last_status = None
+        while time.time() < deadline:
+            try:
+                ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
+                subs_detail = ds_det.get("subscriptions", [])
+                if subs_detail:
+                    last_status = subs_detail[0].get("status", "")
+                    if last_status == "ENABLED":
+                        break
+            except Exception:
+                pass
+            time.sleep(2)
+        if last_status != "ENABLED":
+            return False, f"DKB-only: ds_sub did not reach ENABLED (last={last_status})"
+
+        # Verify DKB service calls
+        calls = _read_dkb_calls()
+        add_files = [c for c in calls if c[0] == "add_datafile"]
+        found = " ".join(c[1] for c in add_files)
+        if "only_file.md" not in found:
+            return False, f"DKB-only: only_file.md not added: {found[:200]}"
+
+        # Verify NO upstream (plugin output files should NOT exist)
+        hello_path = f"/output/testDKBWriterPlugin/{sub_name}/hello.md"
+        world_path = f"/output/testDKBWriterPlugin/{sub_name}/world.md"
+        if os.path.isfile(hello_path):
+            return False, "DKB-only: hello.md exists (upstream should not have run)"
+        if os.path.isfile(world_path):
+            return False, "DKB-only: world.md exists (upstream should not have run)"
+
+        return True, "DKB-only recon OK (upstream skipped, downstream completed)"
+    finally:
+        try:
+            if ds_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/dkb_datastores/{ds_id}", headers=_api_headers(), timeout=10)
         except Exception:
             pass
-        time.sleep(2)
-    if last_status != "ENABLED":
-        return False, f"DKB-only: ds_sub did not reach ENABLED (last={last_status})"
-
-    # Verify DKB service calls
-    calls = _read_dkb_calls()
-    add_files = [c for c in calls if c[0] == "add_datafile"]
-    found = " ".join(c[1] for c in add_files)
-    if "only_file.md" not in found:
-        return False, f"DKB-only: only_file.md not added: {found[:200]}"
-
-    # Verify NO upstream (plugin output files should NOT exist)
-    hello_path = f"/output/testDKBWriterPlugin/{sub_name}/hello.md"
-    world_path = f"/output/testDKBWriterPlugin/{sub_name}/world.md"
-    if os.path.isfile(hello_path):
-        return False, "DKB-only: hello.md exists (upstream should not have run)"
-    if os.path.isfile(world_path):
-        return False, "DKB-only: world.md exists (upstream should not have run)"
-
-    return True, "DKB-only recon OK (upstream skipped, downstream completed)"
+        if sub_id is not None:
+            _delete_sub(sub_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1618,18 +1729,13 @@ def _dkb_create_fixtures(db):
                 last_loaded=__import__("datetime").datetime.now(
                     __import__("datetime").timezone.utc),
             ))
-        sub = s.query(Subscription).filter(
-            Subscription.plugin_id == "test_plugin",
-            Subscription.name == "test_sub").first()
-        if not sub:
-            sub = Subscription(
-                id=str(uuid7()), plugin_id="test_plugin", name="test_sub",
-                config={}, status=STATE_ENABLED, access_level="PRIVATE",
-                sub_type="SCHEDULED", cron="0 0 * * *",
-            )
-            s.add(sub)
-            s.flush()
-        sub_id = sub.id
+        sub_id = str(uuid7())
+        s.add(Subscription(
+            id=sub_id, plugin_id="test_plugin", name=f"test_sub_{sub_id}",
+            config={}, status=STATE_ENABLED, access_level="PRIVATE",
+            sub_type="SCHEDULED", cron="0 0 * * *",
+        ))
+        s.flush()
     svc = db.upsert_dkb_service("TestService", "Test Description")
     ds = db.create_datastore(svc.id, "TestDS", "https://example.com", "test-key", {})
     db.link_datastore_subscriptions(ds.id, [sub_id], status=STATE_ENABLED)
@@ -1647,12 +1753,19 @@ def _dkb_api_delete(path):
             raise
 
 
-def _write_output_file_test(name, content):
-    path = os.path.join("/output", "test_plugin", "test_sub", name)
+def _write_output_file_test(sub_name, name, content):
+    path = os.path.join("/output", "test_plugin", sub_name, name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(content)
     return path
+
+
+def _get_sub_name(db, sub_id):
+    """Quick helper to fetch a subscription's name by ID."""
+    with db.get_session() as s:
+        row = s.query(Subscription).filter(Subscription.id == sub_id).first()
+        return row.name if row else sub_id
 
 
 # ---- 1. Database CRUD tests ----
@@ -1969,8 +2082,8 @@ def _dkb_test_recon_add(db, sub, ds):
         mock_svc.base_update_datafile = MagicMock()
         mock_svc.base_remove_datafile = MagicMock()
         mock_get.return_value = mock_svc
-        _write_output_file_test("article.md", "# Test\nContent here.")
         sub_row = db.get_subscription(sub)
+        _write_output_file_test(sub_row.name, "article.md", "# Test\nContent here.")
         reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
         if not mock_svc.base_add_datafile.called:
             return False, "base_add_datafile not called"
@@ -2010,7 +2123,8 @@ def _dkb_test_recon_remove(db, sub, ds):
 def _dkb_test_recon_skip_disabled(db, sub, ds):
     from unittest.mock import MagicMock, patch
     db.set_datastore_subscription_status(ds.id, sub, STATE_DISABLED)
-    _write_output_file_test("enabled_only.md", "should be skipped")
+    sub_row = db.get_subscription(sub)
+    _write_output_file_test(sub_row.name, "enabled_only.md", "should be skipped")
     with patch("worker.dkb_recon._get_service") as mock_get:
         from worker.dkb_recon import reconcile_subscription_datastores
         mock_svc = MagicMock()
@@ -2032,7 +2146,8 @@ def _dkb_test_recon_error(db, sub, ds):
     svc.remote_datastore_id = "mock-remote"
     svc.add_datafile = MagicMock(side_effect=RuntimeError("API failure"))
     svc.add_datastore = MagicMock()
-    _write_output_file_test("error_test.md", "will fail")
+    sub_row = db.get_subscription(sub)
+    _write_output_file_test(sub_row.name, "error_test.md", "will fail")
     with patch("worker.dkb_recon._get_service") as mock_get:
         from worker.dkb_recon import reconcile_subscription_datastores
         mock_get.return_value = svc
@@ -2094,16 +2209,18 @@ def _run_dkb_unit_tests():
                     try:
                         ok, msg = fn(db, sub_id, ds)
                     finally:
-                        # Cleanup per-test fixtures
+                        _delete_sub(sub_id)
                         _dkb_api_delete(f"/api/dkb_datastores/{ds.id}")
                         with db.get_session() as s:
                             s.query(DKBService).filter(
                                 DKBService.name == "TestService").delete()
+                            s.query(PluginRegistryState).filter(
+                                PluginRegistryState.plugin_id == "test_plugin").delete()
                     if os.path.isdir(DKB_TEST_OUTPUT):
                         shutil.rmtree(DKB_TEST_OUTPUT)
-                    output_sub_dir = os.path.join("/output", "test_plugin", "test_sub")
-                    if os.path.isdir(output_sub_dir):
-                        shutil.rmtree(output_sub_dir)
+                    output_plugin_dir = "/output/test_plugin"
+                    if os.path.isdir(output_plugin_dir):
+                        shutil.rmtree(output_plugin_dir)
             except Exception as exc:
                 ok = False
                 msg = f"EXCEPTION: {exc!r}"
@@ -2115,12 +2232,59 @@ def _run_dkb_unit_tests():
 
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
+    return passed, total, results
 
-    # --- Leak check: runs AFTER all unit tests and their tearDowns ---
+
+# ---------------------------------------------------------------------------
+# Leak check (runs at the very end)
+# ---------------------------------------------------------------------------
+
+def _cleanup_test_plugins() -> None:
+    """Remove test plugin files from /src/plugins/ and deregister them via API.
+    This runs BEFORE the leak check so the leak check can verify a clean state.
+    """
+    real_plugins = {"crawl4AIWebScraperPlugin", "eBiblePlugin",
+                    "ePaperlessDoclingPlugin", "imapFolderWatchPlugin",
+                    "youTubeTranscriptionPlugin"}
+
+    # Remove test plugin files from /src/plugins/ (same way _sync_test_plugins added them)
+    plugins_dir = "/src/plugins"
+    if os.path.isdir(plugins_dir):
+        for fname in sorted(os.listdir(plugins_dir)):
+            if fname.endswith(".py") and fname[:-3] not in real_plugins:
+                fpath = os.path.join(plugins_dir, fname)
+                if os.path.isfile(fpath):
+                    try:
+                        os.remove(fpath)
+                    except Exception as exc:  # noqa: BLE001
+                        _log(f"warning: failed to remove {fpath}: {exc}")
+
+    # Deregister test plugins via API (normal way)
+    try:
+        plugins = api_get("/api/plugins")
+        for p in plugins:
+            pid = p.get("plugin_id", "")
+            if pid not in real_plugins:
+                try:
+                    requests.delete(
+                        f"{MANAGER_URL}/api/plugins/{pid}",
+                        headers=_api_headers(), timeout=10,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"warning: failed to deregister plugin {pid}: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"warning: plugin deregistration sweep failed: {exc}")
+
+
+def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
+    """Scan DB + filesystem for leftover test artifacts. Any found = FAIL + clean.
+    Runs once at the very end of main(), after _cleanup_test_plugins().
+    """
     leaked: list[str] = []
     db2 = _dkb_db()
     try:
         with db2.get_session() as s:
+            # 1. DKB tables (existing checks)
             svc_names = ("TestService", "MyService", "Svc")
             ds_names = ("TestDS", "MyDS", "MyDS-Updated", "DS")
             leaked_svcs = s.query(DKBService).filter(
@@ -2155,23 +2319,80 @@ def _run_dkb_unit_tests():
             if svc_ids:
                 s.query(DKBService).filter(
                     DKBService.id.in_(svc_ids)).delete(synchronize_session=False)
+
+            # 2. Subscriptions: test-only rows
+            test_subs = s.query(Subscription).filter(
+                (Subscription.plugin_id == "test_plugin") |
+                (Subscription.name.like(f"%-{RUN_ID}")) |
+                (Subscription.name.like("e2e-%"))
+            ).all()
+            for sub in test_subs:
+                leaked.append(f"Subscription(id={sub.id[:8]}, name={sub.name!r}, plugin={sub.plugin_id})")
+            test_sub_ids = [sub.id for sub in test_subs]
+            if test_sub_ids:
+                s.query(Subscription).filter(
+                    Subscription.id.in_(test_sub_ids)).delete(synchronize_session=False)
+
+            # 3. EventLog: rows for leaked subscription IDs
+            if test_sub_ids:
+                elogs = s.query(EventLog).filter(
+                    EventLog.subscription_id.in_(test_sub_ids)).all()
+                for el in elogs:
+                    leaked.append(f"EventLog(id={el.id[:8]}, sub_id={el.subscription_id[:8]})")
+                s.query(EventLog).filter(
+                    EventLog.subscription_id.in_(test_sub_ids)).delete(synchronize_session=False)
+
+            # 4. PluginRegistryState: test plugin rows (should be zero after cleanup)
+            real_plugins = {"crawl4AIWebScraperPlugin", "eBiblePlugin",
+                            "ePaperlessDoclingPlugin", "imapFolderWatchPlugin",
+                            "youTubeTranscriptionPlugin"}
+            test_plugin_rows = s.query(PluginRegistryState).filter(
+                ~PluginRegistryState.plugin_id.in_(real_plugins)).all()
+            for pr in test_plugin_rows:
+                leaked.append(f"PluginRegistryState(plugin_id={pr.plugin_id!r})")
+            for pr in test_plugin_rows:
+                s.delete(pr)
     finally:
         db2.dispose()
 
+    # 5. Filesystem: /output test plugin dirs
+    test_plugin_dirs = {"cancellationPlugin", "configValidationPlugin", "crashPlugin",
+        "cronRandomizePlugin", "customRoutePlugin", "delayedInitPlugin",
+        "deleteAllPlugin", "editMatchPlugin", "emptyOutputPlugin",
+        "eventHappyPlugin", "eventOftenPlugin", "happyPathPlugin",
+        "invalidNamePlugin", "largeOutputPlugin", "longNamePlugin32CharNameForUITes",
+        "longRunningFailurePlugin", "longRunningSuccessPlugin",
+        "monitorErrorPlugin", "monitorNeverTriggerPlugin",
+        "moveToDestErrorPlugin", "noHeartbeatPlugin", "nonZeroExitPlugin",
+        "passwordPlugin", "schemaBreakingPlugin", "testDKBWriterPlugin",
+        "test_plugin", "zombiePlugin"}
+    output_root = "/output"
+    if os.path.isdir(output_root):
+        for entry in sorted(os.listdir(output_root)):
+            entry_path = os.path.join(output_root, entry)
+            if os.path.isdir(entry_path) and entry in test_plugin_dirs:
+                leaked.append(f"/output/{entry}/")
+                shutil.rmtree(entry_path)
+
+    # 6. Filesystem: /src/plugins test plugin files (should be zero after cleanup)
+    plugins_dir = "/src/plugins"
+    if os.path.isdir(plugins_dir):
+        for fname in sorted(os.listdir(plugins_dir)):
+            if fname.endswith(".py") and fname[:-3] not in real_plugins:
+                fpath = os.path.join(plugins_dir, fname)
+                if os.path.isfile(fpath):
+                    leaked.append(f"/src/plugins/{fname}")
+                    os.remove(fpath)
+
     if leaked:
-        _log(f"\n[LEAK] Found {len(leaked)} leftover DKB test artifact(s):")
+        _log(f"\n[LEAK] Found {len(leaked)} leftover test artifact(s):")
         for l in leaked:
             _log(f"  [LEAK] {l}")
         _log("[LEAK] Artifacts have been cleaned up.")
-        # The leak check is a failure — append it
         results.append(("LEAK CHECK", False, f"{len(leaked)} artifact(s) leaked"))
     else:
         _log("[LEAK] No leftover artifacts — all tests cleaned up properly.")
         results.append(("LEAK CHECK", True, "clean"))
-
-    total += 1
-    _passed = sum(1 for _, ok, _ in results if ok)
-    return _passed, total, results
 
 
 # ---------------------------------------------------------------------------
@@ -2346,45 +2567,36 @@ def main() -> int:
         status = "✅" if ok else "❌"
         _log(f"  {status} {name}: {msg}")
 
-    # Cleanup DKB artifacts from the DKB e2e tests
-    for suffix in ["e2e-full-", "e2e-dkbonly-"]:
-        all_subs = api_get("/api/subscriptions")
-        for sub in all_subs:
-            n = sub.get("name", "")
-            if suffix in n:
-                try:
-                    requests.delete(f"{MANAGER_URL}/api/subscriptions/{sub['id']}", headers=_api_headers(), timeout=10)
-                except Exception:
-                    pass
-        all_ds = api_get("/api/dkb_datastores")
-        for ds in all_ds:
-            n = ds.get("name", "")
-            if suffix in n:
-                try:
-                    requests.delete(f"{MANAGER_URL}/api/dkb_datastores/{ds['datastore_id']}", headers=_api_headers(), timeout=10)
-                except Exception:
-                    pass
-        _rm_output_dir(f"{suffix}*")
-
-    # Summary
+    # Summary (28 tests)
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
     _log(f"\n=== TEST SUMMARY: {passed}/{total} passed ===")
     for name, ok, msg in results:
         mark = "✅" if ok else "❌"
         _log(f"  {mark} {name}: {msg}")
-    if passed != total:
-        return 1
 
     # Run DKB unit tests (inline)
     _log("\n=== Running DKB unit tests ===")
     dkb_passed, dkb_total, dkb_results = _run_dkb_unit_tests()
-    if dkb_passed != dkb_total:
-        _log(f"DKB unit tests: {dkb_passed}/{dkb_total} passed")
-        results.extend(dkb_results)
-        return 1
-    _log(f"DKB unit tests: {dkb_passed}/{dkb_total} passed ✓")
-    return 0
+    _log(f"DKB unit tests: {dkb_passed}/{dkb_total} passed")
+    results.extend(dkb_results)
+
+    # Cleanup test plugins (files + API deregister) before leak check
+    _log("\n=== Cleaning up test plugins ===")
+    _cleanup_test_plugins()
+
+    # Leak check — at the VERY END
+    _log("\n=== Running leak check ===")
+    _run_leak_check(results)
+
+    # Final summary
+    final_passed = sum(1 for _, ok, _ in results if ok)
+    final_total = len(results)
+    _log(f"\n=== FINAL: {final_passed}/{final_total} passed ===")
+    for name, ok, msg in results:
+        mark = "✅" if ok else "❌"
+        _log(f"  {mark} {name}: {msg}")
+    return 0 if final_passed == final_total else 1
 
 
 if __name__ == "__main__":

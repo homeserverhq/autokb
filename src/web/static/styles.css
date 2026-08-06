@@ -317,7 +317,7 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
 }
 .modal-content {
   background: #1A1A1A; border: 1px solid #2A2A2A; border-radius: 12px;
-  padding: 24px; width: 500px; max-height: 90vh; overflow-y: auto;
+  padding: 24px; width: 750px; max-height: 90vh; overflow-y: auto;
 }
 .modal-content h3 { margin: 0 0 16px; }
 .form-field { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
@@ -482,7 +482,7 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
 /* Transfer list (DKB datastore subscriptions) */
 .transfer-list { display: flex; gap: 8px; align-items: stretch; width: 100%; }
 .transfer-panel { flex: 1; display: flex; flex-direction: column; gap: 4px; }
-.transfer-panel select { flex: 1; min-height: 200px; background: #1A1A1A; color: #FFFFFF; border: 1px solid #333; border-radius: 4px; padding: 4px; font-size: 12px; }
+.transfer-panel select { flex: 1; min-height: 150px; background: #1A1A1A; color: #FFFFFF; border: 1px solid #333; border-radius: 4px; padding: 4px; font-size: 12px; }
 .transfer-panel select option { padding: 4px 8px; }
 .transfer-buttons { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
 .transfer-buttons .btn { padding: 8px 12px; font-size: 14px; }

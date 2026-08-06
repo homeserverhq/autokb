@@ -15,6 +15,17 @@ from .dkb_service_base import BaseDKBService
 from .misc_utils import get_logger, sanitize_name
 
 
+class DKBServiceRecord:
+    """Metadata for one loaded DKB service type."""
+
+    def __init__(self, service_name: str, cls, metadata: Dict[str, str], file_path: str):
+        self.service_name = service_name
+        self.cls = cls
+        self.metadata = metadata
+        self.file_path = file_path
+        self.icon = metadata.get("icon", "default_icon.png")
+
+
 class DKBRegistry:
     """In-memory registry of loaded DKB service types.
 
@@ -110,17 +121,6 @@ class DKBRegistry:
     def lookup_service_name(self, db_service_name: str) -> str:
         """Map a ``dkb_service.name`` (from DB) to the class metadata name."""
         return db_service_name
-
-
-class DKBServiceRecord:
-    """Metadata for one loaded DKB service type."""
-
-    def __init__(self, service_name: str, cls, metadata: Dict[str, str], file_path: str):
-        self.service_name = service_name
-        self.cls = cls
-        self.metadata = metadata
-        self.file_path = file_path
-        self.icon = metadata.get("icon", "default_icon.png")
 
 
 __all__ = ["DKBRegistry", "DKBServiceRecord"]

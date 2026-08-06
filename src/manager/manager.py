@@ -243,12 +243,19 @@ async def lifespan(app: FastAPI):
     reg.reload()
 
     # -- build DKB registry --
-    dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component="dkb_registry", log_file=LOG_FILE)
-    dkb_registry.reload_all()
-    # Upsert services into DB
-    for rec in dkb_registry.list_records():
-        db.upsert_dkb_service(rec.service_name, rec.metadata.get("description", ""))
-    STATE["dkb_registry"] = dkb_registry
+    try:
+        dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component="dkb_registry", log_file=LOG_FILE)
+        dkb_registry.reload_all()
+        for rec in dkb_registry.list_records():
+            db.upsert_dkb_service(rec.service_name, rec.metadata.get("description", ""))
+        STATE["dkb_registry"] = dkb_registry
+    except Exception as _dkb_exc:
+        import traceback, sys
+        print("DKB INIT ERROR:", _dkb_exc, flush=True, file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        STATE["dkb_registry"] = DKBRegistry(dkbs_dir="/src/dkbservices", component="fallback",
+                                             log_file=LOG_FILE)
 
     # -- start trigger coordinator --
     from manager.scheduler import TriggerCoordinator
@@ -276,6 +283,7 @@ async def lifespan(app: FastAPI):
     finally:
         for task in (coord_task, listen_task, watchdog_task, watcher_task):
             task.cancel()
+        for task in (coord_task, listen_task, watchdog_task, watcher_task):
             try:
                 await task
             except (asyncio.CancelledError, Exception):

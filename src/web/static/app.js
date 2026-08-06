@@ -1433,7 +1433,7 @@
     for (const sub of dkbAllSubsList) {
       const opt = document.createElement('option');
       opt.value = sub.id;
-      opt.textContent = `${sub.name} (${sub.plugin_id})`;
+      opt.textContent = sub.name;
       if (linkedSet.has(sub.id)) {
         linked.appendChild(opt);
       } else {

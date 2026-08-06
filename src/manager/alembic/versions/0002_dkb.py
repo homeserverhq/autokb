@@ -14,16 +14,13 @@ from alembic import op
 from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text, BigInteger
 
 revision = "0002"
-down_revision = "0001"
+down_revision = "0001_initial"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    conn = op.get_bind()
-
-    # --- dkb_service ---
-    conn.execute(
+    op.execute(
         "CREATE TABLE IF NOT EXISTS dkb_service ("
         "  id          VARCHAR(36)  PRIMARY KEY,"
         "  name        VARCHAR(255) NOT NULL,"
@@ -31,8 +28,7 @@ def upgrade() -> None:
         ")"
     )
 
-    # --- dkb_datastore ---
-    conn.execute(
+    op.execute(
         "CREATE TABLE IF NOT EXISTS dkb_datastore ("
         "  id                  VARCHAR(36)  PRIMARY KEY,"
         "  service_id          VARCHAR(36)  NOT NULL REFERENCES dkb_service(id) ON DELETE CASCADE,"
@@ -44,8 +40,7 @@ def upgrade() -> None:
         ")"
     )
 
-    # --- datastore_subscriptions ---
-    conn.execute(
+    op.execute(
         "CREATE TABLE IF NOT EXISTS datastore_subscriptions ("
         "  datastore_id      VARCHAR(36) NOT NULL REFERENCES dkb_datastore(id) ON DELETE CASCADE,"
         "  subscription_id   VARCHAR(36) NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,"
@@ -56,8 +51,7 @@ def upgrade() -> None:
         ")"
     )
 
-    # --- akb_datafile (auto knowledge base datafile) ---
-    conn.execute(
+    op.execute(
         "CREATE TABLE IF NOT EXISTS akb_datafile ("
         "  id                VARCHAR(36)  PRIMARY KEY,"
         "  subscription_id   VARCHAR(36)  NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,"
@@ -69,10 +63,9 @@ def upgrade() -> None:
         "  UNIQUE (path)"
         ")"
     )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_akb_datafile_sub ON akb_datafile(subscription_id)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_akb_datafile_sub ON akb_datafile(subscription_id)")
 
-    # --- datastore_datafile ---
-    conn.execute(
+    op.execute(
         "CREATE TABLE IF NOT EXISTS datastore_datafile ("
         "  datastore_id       VARCHAR(36) NOT NULL REFERENCES dkb_datastore(id) ON DELETE CASCADE,"
         "  datafile_id        VARCHAR(36) NOT NULL REFERENCES akb_datafile(id) ON DELETE CASCADE,"
@@ -84,7 +77,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    conn = op.get_bind()
     for tbl in (
         "datastore_datafile",
         "akb_datafile",
@@ -92,4 +84,4 @@ def downgrade() -> None:
         "dkb_datastore",
         "dkb_service",
     ):
-        conn.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")
+        op.execute(f"DROP TABLE IF EXISTS {tbl} CASCADE")

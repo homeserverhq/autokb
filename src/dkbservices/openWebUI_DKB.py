@@ -4,7 +4,7 @@ from utils.dkb_service_base import BaseDKBService
 
 class OpenWebUIDKB(BaseDKBService):
     metadata = {
-        "name": "OpenWebUI",
+        "name": "openWebUI",
         "description": "Open WebUI Knowledge Base",
         "icon": "openwebui.png",
     }

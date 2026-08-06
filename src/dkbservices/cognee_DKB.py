@@ -4,7 +4,7 @@ from utils.dkb_service_base import BaseDKBService
 
 class CogneeDKB(BaseDKBService):
     metadata = {
-        "name": "Cognee",
+        "name": "cognee",
         "description": "Cognee Memory Dataset",
         "icon": "cognee.png",
     }

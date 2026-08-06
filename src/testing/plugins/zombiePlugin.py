@@ -3,9 +3,11 @@
 The plugin's getData sleeps for a long time and NEVER calls
 ``progress_callback``. The only heartbeat ever written is the initial
 ``progress_callback(0)`` invoked by the worker before getData runs.
-After ``HEARTBEAT_TIMEOUT`` seconds with no further heartbeat, the
-worker's watcher thread terminates the child process and the
-subscription is set to ERROR.
+When the test sets the subscription to DISABLED mid-execution, the
+child ignores the cancellation, so the worker's watcher thread
+force-terminates it at its next per-tick DB status check. The
+user-initiated DISABLED status is preserved (NOT overwritten to ERROR);
+the force-kill is recorded as an EventLog entry with exit_code=2.
 """
 
 import time

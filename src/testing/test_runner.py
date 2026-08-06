@@ -866,8 +866,11 @@ def test_non_zero_exit() -> Tuple[bool, str]:
 
 def test_zombie() -> Tuple[bool, str]:
     """Zombie: progress_callback never checks DB; test runner sets
-    DISABLED mid-execution. The child keeps running and is force-killed
-    by the watcher when HEARTBEAT_TIMEOUT elapses."""
+    DISABLED mid-execution. The child ignores the cancellation and keeps
+    running, so the watcher's per-tick DB status check force-kills it.
+    Per spec §5.2 the user-initiated DISABLED status is preserved (NOT
+    overwritten to ERROR), and the force-kill is recorded as an EventLog
+    entry with exit_code=2."""
     name = _unique("zombie")
     sub = create_sub("zombiePlugin", name, {"label": "x"}, cron="0 * * * *")
     trigger_sub(sub["id"])
@@ -875,13 +878,16 @@ def test_zombie() -> Tuple[bool, str]:
     time.sleep(0.5)
     set_status(sub["id"], "DISABLED")
     # The zombie keeps running. The plugin's progress_callback never
-    # calls the DB to detect DISABLED, so the only way to stop it is
-    # the heartbeat timeout. Wait for status to be set to ERROR.
-    final = wait_for_status(sub["id"], lambda s: s == "ERROR", timeout=20)
-    ev = wait_for_event(sub["id"], timeout=10)
+    # calls the DB to detect DISABLED, so the only way to stop it is the
+    # watcher's DB status check on its next tick — which records the
+    # force-kill as an EventLog entry with exit_code=2.
+    ev = wait_for_event(sub["id"], timeout=30)
     if ev["exit_code"] != 2:
-        return False, f"expected exit_code=2 (timeout), got {ev['exit_code']}"
-    return True, "zombie force-killed by watcher (exit_code=2)"
+        return False, f"expected exit_code=2 (watcher force-kill), got {ev['exit_code']}"
+    final = get_sub(sub["id"])
+    if final["status"] != "DISABLED":
+        return False, f"expected DISABLED preserved, got {final['status']}"
+    return True, "zombie force-killed by watcher (exit_code=2), DISABLED preserved"
 
 
 def test_move_to_dest_error() -> Tuple[bool, str]:

@@ -46,6 +46,7 @@ services:
     volumes:
       - v-autokb-output:/output
       - v-autokb-plugins:/src/plugins
+      - v-autokb-dkbservices:/src/dkbservices
       - v-autokb-logs:/logs
 
   autokb-web:
@@ -98,6 +99,12 @@ volumes:
       type: none
       o: bind
       device: ./autokb/src/plugins
+  v-autokb-dkbservices:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./autokb/src/dkbservices
   v-autokb-assets:
     driver: local
     driver_opts:

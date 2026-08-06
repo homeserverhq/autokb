@@ -117,7 +117,7 @@ class TriggerCoordinator:
                 deleted += 1
             # Re-enqueue (P-Queue)
             self._db.try_enqueue(sub.id)
-            self._queue.push_primary(sub.id)
+            self._queue.push_primary(sub.id, operation="FULL")
         if stuck:
             self._log.info(
                 "startup_recovery",

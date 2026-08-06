@@ -44,6 +44,19 @@ WATCHDOG_TIMEOUT_S = HEARTBEAT_TIMEOUT * 3
 IN_PROGRESS/ENQUEUED subscriptions."""
 
 # ---------------------------------------------------------------------------
+# DKB operation types (queue items)
+# ---------------------------------------------------------------------------
+OPERATION_FULL = "FULL"
+OPERATION_DKB_ONLY = "DKB_ONLY"
+ALL_OPERATIONS = (OPERATION_FULL, OPERATION_DKB_ONLY)
+
+# ---------------------------------------------------------------------------
+# Migration / startup
+# ---------------------------------------------------------------------------
+WORKER_STARTUP_DELAY_S = int(os.environ.get("WORKER_STARTUP_DELAY_S", "5"))
+"""Delay before worker initializes DKB components (to let Manager run migrations)."""
+
+# ---------------------------------------------------------------------------
 # Queue keys
 # ---------------------------------------------------------------------------
 P_QUEUE_KEY = "autokb:p_queue"

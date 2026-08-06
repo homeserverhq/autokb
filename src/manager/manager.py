@@ -78,6 +78,7 @@ from utils.misc_utils import (
     send_smtp_notification,
     validate_config_against_schema,
 )
+from utils.dkb_registry import DKBRegistry
 from utils.queue_utils import QueueManager, wait_for_redis
 from utils.registry import PluginRegistry
 
@@ -241,6 +242,14 @@ async def lifespan(app: FastAPI):
     STATE["registry"] = reg
     reg.reload()
 
+    # -- build DKB registry --
+    dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component="dkb_registry", log_file=LOG_FILE)
+    dkb_registry.reload_all()
+    # Upsert services into DB
+    for rec in dkb_registry.list_records():
+        db.upsert_dkb_service(rec.service_name, rec.metadata.get("description", ""))
+    STATE["dkb_registry"] = dkb_registry
+
     # -- start trigger coordinator --
     from manager.scheduler import TriggerCoordinator
     coord = TriggerCoordinator(db=db, queue=queue, registry=reg, smtp_config=SMTP_CONFIG)
@@ -318,13 +327,29 @@ async def _listen_bridge() -> None:
 
 
 async def _handle_notify(payload: str) -> None:
-    """Forward a pg_notify payload to SSE clients."""
-    sub_id = payload
+    """Forward a pg_notify payload to SSE clients — either subscription or datastore."""
     db: DatabaseManager = STATE["db"]
+    # Check if payload is DKB datastore JSON
+    try:
+        dkb_payload = json.loads(payload)
+        if isinstance(dkb_payload, dict) and dkb_payload.get("type") == "datastore":
+            ds_id = dkb_payload["datastore_id"]
+            ds = db.get_datastore(ds_id)
+            if ds is None:
+                return
+            subs = db.list_datastore_subscriptions(ds_id)
+            await _broadcast_sse({
+                "type": "datastore_update",
+                "data": _serialise_datastore(ds, subs, db),
+            })
+            return
+    except (json.JSONDecodeError, KeyError):
+        pass
+    # Legacy subscription notification (sub_id string)
+    sub_id = payload
     sub = db.get_subscription(sub_id)
     reg: ManagerPluginRegistry = STATE["registry"]
     if sub is None:
-        # Subscription was deleted
         return
     rec = reg.get(sub.plugin_id)
     password_fields = rec.password_fields if rec else []
@@ -332,6 +357,56 @@ async def _handle_notify(payload: str) -> None:
         "type": "subscription_update",
         "data": _serialise_subscription(sub, password_fields),
     })
+
+
+def _serialise_datastore(ds, subs, db) -> Dict[str, Any]:
+    """Serialize a dkb_datastore with its subscriptions and derived status."""
+    svc_row = db.get_dkb_service(ds.service_id)
+    service_name = svc_row.name if svc_row else ""
+    svc_icon = ""
+    reg: ManagerPluginRegistry = STATE.get("registry")
+    if reg:
+        from utils.dkb_registry import DKBRegistry as _DKBR
+        dkb_reg: _DKBR = STATE.get("dkb_registry")
+        if dkb_reg:
+            rec = dkb_reg.get(service_name)
+            if rec:
+                svc_icon = rec.icon
+    status = "ENABLED"
+    last_updated = None
+    for s in subs:
+        if s.status == "ERROR":
+            status = "ERROR"
+        elif s.status in ("ENABLED", "ENQUEUED", "IN_PROGRESS") and status != "ERROR":
+            status = "ENABLED"
+        elif s.status == "DISABLED" and status not in ("ERROR", "ENABLED"):
+            status = "DISABLED"
+        elif s.status == "DELETED" and status not in ("ERROR", "ENABLED", "DISABLED"):
+            status = "DELETED"
+        if s.last_updated and (last_updated is None or s.last_updated > last_updated):
+            last_updated = s.last_updated
+    return {
+        "datastore_id": ds.id,
+        "service_id": ds.service_id,
+        "service_name": service_name,
+        "service_icon": svc_icon,
+        "name": ds.name,
+        "api_url": ds.api_url,
+        "has_api_key": bool(ds.api_key),
+        "remote_datastore_id": ds.remote_datastore_id,
+        "ds_extra_params": ds.ds_extra_params or {},
+        "status": status,
+        "last_updated": last_updated.isoformat() if last_updated else None,
+        "subscriptions": [
+            {
+                "subscription_id": s.subscription_id,
+                "status": s.status,
+                "last_updated": s.last_updated.isoformat() if s.last_updated else None,
+                "last_message": s.last_message,
+            }
+            for s in subs
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +728,7 @@ async def api_create_subscription(plugin_id: str, body: Dict[str, Any] = Body(..
     # Enqueue
     queue: QueueManager = STATE["queue"]
     db.try_enqueue(sub.id)
-    queue.push_primary(sub.id)
+    queue.push_primary(sub.id, operation="FULL")
     LOG.info(
         "subscription_created",
         sub_id=sub.id, name=sub.name, plugin_id=plugin_id, action="enqueue", source="manual_trigger",
@@ -747,7 +822,7 @@ def api_delete_subscription(sub_id: str):
     if not ok:
         raise HTTPException(status_code=409, detail="Subscription already deleted")
     # Push a DELETED cleanup task to the P-Queue
-    queue.push_primary(sub_id)
+    queue.push_primary(sub_id, operation="FULL")
     # Cancel any running monitor
     coord = STATE["coordinator"]
     coord.cancel_monitor(sub_id)
@@ -768,7 +843,7 @@ def api_trigger_subscription(sub_id: str):
     if sub.status not in TRIGGERABLE_STATES:
         raise HTTPException(status_code=400, detail=f"Cannot trigger subscription in state {sub.status}")
     db.try_enqueue(sub_id)
-    queue.push_primary(sub_id)
+    queue.push_primary(sub_id, operation="FULL")
     LOG.debug("subscription_triggered", sub_id=sub_id, name=sub.name, source="manual_trigger")
     return {"ok": True}
 
@@ -1236,6 +1311,208 @@ async def _sse_generator_with_queue(client_queue: asyncio.Queue):
             last_keepalive = time.time()
     except asyncio.CancelledError:
         return
+
+
+# ---------------------------------------------------------------------------
+# DKB (Downstream Knowledge Base) API endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/dkb_services")
+def api_dkb_services():
+    db: DatabaseManager = STATE["db"]
+    dkb_reg: DKBRegistry = STATE.get("dkb_registry")
+    services = db.list_dkb_services()
+    result = []
+    for svc in services:
+        datastores = db.list_datastores(service_id=svc.id)
+        icon = ""
+        if dkb_reg:
+            rec = dkb_reg.get(svc.name)
+            if rec:
+                icon = rec.icon
+        result.append({
+            "service_id": svc.id,
+            "name": svc.name,
+            "description": svc.description or "",
+            "icon": icon,
+            "datastore_count": len(datastores),
+        })
+    return result
+
+
+@app.get("/api/dkb_services/{service_id}/datastores")
+def api_dkb_service_datastores(service_id: str):
+    db: DatabaseManager = STATE["db"]
+    ds_list = db.list_datastores(service_id=service_id)
+    svc_row = db.get_dkb_service(service_id)
+    service_name = svc_row.name if svc_row else ""
+    result = []
+    for ds in ds_list:
+        subs = db.list_datastore_subscriptions(ds.id)
+        result.append(_serialise_datastore(ds, subs, db))
+    return result
+
+
+@app.get("/api/dkb_datastores")
+def api_dkb_datastores():
+    db: DatabaseManager = STATE["db"]
+    all_ds = db.list_datastores()
+    result = []
+    for ds in all_ds:
+        subs = db.list_datastore_subscriptions(ds.id)
+        result.append(_serialise_datastore(ds, subs, db))
+    return result
+
+
+@app.get("/api/dkb_datastores/{datastore_id}")
+def api_dkb_datastore_detail(datastore_id: str):
+    db: DatabaseManager = STATE["db"]
+    ds = db.get_datastore(datastore_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Datastore not found")
+    subs = db.list_datastore_subscriptions(datastore_id)
+    # Enrich with subscription names
+    enriched = []
+    for s in subs:
+        sub_row = db.get_subscription(s.subscription_id)
+        enriched.append({
+            "subscription_id": s.subscription_id,
+            "subscription_name": sub_row.name if sub_row else "",
+            "plugin_id": sub_row.plugin_id if sub_row else "",
+            "status": s.status,
+            "last_updated": s.last_updated.isoformat() if s.last_updated else None,
+            "last_message": s.last_message,
+        })
+    data = _serialise_datastore(ds, subs, db)
+    data["subscriptions"] = enriched
+    return data
+
+
+@app.post("/api/dkb_services/{service_id}/datastores")
+def api_dkb_create_datastore(service_id: str, body: Dict[str, Any] = Body(...)):
+    db: DatabaseManager = STATE["db"]
+    queue: QueueManager = STATE["queue"]
+    svc = db.get_dkb_service(service_id)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="DKB service not found")
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    api_url = body.get("api_url", "").strip()
+    if not api_url:
+        raise HTTPException(status_code=400, detail="api_url is required")
+    api_key = body.get("api_key", "").strip()
+    ds_extra = body.get("ds_extra_params", {})
+    if isinstance(ds_extra, str):
+        try:
+            ds_extra = json.loads(ds_extra)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="ds_extra_params must be valid JSON")
+    sub_ids = body.get("subscription_ids", [])
+    if not isinstance(sub_ids, list):
+        raise HTTPException(status_code=400, detail="subscription_ids must be a list")
+
+    ds = db.create_datastore(service_id, name, api_url, api_key, ds_extra)
+    if sub_ids:
+        db.link_datastore_subscriptions(ds.id, sub_ids, status="ENQUEUED")
+        for sid in sub_ids:
+            queue.push_primary(sid, operation="DKB_ONLY")
+
+    subs = db.list_datastore_subscriptions(ds.id)
+    return _serialise_datastore(ds, subs, db)
+
+
+@app.put("/api/dkb_datastores/{datastore_id}")
+def api_dkb_update_datastore(datastore_id: str, body: Dict[str, Any] = Body(...)):
+    db: DatabaseManager = STATE["db"]
+    queue: QueueManager = STATE["queue"]
+    ds = db.get_datastore(datastore_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Datastore not found")
+    name = body.get("name")
+    api_url = body.get("api_url")
+    api_key = body.get("api_key")
+    ds_extra = body.get("ds_extra_params")
+
+    if isinstance(ds_extra, str):
+        try:
+            ds_extra = json.loads(ds_extra)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="ds_extra_params must be valid JSON")
+
+    db.update_datastore(datastore_id, name=name, api_url=api_url, api_key=api_key, ds_extra_params=ds_extra)
+
+    # Diff subscriptions
+    new_sub_ids = body.get("subscription_ids", [])
+    if not isinstance(new_sub_ids, list):
+        raise HTTPException(status_code=400, detail="subscription_ids must be a list")
+
+    current_subs = db.list_datastore_subscriptions(datastore_id)
+    current_ids = {s.subscription_id for s in current_subs}
+    new_ids = set(new_sub_ids)
+
+    added = new_ids - current_ids
+    removed = current_ids - new_ids
+
+    if added:
+        db.link_datastore_subscriptions(datastore_id, list(added), status="ENQUEUED")
+    if removed:
+        db.set_datastore_subscriptions_status(datastore_id, list(removed), status="DELETED")
+
+    # Enqueue ALL related sub_ids
+    all_related = current_ids | new_ids
+    for sid in all_related:
+        queue.push_primary(sid, operation="DKB_ONLY")
+
+    subs = db.list_datastore_subscriptions(datastore_id)
+    return _serialise_datastore(ds, subs, db)
+
+
+@app.delete("/api/dkb_datastores/{datastore_id}")
+def api_dkb_delete_datastore(datastore_id: str):
+    db: DatabaseManager = STATE["db"]
+    queue: QueueManager = STATE["queue"]
+    ds = db.get_datastore(datastore_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Datastore not found")
+    subs = db.list_datastore_subscriptions(datastore_id)
+    sub_ids = list({s.subscription_id for s in subs})
+    # Mark all as DELETED and enqueue
+    if sub_ids:
+        db.set_datastore_subscriptions_status(datastore_id, sub_ids, status="DELETED")
+        for sid in sub_ids:
+            queue.push_primary(sid, operation="DKB_ONLY")
+    return {"deleted": True}
+
+
+@app.post("/api/dkb_datastores/{datastore_id}/update")
+def api_dkb_update_datastore_trigger(datastore_id: str):
+    db: DatabaseManager = STATE["db"]
+    queue: QueueManager = STATE["queue"]
+    subs = db.list_datastore_subscriptions(datastore_id)
+    sub_ids = list({s.subscription_id for s in subs})
+    for sid in sub_ids:
+        queue.push_primary(sid, operation="DKB_ONLY")
+    return {"enqueued": len(sub_ids)}
+
+
+@app.post("/api/dkb_datastores/{datastore_id}/status")
+def api_dkb_datastore_status(datastore_id: str, body: Dict[str, Any] = Body(...)):
+    db: DatabaseManager = STATE["db"]
+    queue: QueueManager = STATE["queue"]
+    ds = db.get_datastore(datastore_id)
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Datastore not found")
+    new_status = body.get("status", "").upper()
+    if new_status not in ("ENABLED", "DISABLED"):
+        raise HTTPException(status_code=400, detail="status must be ENABLED or DISABLED")
+    subs = db.list_datastore_subscriptions(datastore_id)
+    sub_ids = [s.subscription_id for s in subs]
+    if sub_ids:
+        db.set_datastore_subscriptions_status(datastore_id, sub_ids, status=new_status)
+        for sid in sub_ids:
+            queue.push_primary(sid, operation="DKB_ONLY")
+    return {"updated": len(sub_ids)}
 
 
 # ---------------------------------------------------------------------------

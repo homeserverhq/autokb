@@ -5,13 +5,16 @@ import os
 import socket
 import time
 from contextlib import contextmanager
-from typing import Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 import redis
 
 from .constants import (
+    ALL_OPERATIONS,
     LOCK_KEY_PREFIX,
     LOCK_TTL,
+    OPERATION_DKB_ONLY,
+    OPERATION_FULL,
     P_QUEUE_KEY,
     S_QUEUE_KEY,
     STARTUP_RETRY_SLEEP,
@@ -60,8 +63,24 @@ def wait_for_redis(url: str, log_func=None) -> redis.Redis:
     raise RuntimeError(f"Could not connect to Redis at {url} after {MAX_STARTUP_RETRIES} retries")
 
 
+def _encode_item(sub_id: str, operation: str) -> str:
+    """Deterministic JSON encoding for a queue item."""
+    return json.dumps({"sub_id": sub_id, "operation": operation}, sort_keys=True, separators=(",", ":"))
+
+
+def _decode_item(raw: str) -> Optional[Dict[str, str]]:
+    """Parse a queue item, returning None for malformed payloads (logged by caller)."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 class QueueManager:
-    """Wrapper around Redis for the two-tier queue and safety locks."""
+    """Wrapper around Redis for the two-tier queue and safety locks.
+
+    Queue items are JSON ``{"sub_id": ..., "operation": "FULL"|"DKB_ONLY"}``.
+    """
 
     def __init__(self, url: str):
         self.url = url
@@ -72,48 +91,70 @@ class QueueManager:
         return self._client
 
     # ----- queue operations -----
-    def push_primary(self, sub_id: str) -> None:
-        self._client.lpush(P_QUEUE_KEY, sub_id)
+    def push_primary(self, sub_id: str, operation: str = OPERATION_FULL) -> None:
+        self._client.lpush(P_QUEUE_KEY, _encode_item(sub_id, operation))
 
-    def push_secondary(self, sub_id: str) -> None:
-        self._client.lpush(S_QUEUE_KEY, sub_id)
+    def push_secondary(self, sub_id: str, operation: str = OPERATION_FULL) -> None:
+        self._client.lpush(S_QUEUE_KEY, _encode_item(sub_id, operation))
 
-    def pop_primary(self, timeout: int = 5) -> Optional[str]:
+    def pop_primary(self, timeout: int = 5) -> Optional[Dict[str, str]]:
         try:
             item = self._client.brpop(P_QUEUE_KEY, timeout=timeout)
         except Exception:
-            # Timeout or transient connection issue — treat as "no item"
             return None
-        return item[1] if item else None
+        if not item:
+            return None
+        parsed = _decode_item(item[1])
+        if parsed is None:
+            return None
+        return parsed
 
-    def drain_primary(self, sub_id: str) -> int:
-        """Remove all occurrences of ``sub_id`` from the P-Queue. Returns count removed."""
-        return self._remove_all(P_QUEUE_KEY, sub_id)
-
-    def drain_both(self, sub_id: str) -> int:
-        n = self._remove_all(P_QUEUE_KEY, sub_id)
-        n += self._remove_all(S_QUEUE_KEY, sub_id)
+    def drain_all(self, sub_id: str) -> int:
+        """Remove all occurrences of a sub_id from both queues. Returns count removed."""
+        n = self._remove_all_for_sub(P_QUEUE_KEY, sub_id)
+        n += self._remove_all_for_sub(S_QUEUE_KEY, sub_id)
         return n
 
-    def _remove_all(self, key: str, sub_id: str) -> int:
+    def _remove_all_for_sub(self, key: str, sub_id: str) -> int:
         removed = 0
-        while True:
-            n = self._client.lrem(key, 1, sub_id)
-            if not n:
-                break
-            removed += n
+        items = self._client.lrange(key, 0, -1)
+        keep = []
+        for raw in items:
+            parsed = _decode_item(raw)
+            if parsed is None or parsed.get("sub_id") == sub_id:
+                removed += 1
+            else:
+                keep.append(raw)
+        if removed:
+            self._client.delete(key)
+            for raw in keep:
+                self._client.lpush(key, raw)
         return removed
+
+    def any_full_for(self, sub_id: str) -> bool:
+        """Return True if any queued item for *sub_id* has operation=FULL."""
+        for key in (P_QUEUE_KEY, S_QUEUE_KEY):
+            for raw in self._client.lrange(key, 0, -1):
+                parsed = _decode_item(raw)
+                if parsed and parsed.get("sub_id") == sub_id and parsed.get("operation") == OPERATION_FULL:
+                    return True
+        return False
+
+    def has_in_queue(self, sub_id: str) -> bool:
+        for key in (P_QUEUE_KEY, S_QUEUE_KEY):
+            for raw in self._client.lrange(key, 0, -1):
+                parsed = _decode_item(raw)
+                if parsed and parsed.get("sub_id") == sub_id:
+                    return True
+        return False
 
     def queue_depth(self, key: str) -> int:
         return self._client.llen(key)
 
-    def has_in_queue(self, sub_id: str) -> bool:
-        return sub_id in self._client.lrange(P_QUEUE_KEY, 0, -1) or sub_id in self._client.lrange(S_QUEUE_KEY, 0, -1)
-
-    def push_secondary_if_locked(self, sub_id: str) -> bool:
-        """Push ``sub_id`` to the S-Queue if the safety lock is held by someone else."""
+    def push_secondary_if_locked(self, sub_id: str, operation: str = OPERATION_FULL) -> bool:
+        """Push to the S-Queue if the safety lock is held by someone else."""
         if not self.acquire_lock(sub_id, blocking=False):
-            self.push_secondary(sub_id)
+            self.push_secondary(sub_id, operation=operation)
             return True
         return False
 
@@ -124,8 +165,7 @@ class QueueManager:
     def acquire_lock(self, sub_id: str, *, blocking: bool = True, ttl: int = LOCK_TTL) -> bool:
         key = self._lock_key(sub_id)
         if blocking:
-            # Loop briefly to acquire
-            for _ in range(50):  # 50 * 0.1s = 5s
+            for _ in range(50):
                 if self._client.set(key, "1", nx=True, ex=ttl):
                     return True
                 time.sleep(0.1)

@@ -116,6 +116,7 @@
   // ---- Routing ----
   let currentView = 'dashboard';
   let currentPluginId = null;
+  let currentDkbServiceId = null;
   let subscriptionsCache = {};
   let sseSource = null;
 
@@ -142,6 +143,19 @@
       showOnly('view-activity');
       document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'activity'));
       loadActivity();
+    } else if (view === 'remote-dkbs') {
+      showOnly('view-remote-dkbs');
+      document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'remote-dkbs'));
+      loadDkbServices();
+    } else if (view === 'dkb-datastores') {
+      currentDkbServiceId = params.service_id;
+      showOnly('view-dkb-datastores');
+      document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
+      loadDkbDatastores(params.service_id);
+    } else if (view === 'all-datastores') {
+      showOnly('view-all-datastores');
+      document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'all-datastores'));
+      loadAllDatastores();
     } else if (view === 'devlab') {
       showOnly('view-devlab');
       document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'devlab'));
@@ -164,7 +178,7 @@
   }
 
   function showOnly(viewId) {
-    ['view-dashboard', 'view-data-sources', 'view-subscriptions-all', 'view-subscriptions', 'view-activity', 'view-event-detail', 'view-devlab'].forEach(id => {
+    ['view-dashboard', 'view-data-sources', 'view-subscriptions-all', 'view-subscriptions', 'view-activity', 'view-event-detail', 'view-devlab', 'view-remote-dkbs', 'view-dkb-datastores', 'view-all-datastores'].forEach(id => {
       $(id).style.display = (id === viewId) ? 'block' : 'none';
     });
   }
@@ -204,6 +218,10 @@
       // split('/') leaves "?cb=3" attached to the plugin id and breaks
       // the schema fetch (which 200s with the wrong shape).
       params.plugin_id = restWithQuery[0].split('?')[0];
+    } else if (view === 'dkb-datastores' && restWithQuery[0]) {
+      params.service_id = restWithQuery[0].split('?')[0];
+    } else if (view === 'remote-dkbs' || view === 'all-datastores') {
+      // no params needed
     }
     if (view === 'devlab' && restWithQuery[0]) {
       // Strip leading '?' if present, then split key=value pairs
@@ -218,6 +236,7 @@
   }
 
   $('back-to-dashboard').addEventListener('click', () => { location.hash = '#/data-sources'; });
+  $('dkb-back-to-services').addEventListener('click', () => { location.hash = '#/remote-dkbs'; });
 
   // ---- Plugins (Data Sources) ----
   async function loadPlugins() {
@@ -1075,6 +1094,8 @@
   // ---- All Subscriptions (cross-plugin list) ----
   let allSubsCache = [];
   let allSubsActivity = {};
+  let dkbServicesCache = {};
+  let dkbDatastoresCache = {};
   let allSubsSort = { key: 'last_updated', dir: 'desc' };
 
   async function loadAllSubscriptions() {
@@ -1186,11 +1207,285 @@
     });
   });
 
+  // ---- DKB Services ----
+  async function loadDkbServices() {
+    try {
+      const services = await api('/dkb_services');
+      dkbServicesCache = services;
+      const grid = $('dkb-service-grid');
+      grid.innerHTML = '';
+      for (const s of services) {
+        const card = document.createElement('div');
+        card.className = 'plugin-card';
+        card.innerHTML = `
+          <img src="/assets/${escapeHtml(s.icon)}" onerror="this.src='/assets/default_icon.png'" alt="" />
+          <div>
+            <div class="plugin-name">${escapeHtml(s.name)}</div>
+            <small>${escapeHtml(s.description || '')}</small>
+          </div>
+        `;
+        card.addEventListener('click', () => { location.hash = `#/dkb-datastores/${s.service_id}`; });
+        grid.appendChild(card);
+      }
+    } catch (e) { console.error(e); }
+  }
+
+  // ---- DKB Datastores (per service) ----
+  async function loadDkbDatastores(serviceId) {
+    try {
+      const services = await api('/dkb_services');
+      const svc = services.find(s => s.service_id === serviceId);
+      if (svc) {
+        $('dkb-service-title').textContent = svc.name;
+        const iconEl = $('dkb-service-icon');
+        iconEl.src = `/assets/${escapeHtml(svc.icon)}`;
+        iconEl.onerror = () => { iconEl.src = '/assets/default_icon.png'; };
+      }
+      const datastores = await api(`/dkb_services/${serviceId}/datastores`);
+      renderDkbDatastores(datastores);
+      $('dkb-create-datastore-btn').onclick = () => openDkbForm(serviceId, null);
+      $('dkb-edit-service-btn').onclick = () => { /* stub */ };
+      $('dkb-delete-service-btn').onclick = () => { /* stub */ };
+    } catch (e) { console.error(e); }
+  }
+
+  function renderDkbDatastores(datastores) {
+    const list = $('dkb-datastore-list');
+    list.innerHTML = '';
+    if (!datastores || !datastores.length) {
+      list.innerHTML = '<p class="sub-row-meta">No datastores yet. Create one to get started.</p>';
+      return;
+    }
+    for (const ds of datastores) {
+      list.appendChild(buildDkbDatastoreRow(ds));
+    }
+  }
+
+  function buildDkbDatastoreRow(ds) {
+    const row = document.createElement('div');
+    row.className = 'subscription-row';
+    row.dataset.dsId = ds.datastore_id;
+    const status = ds.status || 'ENABLED';
+    const isTerminal = status === 'DELETED';
+    const canUpdate = ['ENABLED', 'ENQUEUED', 'IN_PROGRESS'].includes(status);
+    const canEnable = status === 'ERROR' || status === 'DISABLED';
+    const toggleLabel = canEnable ? 'Enable' : 'Disable';
+    const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
+    let subsInfo = '';
+    if (ds.subscriptions && ds.subscriptions.length) {
+      const names = ds.subscriptions.map(s => s.subscription_name || s.subscription_id).join(', ');
+      subsInfo = `<span class="sub-row-meta" style="margin-left:8px;">Subs: ${escapeHtml(names)}</span>`;
+    }
+    row.innerHTML = `
+      <div class="sub-row-header">
+        <div>
+          <span class="sub-row-name">${escapeHtml(ds.name)}</span>
+          <span class="badge badge-${status}">${status}</span>
+          ${subsInfo}
+          <span class="sub-row-meta" style="margin-left:8px;">Updated: ${escapeHtml(relativeTime(ds.last_updated))}</span>
+          ${ds.subscriptions && ds.subscriptions[0] && ds.subscriptions[0].last_message
+            ? `<span class="sub-row-meta sub-row-message" style="margin-left:8px;">${escapeHtml(ds.subscriptions[0].last_message)}</span>`
+            : ''}
+        </div>
+        <div class="sub-row-actions"></div>
+      </div>
+    `;
+    const actions = row.querySelector('.sub-row-actions');
+    if (canUpdate) {
+      actions.appendChild(button('Update', 'btn-success', () => triggerDkbUpdate(ds.datastore_id)));
+    }
+    actions.appendChild(button('Edit', 'btn-primary', () => openDkbForm(ds.service_id, ds)));
+    if (canEnable) {
+      actions.appendChild(button('Enable', 'btn-primary', () => setDkbStatus(ds.datastore_id, 'ENABLED')));
+    } else if (!isTerminal) {
+      actions.appendChild(button('Disable', 'btn-destructive', () => setDkbStatus(ds.datastore_id, 'DISABLED')));
+    }
+    if (!isTerminal) {
+      actions.appendChild(button('Delete', 'btn-destructive', () => confirmDkbDelete(ds)));
+    }
+    return row;
+  }
+
+  // ---- All Datastores ----
+  async function loadAllDatastores() {
+    try {
+      const datastores = await api('/dkb_datastores');
+      dkbDatastoresCache = datastores;
+      renderAllDatastoresTable();
+    } catch (e) { console.error(e); }
+  }
+
+  function renderAllDatastoresTable() {
+    const list = $('all-datastores-list');
+    list.innerHTML = '';
+    if (!dkbDatastoresCache || !dkbDatastoresCache.length) {
+      list.innerHTML = '<p class="sub-row-meta" style="padding:16px;">No datastores yet.</p>';
+      return;
+    }
+    for (const ds of dkbDatastoresCache) {
+      list.appendChild(buildAllDatastoresRow(ds));
+    }
+  }
+
+  function buildAllDatastoresRow(ds) {
+    const row = document.createElement('div');
+    row.className = 'all-subs-row';
+    const status = ds.status || 'ENABLED';
+    const isTerminal = status === 'DELETED';
+    const canTrigger = ['ENABLED', 'ENQUEUED', 'IN_PROGRESS'].includes(status);
+    const canEnable = status === 'ERROR' || status === 'DISABLED';
+    const toggleLabel = canEnable ? 'Enable' : 'Disable';
+    const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
+    row.innerHTML = `
+      <span class="all-subs-col-name">${escapeHtml(ds.name)}</span>
+      <span class="all-subs-col-plugin">${escapeHtml(ds.service_name || '')}</span>
+      <span class="all-subs-col-status"><span class="badge badge-${status}">${escapeHtml(status)}</span></span>
+      <span class="all-subs-col-updated">${escapeHtml(relativeTime(ds.last_updated))}</span>
+      <span class="all-subs-col-edit"><button class="btn btn-primary" data-ds="${escapeHtml(ds.datastore_id)}" data-svc="${escapeHtml(ds.service_id)}" ${isTerminal ? 'disabled' : ''}>Edit</button></span>
+      <span class="all-subs-col-toggle"><button class="btn ${toggleClass}" data-ds="${escapeHtml(ds.datastore_id)}" data-target="${canEnable ? 'ENABLED' : 'DISABLED'}" ${isTerminal ? 'disabled' : ''}>${toggleLabel}</button></span>
+      <span class="all-subs-col-update"><button class="btn btn-success" data-ds="${escapeHtml(ds.datastore_id)}" ${canTrigger ? '' : 'disabled'}>Update</button></span>
+    `;
+    row.querySelectorAll('button').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const dsId = btn.dataset.ds;
+        if (btn.textContent === 'Edit') {
+          const detail = await api(`/dkb_datastores/${dsId}`);
+          openDkbForm(detail.service_id, detail);
+        } else if (btn.textContent === 'Enable' || btn.textContent === 'Disable') {
+          await api(`/dkb_datastores/${dsId}/status`, { method: 'POST', body: JSON.stringify({ status: btn.dataset.target }) });
+        } else if (btn.textContent === 'Update') {
+          await api(`/dkb_datastores/${dsId}/update`, { method: 'POST' });
+        }
+      });
+    });
+    return row;
+  }
+
+  // ---- DKB Actions ----
+  async function triggerDkbUpdate(dsId) {
+    try { await api(`/dkb_datastores/${dsId}/update`, { method: 'POST' }); }
+    catch (e) { alert('Update failed: ' + e.message); }
+  }
+
+  async function setDkbStatus(dsId, status) {
+    try { await api(`/dkb_datastores/${dsId}/status`, { method: 'POST', body: JSON.stringify({ status }) }); }
+    catch (e) { alert('Status change failed: ' + e.message); }
+  }
+
+  async function confirmDkbDelete(ds) {
+    if (!confirm(`Delete datastore '${ds.name}'?\n\nRemote files will be removed. This cannot be undone.`)) return;
+    try { await api(`/dkb_datastores/${ds.datastore_id}`, { method: 'DELETE' }); }
+    catch (e) { alert('Delete failed: ' + e.message); }
+  }
+
+  // ---- DKB Form ----
+  let dkbFormServiceId = null;
+  let dkbFormDatastoreId = null;
+  let dkbAllSubsList = [];
+
+  async function openDkbForm(serviceId, ds) {
+    dkbFormServiceId = serviceId;
+    dkbFormDatastoreId = ds ? ds.datastore_id : null;
+    const services = await api('/dkb_services');
+    const svc = services.find(s => s.service_id === serviceId);
+    $('dkb-form-title').textContent = ds ? `Edit Datastore (${svc ? svc.name : ''})` : `Create Datastore (${svc ? svc.name : ''})`;
+    await buildDkbForm(ds);
+    $('dkb-form-modal').style.display = 'flex';
+  }
+
+  async function buildDkbForm(ds) {
+    const fields = $('dkb-form-fields');
+    fields.innerHTML = '';
+    const isEdit = !!ds;
+    // Name
+    const nameDiv = document.createElement('div'); nameDiv.className = 'form-field';
+    nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label><input type="text" name="ds_name" value="${escapeHtml(ds ? ds.name : '')}" required />`;
+    fields.appendChild(nameDiv);
+    // API URL
+    const urlDiv = document.createElement('div'); urlDiv.className = 'form-field';
+    urlDiv.innerHTML = `<label>API URL <span class="form-field-error">*</span></label><input type="text" name="api_url" value="${escapeHtml(ds ? ds.api_url : '')}" required />`;
+    fields.appendChild(urlDiv);
+    // API Key
+    const keyDiv = document.createElement('div'); keyDiv.className = 'form-field';
+    keyDiv.innerHTML = `<label>API Key ${!isEdit ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" ${!isEdit ? 'required' : ''} placeholder="${isEdit ? 'leave blank to keep existing' : ''}" />
+    <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : ''}</small>`;
+    fields.appendChild(keyDiv);
+    // ds_extra_params
+    const extraDiv = document.createElement('div'); extraDiv.className = 'form-field';
+    extraDiv.innerHTML = `<label>Extra Params (JSON)</label><textarea name="ds_extra_params" rows="4">${escapeHtml(ds ? JSON.stringify(ds.ds_extra_params || {}, null, 2) : '{}')}</textarea>`;
+    fields.appendChild(extraDiv);
+    // Subscription transfer list
+    const transferDiv = document.createElement('div'); transferDiv.className = 'form-field';
+    transferDiv.innerHTML = `<label>Linked Subscriptions</label><div class="transfer-list"><div class="transfer-panel"><div class="transfer-header">Available</div><select id="dkb-available-subs" multiple></select></div><div class="transfer-buttons"><button type="button" class="btn btn-primary" id="dkb-transfer-right">&gt;&gt;</button><button type="button" class="btn btn-primary" id="dkb-transfer-left">&lt;&lt;</button></div><div class="transfer-panel"><div class="transfer-header">Linked</div><select id="dkb-linked-subs" multiple></select></div></div>`;
+    fields.appendChild(transferDiv);
+    // Populate subscription lists
+    const allSubs = await api('/subscriptions');
+    dkbAllSubsList = allSubs || [];
+    const linkedIds = (ds && ds.subscriptions) ? ds.subscriptions.map(s => s.subscription_id) : [];
+    populateTransferList(linkedIds);
+  }
+
+  function populateTransferList(linkedIds) {
+    const avail = $('dkb-available-subs');
+    const linked = $('dkb-linked-subs');
+    avail.innerHTML = ''; linked.innerHTML = '';
+    const linkedSet = new Set(linkedIds);
+    for (const sub of dkbAllSubsList) {
+      const opt = document.createElement('option');
+      opt.value = sub.id;
+      opt.textContent = `${sub.name} (${sub.plugin_id})`;
+      if (linkedSet.has(sub.id)) {
+        linked.appendChild(opt);
+      } else {
+        avail.appendChild(opt);
+      }
+    }
+    // Wire transfer buttons
+    $('dkb-transfer-right').onclick = () => {
+      const selected = Array.from(avail.selectedOptions);
+      for (const opt of selected) { linked.appendChild(opt); }
+    };
+    $('dkb-transfer-left').onclick = () => {
+      const selected = Array.from(linked.selectedOptions);
+      for (const opt of selected) { avail.appendChild(opt); }
+    };
+  }
+
+  $('dkb-form-cancel').addEventListener('click', () => { $('dkb-form-modal').style.display = 'none'; });
+
+  $('dkb-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const fd = new FormData($('dkb-form'));
+    const name = fd.get('ds_name');
+    const apiUrl = fd.get('api_url');
+    const apiKey = fd.get('api_key');
+    let dsExtra = fd.get('ds_extra_params');
+    try { dsExtra = JSON.parse(dsExtra); } catch (e) { dsExtra = {}; }
+    const linked = Array.from($('dkb-linked-subs').options).map(o => o.value);
+    const body = { name, api_url: apiUrl, api_key: apiKey, ds_extra_params: dsExtra, subscription_ids: linked };
+    try {
+      if (dkbFormDatastoreId) {
+        await api(`/dkb_datastores/${dkbFormDatastoreId}`, { method: 'PUT', body: JSON.stringify(body) });
+      } else {
+        await api(`/dkb_services/${dkbFormServiceId}/datastores`, { method: 'POST', body: JSON.stringify(body) });
+      }
+      $('dkb-form-modal').style.display = 'none';
+      if (currentView === 'dkb-datastores' && currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
+      if (currentView === 'all-datastores') loadAllDatastores();
+    } catch (e) { alert('Save failed: ' + e.message); }
+  });
+
+  // ---- DKB SSE handler ----
+  function handleDatastoreUpdate(payload) {
+    if (!payload || !payload.datastore_id) return;
+    if (currentView === 'dkb-datastores') {
+      if (currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
+    } else if (currentView === 'all-datastores') {
+      loadAllDatastores();
+    }
+  }
+
   // ---- Dev Lab ----
-  // Edit Plugin mode state. Set to a plugin_id string when the lab is in
-  // edit mode (entered via the yellow Edit Plugin button on a plugin's
-  // subscription list). null = Create New mode.
-  let devlabEditPluginId = null;
 
   // ---- Plugin Development Guide ----
   let _cachedGuideMd = null;
@@ -1348,6 +1643,10 @@
         handleSubscriptionUpdate(data.data);
       } else if (data.type === 'subscription_deleted') {
         handleSubscriptionDeleted(data.data);
+      } else if (data.type === 'datastore_update') {
+        handleDatastoreUpdate(data.data);
+      } else if (data.type === 'datastore_deleted') {
+        if (currentView === 'all-datastores') loadAllDatastores();
       }
       // 'snapshot_complete' is informational; no action needed.
     };

@@ -37,6 +37,8 @@
         <a href="#/dashboard" class="nav-link active" data-view="dashboard">Dashboard</a>
         <a href="#/data-sources" class="nav-link" data-view="data-sources">Data Sources</a>
         <a href="#/all-subscriptions" class="nav-link" data-view="all-subscriptions">Subscriptions</a>
+        <a href="#/remote-dkbs" class="nav-link" data-view="remote-dkbs">Remote DKBs</a>
+        <a href="#/all-datastores" class="nav-link" data-view="all-datastores">All Datastores</a>
         <a href="#/activity" class="nav-link" data-view="activity">Recent Activity</a>
         <a href="#/devlab" class="nav-link" data-view="devlab">Developer Lab</a>
       </nav>
@@ -203,6 +205,55 @@
             <div id="devlab-guide-content" class="devlab-guide-content"></div>
           </div>
         </section>
+        <section id="view-remote-dkbs" class="view" style="display: none;">
+          <h2>Remote DKBs</h2>
+          <div id="dkb-service-grid" class="plugin-grid"></div>
+        </section>
+        <section id="view-dkb-datastores" class="view" style="display: none;">
+          <div class="sub-header">
+            <button class="btn btn-secondary" id="dkb-back-to-services">&larr; Back</button>
+            <div class="plugin-title-group">
+              <img id="dkb-service-icon" class="plugin-icon-header" src="" alt="" />
+              <h2 id="dkb-service-title"></h2>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-primary" id="dkb-create-datastore-btn">+ Create New Datastore</button>
+              <button class="btn btn-warning" id="dkb-edit-service-btn" disabled>Edit DKB</button>
+              <button class="btn btn-destructive" id="dkb-delete-service-btn" disabled>Delete DKB</button>
+            </div>
+          </div>
+          <div id="dkb-datastore-list" class="subscription-list"></div>
+        </section>
+        <section id="view-all-datastores" class="view" style="display: none;">
+          <div class="sub-header">
+            <h2>All Datastores</h2>
+          </div>
+          <div class="all-subs-table">
+            <div class="all-subs-row all-subs-header">
+              <span class="all-subs-col-name sortable" data-sort="name">Datastore</span>
+              <span class="all-subs-col-plugin sortable" data-sort="service_name">DKB Service</span>
+              <span class="all-subs-col-status sortable" data-sort="status">Status</span>
+              <span class="all-subs-col-updated sortable" data-sort="last_updated">Updated</span>
+              <span class="all-subs-col-edit">Edit</span>
+              <span class="all-subs-col-toggle">Enable</span>
+              <span class="all-subs-col-update">Update</span>
+            </div>
+            <div id="all-datastores-list" class="all-subs-body"></div>
+          </div>
+        </section>
+        <!-- DKB Datastore modal -->
+        <div id="dkb-form-modal" class="modal" style="display: none;">
+          <div class="modal-content">
+            <h3 id="dkb-form-title">Create Datastore</h3>
+            <form id="dkb-form">
+              <div id="dkb-form-fields"></div>
+              <div class="form-buttons">
+                <button type="button" class="btn btn-secondary" id="dkb-form-cancel">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save</button>
+              </div>
+            </form>
+          </div>
+        </div>
         <!-- Form modal -->
         <div id="form-modal" class="modal" style="display: none;">
           <div class="modal-content">

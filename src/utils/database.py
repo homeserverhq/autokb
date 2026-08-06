@@ -105,6 +105,59 @@ class PluginRegistryState(Base):
 
 
 # ---------------------------------------------------------------------------
+# DKB Models
+# ---------------------------------------------------------------------------
+class DKBService(Base):
+    __tablename__ = "dkb_service"
+    id = Column(String(36), primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+
+    datastores = relationship("DKBDatastore", back_populates="service", cascade="all, delete-orphan")
+
+
+class DKBDatastore(Base):
+    __tablename__ = "dkb_datastore"
+    id = Column(String(36), primary_key=True)
+    service_id = Column(String(36), ForeignKey("dkb_service.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    api_url = Column(Text, nullable=False)
+    api_key = Column(Text, nullable=False)
+    remote_datastore_id = Column(Text, nullable=True)
+    ds_extra_params = Column(JSON, default=dict)
+
+    service = relationship("DKBService", back_populates="datastores")
+
+
+class DatastoreSubscription(Base):
+    __tablename__ = "datastore_subscriptions"
+    datastore_id = Column(String(36), ForeignKey("dkb_datastore.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+    subscription_id = Column(String(36), ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+    status = Column(String(32), nullable=False, default="ENQUEUED")
+    last_updated = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_message = Column(Text, nullable=True)
+
+
+class AKBDatafile(Base):
+    __tablename__ = "akb_datafile"
+    id = Column(String(36), primary_key=True)
+    subscription_id = Column(String(36), ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False, index=True)
+    path = Column(Text, nullable=False, unique=True)
+    size = Column(BigInteger, nullable=False)
+    mtime = Column(DateTime(timezone=True), nullable=False)
+    hash = Column(Text, nullable=False)
+    last_checked = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class DatastoreDatafile(Base):
+    __tablename__ = "datastore_datafile"
+    datastore_id = Column(String(36), ForeignKey("dkb_datastore.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+    datafile_id = Column(String(36), ForeignKey("akb_datafile.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+    remote_datafile_id = Column(Text, nullable=False)
+    hash = Column(Text, nullable=False)
+
+
+# ---------------------------------------------------------------------------
 # DatabaseManager
 # ---------------------------------------------------------------------------
 class DatabaseManager:
@@ -586,6 +639,288 @@ class DatabaseManager:
             if existing is not None:
                 s.delete(existing)
 
+    # ----- DKB service CRUD -----
+    def upsert_dkb_service(self, name: str, description: str = "") -> Any:
+        with self.get_session() as s:
+            existing = s.query(DKBService).filter(DKBService.name == name).first()
+            if existing:
+                if description:
+                    existing.description = description
+                return existing
+            svc = DKBService(id=str(uuid7()), name=name, description=description)
+            s.add(svc)
+            try:
+                s.flush()
+            except IntegrityError:
+                s.rollback()
+                existing = s.query(DKBService).filter(DKBService.name == name).first()
+                return existing
+            return svc
+
+    def list_dkb_services(self) -> List[DKBService]:
+        with self.get_session() as s:
+            return s.query(DKBService).order_by(DKBService.name).all()
+
+    def get_dkb_service(self, service_id: str) -> Optional[DKBService]:
+        with self.get_session() as s:
+            return s.query(DKBService).filter(DKBService.id == service_id).first()
+
+    # ----- datastore CRUD -----
+    def create_datastore(self, service_id: str, name: str, api_url: str, api_key: str,
+                         ds_extra_params: Dict[str, Any] = None) -> DKBDatastore:
+        encrypted = self._cipher.encrypt(api_key) if api_key else ""
+        ds = DKBDatastore(
+            id=str(uuid7()),
+            service_id=service_id, name=name, api_url=api_url,
+            api_key=encrypted,
+            ds_extra_params=ds_extra_params or {},
+        )
+        with self.get_session() as s:
+            s.add(ds)
+            s.flush()
+            self._log.info("datastore_created", datastore_id=ds.id, name=name)
+            return ds
+
+    def get_datastore(self, datastore_id: str) -> Optional[DKBDatastore]:
+        with self.get_session() as s:
+            return s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).first()
+
+    def list_datastores(self, service_id: Optional[str] = None) -> List[DKBDatastore]:
+        with self.get_session() as s:
+            q = s.query(DKBDatastore)
+            if service_id:
+                q = q.filter(DKBDatastore.service_id == service_id)
+            return q.order_by(DKBDatastore.name).all()
+
+    def update_datastore(self, datastore_id: str, *, name: str = None, api_url: str = None,
+                         api_key: str = None, ds_extra_params: Dict[str, Any] = None) -> Optional[DKBDatastore]:
+        with self.get_session() as s:
+            ds = s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).first()
+            if not ds:
+                return None
+            if name is not None:
+                ds.name = name
+            if api_url is not None:
+                ds.api_url = api_url
+            if api_key is not None and api_key.strip():
+                ds.api_key = self._cipher.encrypt(api_key)
+            if ds_extra_params is not None:
+                ds.ds_extra_params = ds_extra_params
+            s.flush()
+            s.refresh(ds)
+            return ds
+
+    def set_datastore_remote_id(self, datastore_id: str, remote_id: str) -> None:
+        with self.get_session() as s:
+            s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).update({"remote_datastore_id": remote_id})
+
+    def delete_datastore_row(self, datastore_id: str) -> None:
+        with self.get_session() as s:
+            ds = s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).first()
+            if ds:
+                s.delete(ds)
+
+    def count_datastore_subscriptions_for_datastore(self, datastore_id: str) -> int:
+        with self.get_session() as s:
+            return s.query(DatastoreSubscription).filter(
+                DatastoreSubscription.datastore_id == datastore_id
+            ).count()
+
+    # ----- datastore-subscription link -----
+    def list_datastore_subscriptions(self, datastore_id: str) -> List[DatastoreSubscription]:
+        with self.get_session() as s:
+            return s.query(DatastoreSubscription).filter(
+                DatastoreSubscription.datastore_id == datastore_id
+            ).all()
+
+    def list_datastores_for_subscription(self, sub_id: str) -> List[DatastoreSubscription]:
+        with self.get_session() as s:
+            return s.query(DatastoreSubscription).filter(
+                DatastoreSubscription.subscription_id == sub_id
+            ).all()
+
+    def link_datastore_subscriptions(self, datastore_id: str, sub_ids: List[str], status: str = "ENQUEUED") -> None:
+        with self.get_session() as s:
+            for sid in sub_ids:
+                existing = s.query(DatastoreSubscription).filter(
+                    DatastoreSubscription.datastore_id == datastore_id,
+                    DatastoreSubscription.subscription_id == sid,
+                ).first()
+                if not existing:
+                    s.add(DatastoreSubscription(
+                        datastore_id=datastore_id, subscription_id=sid,
+                        status=status,
+                        last_updated=datetime.now(timezone.utc),
+                    ))
+            self._notify_datastore(datastore_id)
+
+    def set_datastore_subscriptions_status(self, datastore_id: str, sub_ids: List[str], status: str,
+                                           message: str = None) -> None:
+        now = datetime.now(timezone.utc)
+        with self.get_session() as s:
+            for sid in sub_ids:
+                row = s.query(DatastoreSubscription).filter(
+                    DatastoreSubscription.datastore_id == datastore_id,
+                    DatastoreSubscription.subscription_id == sid,
+                ).first()
+                if row:
+                    row.status = status
+                    row.last_updated = now
+                    if message is not None:
+                        row.last_message = message
+            self._notify_datastore(datastore_id)
+
+    def set_datastore_subscription_status(self, datastore_id: str, sub_id: str, status: str,
+                                          message: str = None) -> None:
+        now = datetime.now(timezone.utc)
+        with self.get_session() as s:
+            row = s.query(DatastoreSubscription).filter(
+                DatastoreSubscription.datastore_id == datastore_id,
+                DatastoreSubscription.subscription_id == sub_id,
+            ).first()
+            if row:
+                row.status = status
+                row.last_updated = now
+                if message is not None:
+                    row.last_message = message
+            self._notify_datastore(datastore_id)
+
+    def delete_datastore_subscription(self, datastore_id: str, sub_id: str) -> None:
+        with self.get_session() as s:
+            row = s.query(DatastoreSubscription).filter(
+                DatastoreSubscription.datastore_id == datastore_id,
+                DatastoreSubscription.subscription_id == sub_id,
+            ).first()
+            if row:
+                s.delete(row)
+
+    def delete_datastore_subscriptions_for_datastore(self, datastore_id: str) -> None:
+        with self.get_session() as s:
+            s.query(DatastoreSubscription).filter(
+                DatastoreSubscription.datastore_id == datastore_id
+            ).delete()
+
+    # ----- akb_datafile -----
+    def get_or_create_datafile(self, sub_id: str, path: str, size: int, mtime: float, datafile_hash: str) -> AKBDatafile:
+        from datetime import timezone as tz
+        mtime_dt = datetime.fromtimestamp(mtime, tz=tz.utc)
+        with self.get_session() as s:
+            existing = s.query(AKBDatafile).filter(AKBDatafile.path == path).first()
+            if existing:
+                existing.size = size
+                existing.mtime = mtime_dt
+                existing.hash = datafile_hash
+                existing.last_checked = datetime.now(tz=tz.utc)
+                s.flush()
+                return existing
+            df = AKBDatafile(
+                id=str(uuid7()), subscription_id=sub_id, path=path,
+                size=size, mtime=mtime_dt, hash=datafile_hash,
+            )
+            s.add(df)
+            s.flush()
+            return df
+
+    def get_datafile(self, datafile_id: str) -> Optional[AKBDatafile]:
+        with self.get_session() as s:
+            return s.query(AKBDatafile).filter(AKBDatafile.id == datafile_id).first()
+
+    def get_datafile_by_path(self, path: str) -> Optional[AKBDatafile]:
+        with self.get_session() as s:
+            return s.query(AKBDatafile).filter(AKBDatafile.path == path).first()
+
+    def update_datafile_stats(self, datafile_id: str, size: int, mtime: float, datafile_hash: str) -> None:
+        from datetime import timezone as tz
+        with self.get_session() as s:
+            df = s.query(AKBDatafile).filter(AKBDatafile.id == datafile_id).first()
+            if df:
+                df.size = size
+                df.mtime = datetime.fromtimestamp(mtime, tz=tz.utc)
+                df.hash = datafile_hash
+                df.last_checked = datetime.now(tz=tz.utc)
+
+    def update_datafile_last_checked(self, datafile_id: str) -> None:
+        from datetime import timezone as tz
+        with self.get_session() as s:
+            s.query(AKBDatafile).filter(AKBDatafile.id == datafile_id).update(
+                {"last_checked": datetime.now(tz=tz.utc)}
+            )
+
+    def set_datafiles_last_checked_batch(self, sub_id: str, checked_at) -> None:
+        with self.get_session() as s:
+            s.query(AKBDatafile).filter(AKBDatafile.subscription_id == sub_id).update(
+                {"last_checked": checked_at}
+            )
+
+    def delete_datafile(self, datafile_id: str) -> None:
+        with self.get_session() as s:
+            df = s.query(AKBDatafile).filter(AKBDatafile.id == datafile_id).first()
+            if df:
+                s.delete(df)
+
+    def list_datafiles_for_subscription(self, sub_id: str) -> List[AKBDatafile]:
+        with self.get_session() as s:
+            return s.query(AKBDatafile).filter(AKBDatafile.subscription_id == sub_id).all()
+
+    def list_datafiles_for_datastore(self, datastore_id: str) -> List[DatastoreDatafile]:
+        with self.get_session() as s:
+            return s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == datastore_id
+            ).all()
+
+    # ----- datastore_datafile -----
+    def get_datastore_datafile(self, datastore_id: str, datafile_id: str) -> Optional[DatastoreDatafile]:
+        with self.get_session() as s:
+            return s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == datastore_id,
+                DatastoreDatafile.datafile_id == datafile_id,
+            ).first()
+
+    def insert_datastore_datafile(self, datastore_id: str, datafile_id: str, remote_id: str, datafile_hash: str) -> None:
+        with self.get_session() as s:
+            s.add(DatastoreDatafile(
+                datastore_id=datastore_id, datafile_id=datafile_id,
+                remote_datafile_id=remote_id, hash=datafile_hash,
+            ))
+            self._notify_datastore(datastore_id)
+
+    def update_datastore_datafile_hash(self, datastore_id: str, datafile_id: str, new_hash: str) -> None:
+        with self.get_session() as s:
+            s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == datastore_id,
+                DatastoreDatafile.datafile_id == datafile_id,
+            ).update({"hash": new_hash})
+
+    def delete_datastore_datafile(self, datastore_id: str, datafile_id: str) -> None:
+        with self.get_session() as s:
+            s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == datastore_id,
+                DatastoreDatafile.datafile_id == datafile_id,
+            ).delete()
+
+    def delete_datastore_datafiles_for_datastore(self, datastore_id: str) -> None:
+        with self.get_session() as s:
+            s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == datastore_id
+            ).delete()
+
+    # ----- DKB notify -----
+    def _notify_datastore(self, datastore_id: str) -> None:
+        try:
+            payload = json.dumps({"type": "datastore", "datastore_id": datastore_id}, sort_keys=True, separators=(",", ":"))
+            with self.get_session() as s:
+                s.execute(text(f"SELECT pg_notify('{NOTIFY_CHANNEL}', :payload)"), {"payload": payload})
+        except Exception:
+            pass
+
+    def decrypt_datastore_api_key(self, ds: DKBDatastore) -> str:
+        if not ds.api_key:
+            return ""
+        try:
+            return self._cipher.decrypt(ds.api_key)
+        except Exception:
+            return ds.api_key  # fallback: pass through
+
     # ----- helpers -----
     def decrypt_config(self, sub: Subscription, password_field_names: List[str]) -> Dict[str, Any]:
         return decrypt_password_fields(sub.config or {}, password_field_names, self._cipher)
@@ -625,4 +960,8 @@ def run_migrations(database_url: str) -> None:
     command.upgrade(config, "head")
 
 
-__all__ = ["DatabaseManager", "Base", "Subscription", "EventLog", "PluginRegistryState", "run_migrations"]
+__all__ = [
+    "DatabaseManager", "Base", "Subscription", "EventLog", "PluginRegistryState",
+    "DKBService", "DKBDatastore", "DatastoreSubscription", "AKBDatafile", "DatastoreDatafile",
+    "run_migrations",
+]

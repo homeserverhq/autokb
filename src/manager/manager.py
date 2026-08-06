@@ -243,19 +243,11 @@ async def lifespan(app: FastAPI):
     reg.reload()
 
     # -- build DKB registry --
-    try:
-        dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component="dkb_registry", log_file=LOG_FILE)
-        dkb_registry.reload_all()
-        for rec in dkb_registry.list_records():
-            db.upsert_dkb_service(rec.service_name, rec.metadata.get("description", ""))
-        STATE["dkb_registry"] = dkb_registry
-    except Exception as _dkb_exc:
-        import traceback, sys
-        print("DKB INIT ERROR:", _dkb_exc, flush=True, file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        sys.stderr.flush()
-        STATE["dkb_registry"] = DKBRegistry(dkbs_dir="/src/dkbservices", component="fallback",
-                                             log_file=LOG_FILE)
+    dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component="dkb_registry", log_file=LOG_FILE)
+    dkb_registry.reload_all()
+    for rec in dkb_registry.list_records():
+        db.upsert_dkb_service(rec.service_name, rec.metadata.get("description", ""))
+    STATE["dkb_registry"] = dkb_registry
 
     # -- start trigger coordinator --
     from manager.scheduler import TriggerCoordinator
@@ -1485,11 +1477,13 @@ def api_dkb_delete_datastore(datastore_id: str):
         raise HTTPException(status_code=404, detail="Datastore not found")
     subs = db.list_datastore_subscriptions(datastore_id)
     sub_ids = list({s.subscription_id for s in subs})
-    # Mark all as DELETED and enqueue
     if sub_ids:
         db.set_datastore_subscriptions_status(datastore_id, sub_ids, status="DELETED")
         for sid in sub_ids:
             queue.push_primary(sid, operation="DKB_ONLY")
+    db.delete_datastore_datafiles_for_datastore(datastore_id)
+    db.delete_datastore_subscriptions_for_datastore(datastore_id)
+    db.delete_datastore_row(datastore_id)
     return {"deleted": True}
 
 

@@ -137,10 +137,11 @@ def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
             if item is None:
                 continue
             sub_id = item["sub_id"]
+            popped_op = item.get("operation", OPERATION_FULL)
             log.debug("queue_popped", sub_id=sub_id, action="queue", result=f"iter={iteration}")
 
-            # Resolve operation: if ANY FULL in queue → FULL, else → DKB_ONLY
-            has_full = queue.any_full_for(sub_id)
+            # Resolve operation: if popped item or any queued item is FULL → FULL
+            has_full = popped_op == OPERATION_FULL or queue.any_full_for(sub_id)
             op = OPERATION_FULL if has_full else OPERATION_DKB_ONLY
             queue.drain_all(sub_id)
 

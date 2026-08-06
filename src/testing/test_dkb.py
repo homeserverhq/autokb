@@ -41,6 +41,7 @@ from utils.misc_utils import uuid7
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://autokb:autokb@autokb-db:5432/autokb")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://autokb-redis:6379/0")
 TEST_OUTPUT = "/tmp/dkb_test_output"
+BACKEND_KEY = os.environ.get("AUTOKB_BACKEND_API_KEY", "")
 
 
 # ---- Helpers ----
@@ -109,13 +110,18 @@ class TestDKB(unittest.TestCase):
             while self.queue.client.llen(key):
                 self.queue.client.rpop(key)
         # Create a test subscription and DKB service
-        self._cleanup_test_data()
         self.sub, self.ds, self.ds_link = self._create_test_fixtures()
         # Ensure output dir exists
         os.makedirs(TEST_OUTPUT, exist_ok=True)
 
     def tearDown(self):
-        self._cleanup_test_data()
+        # Delete the per-test datastore fixture via API (normal operation)
+        if hasattr(self, "ds") and self.ds:
+            self._api_delete(f"/api/dkb_datastores/{self.ds.id}")
+        # Each test creates its own TestService via upsert in setUp;
+        # clean it up so the next test starts fresh and nothing leaks.
+        with self.db.get_session() as s:
+            s.query(DKBService).filter(DKBService.name == "TestService").delete()
         self.db.dispose()
         if os.path.isdir(TEST_OUTPUT):
             shutil.rmtree(TEST_OUTPUT)
@@ -123,12 +129,15 @@ class TestDKB(unittest.TestCase):
         if os.path.isdir(output_sub_dir):
             shutil.rmtree(output_sub_dir)
 
-    def _cleanup_test_data(self):
-        """Remove any rows we might have created."""
-        with self.db.get_session() as s:
-            for tbl in (DatastoreDatafile, AKBDatafile, DatastoreSubscription,
-                        DKBDatastore, DKBService):
-                s.query(tbl).delete()
+    def _api_delete(self, path: str) -> None:
+        import urllib.request, urllib.error
+        req = urllib.request.Request(f"http://localhost:80{path}", method="DELETE")
+        req.add_header("X-Api-Key", BACKEND_KEY)
+        try:
+            urllib.request.urlopen(req, timeout=10)
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
 
     def _create_test_fixtures(self):
         """Create a DKB service, datastore, and a subscription."""
@@ -180,6 +189,8 @@ class TestDKB(unittest.TestCase):
         self.assertEqual(svc2.id, svc.id)  # upsert returns existing
         services = self.db.list_dkb_services()
         self.assertIn(svc.id, [s.id for s in services])
+        with self.db.get_session() as s:
+            s.query(DKBService).filter(DKBService.id == svc.id).delete()
 
     def test_datastore_crud(self):
         svc = self.db.upsert_dkb_service("Svc", "")
@@ -203,6 +214,9 @@ class TestDKB(unittest.TestCase):
         self.db.set_datastore_remote_id(ds.id, "remote-xyz")
         fetched2 = self.db.get_datastore(ds.id)
         self.assertEqual(fetched2.remote_datastore_id, "remote-xyz")
+        with self.db.get_session() as s:
+            s.query(DKBDatastore).filter(DKBDatastore.id == ds.id).delete()
+            s.query(DKBService).filter(DKBService.id == svc.id).delete()
 
     def test_subscription_link_crud(self):
         svc = self.db.upsert_dkb_service("Svc", "")
@@ -227,6 +241,9 @@ class TestDKB(unittest.TestCase):
         self.db.delete_datastore_subscription(ds.id, self.sub)
         links3 = self.db.list_datastore_subscriptions(ds.id)
         self.assertEqual(len(links3), 0)
+        with self.db.get_session() as s:
+            s.query(DKBDatastore).filter(DKBDatastore.id == ds.id).delete()
+            s.query(DKBService).filter(DKBService.id == svc.id).delete()
 
     def test_datafile_crud(self):
         # Create a test file
@@ -300,6 +317,8 @@ class TestDKB(unittest.TestCase):
         self.db.delete_datastore_datafile(self.ds.id, df.id)
         ds_df3 = self.db.get_datastore_datafile(self.ds.id, df.id)
         self.assertIsNone(ds_df3)
+        with self.db.get_session() as s:
+            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
 
     # ---- 2. Queue JSON tests ----
 
@@ -386,6 +405,12 @@ class TestDKB(unittest.TestCase):
         # Should have datastore_datafile
         ds_df = self.db.get_datastore_datafile(self.ds.id, df.id)
         self.assertIsNotNone(ds_df)
+        with self.db.get_session() as s:
+            s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == self.ds.id,
+                DatastoreDatafile.datafile_id == df.id
+            ).delete()
+            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
 
     def test_base_update_datafile(self):
         ds_row = self.db.get_datastore(self.ds.id)
@@ -409,6 +434,12 @@ class TestDKB(unittest.TestCase):
 
         ds_df = self.db.get_datastore_datafile(self.ds.id, df.id)
         self.assertEqual(ds_df.hash, new_hash)
+        with self.db.get_session() as s:
+            s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == self.ds.id,
+                DatastoreDatafile.datafile_id == df.id
+            ).delete()
+            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
 
     def test_base_remove_datafile(self):
         ds_row = self.db.get_datastore(self.ds.id)
@@ -430,6 +461,8 @@ class TestDKB(unittest.TestCase):
         self.assertIn(("remove_datafile", "remote-del"), svc.calls)
         ds_df = self.db.get_datastore_datafile(self.ds.id, df.id)
         self.assertIsNone(ds_df)
+        with self.db.get_session() as s:
+            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
 
     def test_base_add_datastore(self):
         ds_row = self.db.get_datastore(self.ds.id)
@@ -508,6 +541,12 @@ class TestDKB(unittest.TestCase):
 
         # base_remove_datafile should have been called
         self.assertTrue(mock_svc.base_remove_datafile.called)
+        with self.db.get_session() as s:
+            s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == self.ds.id,
+                DatastoreDatafile.datafile_id == df.id
+            ).delete()
+            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
 
     @patch("worker.dkb_recon._get_service")
     def test_reconcile_skips_disabled_ds(self, mock_get_service):
@@ -551,12 +590,81 @@ class TestDKB(unittest.TestCase):
         # Reconcile completes gracefully (per-file errors are logged, not fatal)
         links = self.db.list_datastore_subscriptions(self.ds.id)
         self.assertEqual(links[0].status, STATE_ENABLED)
-
+        with self.db.get_session() as s:
+            leaked_path = f"/output/test_plugin/test_sub/error_test.md"
+            df = s.query(AKBDatafile).filter(
+                AKBDatafile.path == leaked_path).first()
+            if df:
+                s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "confirm":
         sys.argv.pop(1)
-        unittest.main()
+        suite = unittest.TestLoader().loadTestsFromTestCase(TestDKB)
+        runner = unittest.TextTestRunner(verbosity=2)
+        result = runner.run(suite)
+
+        # --- Leak check: runs AFTER all tests and their tearDowns ---
+        leaked: list[str] = []
+        db2 = _db()
+        try:
+            with db2.get_session() as s:
+                svc_names = ("TestService", "MyService", "Svc")
+                ds_names = ("TestDS", "MyDS", "MyDS-Updated", "DS")
+
+                leaked_svcs = s.query(DKBService).filter(
+                    DKBService.name.in_(svc_names)).all()
+                for svc in leaked_svcs:
+                    leaked.append(f"DKBService(id={svc.id[:8]}, name={svc.name!r})")
+                svc_ids = [svc.id for svc in leaked_svcs]
+
+                leaked_dss = s.query(DKBDatastore).filter(
+                    DKBDatastore.name.in_(ds_names)).all()
+                for ds in leaked_dss:
+                    leaked.append(f"DKBDatastore(id={ds.id[:8]}, name={ds.name!r})")
+                ds_ids = [ds.id for ds in leaked_dss]
+
+                leaked_files = s.query(AKBDatafile).filter(
+                    AKBDatafile.path.like("/tmp/dkb_test_output%") |
+                    AKBDatafile.path.like("/output/test_plugin/test_sub%")
+                ).all()
+                for f in leaked_files:
+                    leaked.append(f"AKBDatafile(id={f.id[:8]}, path={f.path!r})")
+                file_ids = [f.id for f in leaked_files]
+
+                if ds_ids:
+                    s.query(DatastoreDatafile).filter(
+                        DatastoreDatafile.datastore_id.in_(ds_ids)
+                    ).delete(synchronize_session=False)
+                    s.query(DatastoreSubscription).filter(
+                        DatastoreSubscription.datastore_id.in_(ds_ids)
+                    ).delete(synchronize_session=False)
+                    s.query(DKBDatastore).filter(
+                        DKBDatastore.id.in_(ds_ids)
+                    ).delete(synchronize_session=False)
+                if file_ids:
+                    s.query(DatastoreDatafile).filter(
+                        DatastoreDatafile.datafile_id.in_(file_ids)
+                    ).delete(synchronize_session=False)
+                    s.query(AKBDatafile).filter(
+                        AKBDatafile.id.in_(file_ids)
+                    ).delete(synchronize_session=False)
+                if svc_ids:
+                    s.query(DKBService).filter(
+                        DKBService.id.in_(svc_ids)
+                    ).delete(synchronize_session=False)
+        finally:
+            db2.dispose()
+
+        if leaked:
+            print(f"\n[LEAK] Found {len(leaked)} leftover DKB test artifact(s):")
+            for l in leaked:
+                print(f"  [LEAK] {l}")
+            print("[LEAK] Artifacts have been cleaned up.")
+            sys.exit(1)
+        else:
+            print("\n[LEAK] No leftover artifacts — all tests cleaned up properly.")
+            sys.exit(0 if result.wasSuccessful() else 1)
     else:
         print("Usage: python /src/testing/test_dkb.py confirm")
         sys.exit(1)

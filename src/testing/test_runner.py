@@ -251,6 +251,42 @@ def wait_for_new_event(sub_id: str, prev_count: int, timeout: float = 30.0) -> D
 
 
 # ---------------------------------------------------------------------------
+# DKB test helpers (reused by both e2e tests)
+# ---------------------------------------------------------------------------
+
+def _reset_dkb_calls():
+    import os as _os
+    for p in ("/output/.dkb_e2e_calls.json",):
+        if _os.path.isfile(p):
+            _os.remove(p)
+
+
+def _read_dkb_calls() -> List[List]:
+    import json as _json, os as _os
+    p = "/output/.dkb_e2e_calls.json"
+    if not _os.path.isfile(p):
+        return []
+    with open(p) as f:
+        return [_json.loads(line) for line in f if line.strip()]
+
+
+def _write_output_file(sub_name: str, fname: str, content: str) -> str:
+    import os as _os
+    p = f"/output/testDKBWriterPlugin/{sub_name}/{fname}"
+    _os.makedirs(_os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f:
+        f.write(content)
+    return p
+
+
+def _rm_output_dir(sub_name: str):
+    import os as _os, shutil as _su
+    d = f"/output/testDKBWriterPlugin/{sub_name}"
+    if _os.path.isdir(d):
+        _su.rmtree(d)
+
+
+# ---------------------------------------------------------------------------
 # Test definitions
 # ---------------------------------------------------------------------------
 def test_happy_path() -> Tuple[bool, str]:
@@ -1344,6 +1380,164 @@ def _parse_argv(argv: List[str]) -> Tuple[bool, bool]:
     return True, "--reset" in argv
 
 
+# ---------------------------------------------------------------------------
+# DKB e2e tests
+# ---------------------------------------------------------------------------
+
+def test_dkb_full_pipeline() -> Tuple[bool, str]:
+    """FULL trigger: upstream (plugin writes hello.md + world.md) + downstream recon."""
+    _reset_dkb_calls()
+    uid = str(time.time()).replace(".", "")[-8:]
+    sub_name = f"e2e-full-{uid}"
+    ds_name = f"e2e-full-ds-{uid}"
+    try:
+        sub = create_sub("testDKBWriterPlugin", sub_name, {}, cron="0 0 * * *")
+    except Exception as exc:
+        return False, f"DKB full: create_sub failed: {exc}"
+    sub_id = sub["id"]
+
+    try:
+        svcs = api_get("/api/dkb_services")
+        svc_id = None
+        for s in svcs:
+            if s.get("name") == "testDKB":
+                svc_id = s["service_id"]
+                break
+        if not svc_id:
+            return False, "DKB full: testDKB service not found"
+
+        # Create datastore linked to sub
+        ds = api_post(f"/api/dkb_services/{svc_id}/datastores", {
+            "name": ds_name, "api_url": "http://fake/api", "api_key": "test",
+            "ds_extra_params": {}, "subscription_ids": [sub_id],
+        })
+        ds_id = ds["datastore_id"]
+    except Exception as exc:
+        try: requests.delete(f"{MANAGER_URL}/api/subscriptions/{sub_id}", headers=_api_headers(), timeout=10)
+        except Exception: pass
+        return False, f"DKB full: setup failed: {exc}"
+
+    # Place a manual file to verify recon picks it up
+    _write_output_file(sub_name, "manual.md", "Manually placed.\n")
+
+    # Trigger FULL
+    try:
+        trigger_sub(sub_id)
+    except Exception as exc:
+        return False, f"DKB full: trigger failed: {exc}"
+
+    # Wait for datastore_subscription → ENABLED
+    deadline = time.time() + 120
+    last_status = None
+    while time.time() < deadline:
+        try:
+            ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
+            subs_detail = ds_det.get("subscriptions", [])
+            if subs_detail:
+                last_status = subs_detail[0].get("status", "")
+                if last_status == "ENABLED":
+                    break
+        except Exception:
+            pass
+        time.sleep(2)
+    if last_status != "ENABLED":
+        return False, f"DKB full: ds_sub did not reach ENABLED (last={last_status})"
+
+    # Verify DKB service calls
+    calls = _read_dkb_calls()
+    add_files = [c for c in calls if c[0] == "add_datafile"]
+    found = " ".join(c[1] for c in add_files)
+    if "manual.md" not in found:
+        return False, f"DKB full: manual.md not added: {found[:200]}"
+    if "hello.md" not in found:
+        return False, f"DKB full: hello.md not added: {found[:200]}"
+    if "world.md" not in found:
+        return False, f"DKB full: world.md not added: {found[:200]}"
+
+    return True, f"DKB full pipeline OK ({len(add_files)} files added)"
+
+
+def test_dkb_only_recon() -> Tuple[bool, str]:
+    """DKB_ONLY trigger: upstream skipped, downstream recon runs."""
+    _reset_dkb_calls()
+    uid = str(time.time()).replace(".", "")[-8:]
+    sub_name = f"e2e-dkbonly-{uid}"
+    ds_name = f"e2e-dkbonly-ds-{uid}"
+    try:
+        sub = create_sub("testDKBWriterPlugin", sub_name, {}, cron="0 0 * * *")
+    except Exception as exc:
+        return False, f"DKB-only: create_sub failed: {exc}"
+    sub_id = sub["id"]
+
+    try:
+        svcs = api_get("/api/dkb_services")
+        svc_id = None
+        for s in svcs:
+            if s.get("name") == "testDKB":
+                svc_id = s["service_id"]
+                break
+        ds = api_post(f"/api/dkb_services/{svc_id}/datastores", {
+            "name": ds_name, "api_url": "http://fake/api", "api_key": "test",
+            "ds_extra_params": {}, "subscription_ids": [sub_id],
+        })
+        ds_id = ds["datastore_id"]
+    except Exception as exc:
+        try: requests.delete(f"{MANAGER_URL}/api/subscriptions/{sub_id}", headers=_api_headers(), timeout=10)
+        except Exception: pass
+        return False, f"DKB-only: setup failed: {exc}"
+
+    # Place a file — plugin won't run so this is the only file
+    _write_output_file(sub_name, "only_file.md", "DKB-only test.\n")
+
+    # Snapshot sub heartbeat to verify upstream didn't run
+    sub_before = api_get(f"/api/subscriptions/{sub_id}")
+    hb_before = sub_before.get("last_heartbeat", "") or ""
+
+    # Trigger DKB_ONLY via datastore update
+    try:
+        api_post(f"/api/dkb_datastores/{ds_id}/update", {})
+    except Exception as exc:
+        return False, f"DKB-only: trigger failed: {exc}"
+
+    # Wait for ds_sub → ENABLED
+    deadline = time.time() + 60
+    last_status = None
+    while time.time() < deadline:
+        try:
+            ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
+            subs_detail = ds_det.get("subscriptions", [])
+            if subs_detail:
+                last_status = subs_detail[0].get("status", "")
+                if last_status == "ENABLED":
+                    break
+        except Exception:
+            pass
+        time.sleep(2)
+    if last_status != "ENABLED":
+        return False, f"DKB-only: ds_sub did not reach ENABLED (last={last_status})"
+
+    # Verify DKB service calls
+    calls = _read_dkb_calls()
+    add_files = [c for c in calls if c[0] == "add_datafile"]
+    found = " ".join(c[1] for c in add_files)
+    if "only_file.md" not in found:
+        return False, f"DKB-only: only_file.md not added: {found[:200]}"
+
+    # Verify NO upstream (plugin output files should NOT exist)
+    hello_path = f"/output/testDKBWriterPlugin/{sub_name}/hello.md"
+    world_path = f"/output/testDKBWriterPlugin/{sub_name}/world.md"
+    if os.path.isfile(hello_path):
+        return False, "DKB-only: hello.md exists (upstream should not have run)"
+    if os.path.isfile(world_path):
+        return False, "DKB-only: world.md exists (upstream should not have run)"
+
+    return True, "DKB-only recon OK (upstream skipped, downstream completed)"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     ok, reset_mode = _parse_argv(sys.argv)
     if not ok:
@@ -1456,7 +1650,8 @@ def main() -> int:
         "customRoutePlugin", "monitorNeverTriggerPlugin", "monitorErrorPlugin",
         "configValidationPlugin", "nonZeroExitPlugin", "zombiePlugin",
         "moveToDestErrorPlugin", "longNamePlugin32CharNameForUITes",
-        "eventOftenPlugin", "deleteAllPlugin",
+        "eventOftenPlugin",         "deleteAllPlugin",
+        "testDKBWriterPlugin",
     }
     missing = expected_loaded - loaded
     if missing:
@@ -1494,6 +1689,8 @@ def main() -> int:
         ("Plugin Test 24 — eventOften", test_event_often),
         ("Plugin Test 25 — deleteAll", test_delete_subscription_and_plugin),
         ("Plugin Test 26 — cronRandomize", test_cron_randomize),
+        ("DKB Test 27 — full pipeline", test_dkb_full_pipeline),
+        ("DKB Test 28 — DKB-only recon", test_dkb_only_recon),
     ]
 
     results: List[Tuple[str, bool, str]] = []
@@ -1509,6 +1706,26 @@ def main() -> int:
         status = "✅" if ok else "❌"
         _log(f"  {status} {name}: {msg}")
 
+    # Cleanup DKB artifacts from the DKB e2e tests
+    for suffix in ["e2e-full-", "e2e-dkbonly-"]:
+        all_subs = api_get("/api/subscriptions")
+        for sub in all_subs:
+            n = sub.get("name", "")
+            if suffix in n:
+                try:
+                    requests.delete(f"{MANAGER_URL}/api/subscriptions/{sub['id']}", headers=_api_headers(), timeout=10)
+                except Exception:
+                    pass
+        all_ds = api_get("/api/dkb_datastores")
+        for ds in all_ds:
+            n = ds.get("name", "")
+            if suffix in n:
+                try:
+                    requests.delete(f"{MANAGER_URL}/api/dkb_datastores/{ds['datastore_id']}", headers=_api_headers(), timeout=10)
+                except Exception:
+                    pass
+        _rm_output_dir(f"{suffix}*")
+
     # Summary
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
@@ -1516,7 +1733,25 @@ def main() -> int:
     for name, ok, msg in results:
         mark = "✅" if ok else "❌"
         _log(f"  {mark} {name}: {msg}")
-    return 0 if passed == total else 1
+    if passed != total:
+        return 1
+
+    # Run DKB unit tests
+    _log("\n=== Running DKB unit tests (test_dkb.py) ===")
+    import subprocess
+    result = subprocess.run(
+        [sys.executable, "/src/testing/test_dkb.py", "confirm"],
+        capture_output=True, text=True, timeout=120,
+    )
+    # Print output only on failure (keep the summary clean)
+    if result.returncode != 0:
+        _log(f"DKB unit tests FAILED (exit={result.returncode})")
+        for line in result.stdout.splitlines():
+            if "FAIL" in line or "ERROR" in line:
+                _log(f"  {line}")
+        return 1
+    _log("DKB unit tests OK")
+    return 0
 
 
 if __name__ == "__main__":

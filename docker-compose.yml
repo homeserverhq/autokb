@@ -30,7 +30,7 @@ services:
       - v-autokb-output:/output
       - v-autokb-assets:/assets
       - v-autokb-plugins:/src/plugins
-      - v-autokb-dkbservices:/src/dkbservices
+      - v-autokb-sinks:/src/sinks
       - v-autokb-logs:/logs
 
   autokb-worker:
@@ -47,7 +47,7 @@ services:
     volumes:
       - v-autokb-output:/output
       - v-autokb-plugins:/src/plugins
-      - v-autokb-dkbservices:/src/dkbservices
+      - v-autokb-sinks:/src/sinks
       - v-autokb-logs:/logs
 
   autokb-web:
@@ -100,12 +100,12 @@ volumes:
       type: none
       o: bind
       device: ./autokb/src/plugins
-  v-autokb-dkbservices:
+  v-autokb-sinks:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: ./autokb/src/dkbservices
+      device: ./autokb/src/sinks
   v-autokb-assets:
     driver: local
     driver_opts:

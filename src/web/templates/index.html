@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoKB</title>
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=44" />
+  <link rel="stylesheet" href="/static/styles.css?v=45" />
 </head>
 <body>
   <!-- Login page -->
@@ -34,11 +34,12 @@
     </header>
     <div class="app-body">
       <nav class="sidebar">
-        <a href="#/dashboard" class="nav-link active" data-view="dashboard">Dashboard</a>
-        <a href="#/data-sources" class="nav-link" data-view="data-sources">Data Sources</a>
+        <div class="nav-group">UPSTREAM &middot; DATA IN</div>
+        <a href="#/data-sources" class="nav-link active" data-view="data-sources">Data Sources</a>
         <a href="#/all-subscriptions" class="nav-link" data-view="all-subscriptions">Subscriptions</a>
-        <a href="#/remote-dkbs" class="nav-link" data-view="remote-dkbs">Remote DKBs</a>
-        <a href="#/all-datastores" class="nav-link" data-view="all-datastores">All Datastores</a>
+        <div class="nav-group">DOWNSTREAM &middot; DATA OUT</div>
+        <a href="#/data-destinations" class="nav-link" data-view="data-destinations">Data Destinations</a>
+        <a href="#/data-targets" class="nav-link" data-view="data-targets">Data Targets</a>
         <a href="#/activity" class="nav-link" data-view="activity">Recent Activity</a>
         <a href="#/devlab" class="nav-link" data-view="devlab">Developer Lab</a>
       </nav>
@@ -49,29 +50,30 @@
             <article id="dashboard-readme" class="dashboard-readme">
               <h3>What is AutoKB?</h3>
               <p>
-                AutoKB is a distributed, event-driven ETL orchestration engine. It connects to
-                diverse data sources via a drop-in plugin system; each plugin pulls data,
-                transforms it, and writes chunks (markdown, JSON, or text) to a per-subscription
-                output directory. Downstream knowledge base importers consume those files.
+                AutoKB is a distributed, event-driven ETL orchestration engine. On the <strong>upstream</strong>
+                side, it connects to diverse data sources via drop-in Source connectors; each Source pulls data,
+                transforms it, and writes chunks (markdown, JSON, or text) to a per-subscription output directory.
+                On the <strong>downstream</strong> side, Destination connectors (sinks) receive those files and
+                sync them to remote knowledge bases / datasets (Data Targets).
               </p>
 
-              <h3>How to use an existing plugin</h3>
+              <h3>How to use an existing Source</h3>
               <ol>
-                <li>Open <strong>Data Sources</strong> in the sidebar. Each tile is a registered plugin.</li>
-                <li>Click a plugin tile to see its subscriptions, then click <strong>+ Create New Subscription</strong>.</li>
+                <li>Open <strong>Data Sources</strong> in the sidebar. Each tile is a registered Source connector.</li>
+                <li>Click a Source tile to see its subscriptions, then click <strong>+ Create New Subscription</strong>.</li>
                 <li>Fill in the required fields (like connection details or URLs) and save.</li>
               </ol>
 
-              <h3>How to create your own plugin</h3>
+              <h3>How to create your own Source</h3>
               <ol>
-                <li>Open <strong>Developer Lab</strong> in the sidebar.</li>
+                <li>Open <strong>Developer Lab</strong> in the sidebar and pick <strong>Source Developer</strong>.</li>
                 <li>Below the code editor you'll find the <strong>Plugin Development Guide</strong> —
-                    a complete walkthrough for building a plugin. You can copy it and use it as a
+                    a complete walkthrough for building a Source connector (plugin). You can copy it and use it as a
                     skill prompt for an AI coding assistant.</li>
                 <li>Write or paste your plugin code in the editor, give it a name, and optionally
                     upload a <code>.png</code> icon (max 512&times;512).</li>
                 <li>Click <strong>Test</strong> to check for errors, then <strong>Save</strong> to
-                    deploy. Your plugin appears in Data Sources within seconds.</li>
+                    deploy. Your Source appears in Data Sources within seconds.</li>
               </ol>
             </article>
             <aside id="dashboard-stats" class="dashboard-stats">
@@ -81,7 +83,7 @@
                   <span class="stats-value" id="stat-total-subs">&mdash;</span>
                 </div>
                 <div class="stats-row" data-stat="total-plugins">
-                  <span class="stats-label">Total Plugins</span>
+                  <span class="stats-label">Total Sources</span>
                   <span class="stats-value" id="stat-total-plugins">&mdash;</span>
                 </div>
                 <div class="stats-row" data-stat="by-status">
@@ -105,7 +107,7 @@
                   <span class="stats-value stats-health" id="stat-health">
                     <span class="health-pill" data-sys="db"><span class="health-dot"></span>Database</span>
                     <span class="health-pill" data-sys="redis"><span class="health-dot"></span>Redis</span>
-                    <span class="health-pill" data-sys="registry"><span class="health-dot"></span>Plugin Registry</span>
+                    <span class="health-pill" data-sys="registry"><span class="health-dot"></span>Source Registry</span>
                   </span>
                 </div>
                 <div class="stats-error" id="stats-error" style="display: none;">
@@ -127,7 +129,7 @@
           <div class="all-subs-table">
             <div class="all-subs-row all-subs-header">
               <span class="all-subs-col-name sortable" data-sort="name">Subscription</span>
-              <span class="all-subs-col-plugin sortable" data-sort="plugin_id">Plugin</span>
+              <span class="all-subs-col-plugin sortable" data-sort="plugin_id">Source</span>
               <span class="all-subs-col-status sortable" data-sort="status">Status</span>
               <span class="all-subs-col-access sortable" data-sort="access_level">Access Level</span>
               <span class="all-subs-col-activity sortable" data-sort="activity_24h">Activity</span>
@@ -148,8 +150,8 @@
             </div>
             <div class="header-actions">
               <button class="btn btn-primary" id="new-subscription-btn">+ Create New Subscription</button>
-              <button class="btn btn-warning" id="edit-plugin-btn">Edit Plugin</button>
-              <button class="btn btn-destructive" id="delete-plugin-btn" disabled>Delete Plugin</button>
+              <button class="btn btn-warning" id="edit-plugin-btn">Edit Source</button>
+              <button class="btn btn-destructive" id="delete-plugin-btn" disabled>Delete Source</button>
             </div>
           </div>
           <h3>Description</h3>
@@ -165,7 +167,7 @@
           <div class="activity-table">
             <div class="activity-row activity-header">
               <span class="col-view">View</span>
-              <span class="col-plugin sortable" data-sort="plugin_id">Plugin</span>
+              <span class="col-plugin sortable" data-sort="plugin_id">Source</span>
               <span class="col-name sortable" data-sort="subscription_name">Subscription</span>
               <span class="col-time sortable" data-sort="executed_at">Timestamp</span>
               <span class="col-status sortable" data-sort="exit_code">Status</span>
@@ -184,18 +186,18 @@
           <div id="devlab-landing">
             <h2>Developer Lab</h2>
             <div class="plugin-grid">
-              <div class="plugin-card" id="devlab-tile-plugin">
-                <img src="/assets/plugin_developer.png" onerror="this.src='/assets/default_icon.png'" alt="" />
+              <div class="plugin-card" id="devlab-tile-source">
+                <img src="/assets/source_developer.png" onerror="this.src='/assets/default_icon.png'" alt="" />
                 <div>
-                  <div class="plugin-name">Plugin Developer</div>
-                  <small>Build and manage drop-in plugins for Data Sources.</small>
+                  <div class="plugin-name">Source Developer</div>
+                  <small>Build and manage drop-in Source connectors (plugins) for Data Sources.</small>
                 </div>
               </div>
-              <div class="plugin-card" id="devlab-tile-dkb">
-                <img src="/assets/remote_dkb_developer.png" onerror="this.src='/assets/default_icon.png'" alt="" />
+              <div class="plugin-card" id="devlab-tile-destination">
+                <img src="/assets/destination_developer.png" onerror="this.src='/assets/default_icon.png'" alt="" />
                 <div>
-                  <div class="plugin-name">Remote DKB Developer</div>
-                  <small>Build and manage Remote DKB service drop-ins.</small>
+                  <div class="plugin-name">Destination Developer</div>
+                  <small>Build and manage Destination connectors (sinks) that deliver data into Data Targets.</small>
                 </div>
               </div>
             </div>
@@ -203,14 +205,14 @@
           <div id="devlab-plugin-panel" style="display: none;">
             <div class="sub-header">
               <button class="btn btn-secondary" id="devlab-back">&larr; Back</button>
-              <h2>Plugin Developer</h2>
+              <h2>Source Developer</h2>
             </div>
-            <p class="sub-row-meta">See the Plugin Development Guide below. Use it as a skill for your AI agent to build a plugin.</p>
+            <p class="sub-row-meta">See the Plugin Development Guide below. Use it as a skill for your AI agent to build a Source connector (plugin).</p>
             <div id="devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
             <div class="devlab-form">
-              <label>Plugin Name</label>
+              <label>Source Name</label>
               <input type="text" id="devlab-name" placeholder="myPlugin" maxlength="32" />
-              <label>Plugin Code</label>
+              <label>Source Code</label>
               <textarea id="devlab-code" rows="20" placeholder="Paste your plugin code here..."></textarea>
               <label>Icon (optional, .png, max 512x512)</label>
               <input type="file" id="devlab-icon" accept="image/png" />
@@ -228,72 +230,72 @@
               <div id="devlab-guide-content" class="devlab-guide-content"></div>
             </div>
           </div>
-          <div id="devlab-dkb-panel" style="display: none;">
+          <div id="devlab-destination-panel" style="display: none;">
             <div class="sub-header">
-              <button class="btn btn-secondary" id="dkb-devlab-back">&larr; Back</button>
-              <h2>Remote DKB Developer</h2>
+              <button class="btn btn-secondary" id="dest-devlab-back">&larr; Back</button>
+              <h2>Destination Developer</h2>
             </div>
-            <p class="sub-row-meta">Paste a Remote DKB service class that subclasses <code>BaseDKBService</code>. See the existing services in Remote DKBs for reference.</p>
-            <div id="dkb-devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
+            <p class="sub-row-meta">Paste a Destination connector class that subclasses <code>BaseSink</code>. See the existing services in Data Destinations for reference.</p>
+            <div id="dest-devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
             <div class="devlab-form">
-              <label>DKB Service Name</label>
-              <input type="text" id="dkb-devlab-name" placeholder="myDKB" maxlength="32" />
-              <label>DKB Service Code</label>
-              <textarea id="dkb-devlab-code" rows="20" placeholder="Paste your DKB service code here..."></textarea>
+              <label>Destination Name</label>
+              <input type="text" id="dest-devlab-name" placeholder="mySink" maxlength="32" />
+              <label>Destination Code</label>
+              <textarea id="dest-devlab-code" rows="20" placeholder="Paste your sink code here..."></textarea>
               <label>Icon (optional, .png, max 512x512)</label>
-              <input type="file" id="dkb-devlab-icon" accept="image/png" />
+              <input type="file" id="dest-devlab-icon" accept="image/png" />
               <div class="devlab-buttons">
-                <button class="btn btn-primary" id="dkb-devlab-test-btn">Test</button>
-                <button class="btn btn-primary" id="dkb-devlab-save-btn">Save</button>
+                <button class="btn btn-primary" id="dest-devlab-test-btn">Test</button>
+                <button class="btn btn-primary" id="dest-devlab-save-btn">Save</button>
               </div>
-              <div id="dkb-devlab-result" class="devlab-result"></div>
+              <div id="dest-devlab-result" class="devlab-result"></div>
             </div>
           </div>
         </section>
-        <section id="view-remote-dkbs" class="view" style="display: none;">
-          <h2>Remote DKBs</h2>
-          <div id="dkb-service-grid" class="plugin-grid"></div>
+        <section id="view-data-destinations" class="view" style="display: none;">
+          <h2>Data Destinations</h2>
+          <div id="destination-grid" class="plugin-grid"></div>
         </section>
-        <section id="view-dkb-datastores" class="view" style="display: none;">
+        <section id="view-destinations-detail" class="view" style="display: none;">
           <div class="sub-header">
-            <button class="btn btn-secondary" id="dkb-back-to-services">&larr; Back</button>
+            <button class="btn btn-secondary" id="dest-back-to-list">&larr; Back</button>
             <div class="plugin-title-group">
-              <img id="dkb-service-icon" class="plugin-icon-header" src="" alt="" />
-              <h2 id="dkb-service-title"></h2>
+              <img id="destination-icon" class="plugin-icon-header" src="" alt="" />
+              <h2 id="destination-title"></h2>
             </div>
             <div class="header-actions">
-              <button class="btn btn-primary" id="dkb-create-datastore-btn">+ Create New Datastore</button>
-              <button class="btn btn-warning" id="dkb-edit-service-btn">Edit DKB</button>
-              <button class="btn btn-destructive" id="dkb-delete-service-btn" disabled>Delete DKB</button>
+              <button class="btn btn-primary" id="create-target-btn">+ Create New Data Target</button>
+              <button class="btn btn-warning" id="edit-destination-btn">Edit Destination</button>
+              <button class="btn btn-destructive" id="delete-destination-btn" disabled>Delete Destination</button>
             </div>
           </div>
-          <div id="dkb-datastore-list" class="subscription-list"></div>
+          <div id="target-list" class="subscription-list"></div>
         </section>
-        <section id="view-all-datastores" class="view" style="display: none;">
+        <section id="view-data-targets" class="view" style="display: none;">
           <div class="sub-header">
-            <h2>All Datastores</h2>
+            <h2>Data Targets</h2>
           </div>
           <div class="all-subs-table">
             <div class="all-subs-row all-subs-header">
-              <span class="all-subs-col-name sortable" data-sort="name">Datastore</span>
-              <span class="all-subs-col-plugin sortable" data-sort="service_name">DKB Service</span>
+              <span class="all-subs-col-name sortable" data-sort="name">Target</span>
+              <span class="all-subs-col-plugin sortable" data-sort="service_name">Destination</span>
               <span class="all-subs-col-status sortable" data-sort="status">Status</span>
               <span class="all-subs-col-updated sortable" data-sort="last_updated">Updated</span>
               <span class="all-subs-col-edit">Edit</span>
               <span class="all-subs-col-toggle">Enable</span>
               <span class="all-subs-col-update">Update</span>
             </div>
-            <div id="all-datastores-list" class="all-subs-body"></div>
+            <div id="targets-list" class="all-subs-body"></div>
           </div>
         </section>
-        <!-- DKB Datastore modal -->
-        <div id="dkb-form-modal" class="modal" style="display: none;">
+        <!-- Target form modal -->
+        <div id="target-form-modal" class="modal" style="display: none;">
           <div class="modal-content">
-            <h3 id="dkb-form-title">Create Datastore</h3>
-            <form id="dkb-form">
-              <div id="dkb-form-fields"></div>
+            <h3 id="target-form-title">Create Data Target</h3>
+            <form id="target-form">
+              <div id="target-form-fields"></div>
               <div class="form-buttons">
-                <button type="button" class="btn btn-secondary" id="dkb-form-cancel">Cancel</button>
+                <button type="button" class="btn btn-secondary" id="target-form-cancel">Cancel</button>
                 <button type="submit" class="btn btn-primary">Save</button>
               </div>
             </form>
@@ -317,6 +319,6 @@
   </div>
 
   <script src="/static/marked.min.js"></script>
-  <script src="/static/app.js?v=44"></script>
+  <script src="/static/app.js?v=45"></script>
 </body>
 </html>

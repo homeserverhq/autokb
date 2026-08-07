@@ -116,8 +116,8 @@
   // ---- Routing ----
   let currentView = 'dashboard';
   let currentPluginId = null;
-  let currentDkbServiceId = null;
-  let currentDkbService = null;
+  let currentSinkId = null;
+  let currentSink = null;
   let subscriptionsCache = {};
   let sseSource = null;
   let devlabEditPluginId = null;
@@ -145,36 +145,36 @@
       showOnly('view-activity');
       document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'activity'));
       loadActivity();
-    } else if (view === 'remote-dkbs') {
-      showOnly('view-remote-dkbs');
-      document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'remote-dkbs'));
-      loadDkbServices();
-    } else if (view === 'dkb-datastores') {
-      currentDkbServiceId = params.service_id;
-      showOnly('view-dkb-datastores');
+    } else if (view === 'data-destinations') {
+      showOnly('view-data-destinations');
+      document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'data-destinations'));
+      loadSinks();
+    } else if (view === 'destinations-detail') {
+      currentSinkId = params.service_id;
+      showOnly('view-destinations-detail');
       document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
-      loadDkbDatastores(params.service_id);
-    } else if (view === 'all-datastores') {
-      showOnly('view-all-datastores');
-      document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'all-datastores'));
-      loadAllDatastores();
+      loadTargets(params.service_id);
+    } else if (view === 'data-targets') {
+      showOnly('view-data-targets');
+      document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'data-targets'));
+      loadAllTargets();
     } else if (view === 'devlab') {
       showOnly('view-devlab');
       document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'devlab'));
-      // Developer Lab landing (#/devlab) shows two tiles: Plugin Developer
-      // (#/devlab/plugin) and Remote DKB Developer (#/devlab/dkb). Legacy
-      // #/devlab?edit={plugin_id} (from the Edit Plugin button) maps to the
-      // plugin lab in edit mode. See DesignSpecification §7.9.
-      const sub = params.sub || (params.edit ? 'plugin' : null);
-      if (sub === 'dkb') {
-        showDevlabPanel('dkb');
+      // Developer Lab landing (#/devlab) shows two tiles: Source Developer
+      // (#/devlab/source) and Destination Developer (#/devlab/destination). Legacy
+      // #/devlab/source?edit={plugin_id} (from the Edit Source button) maps to the
+      // source lab in edit mode. See DesignSpecification §7.9.
+      const sub = params.sub || (params.edit ? 'source' : null);
+      if (sub === 'destination') {
+        showDevlabPanel('destination');
         if (params.edit) {
-          loadDkbDevlabForEdit(params.edit);
+          loadSinkDevlabForEdit(params.edit);
         } else {
-          resetDkbDevlabToCreateMode();
+          resetSinkDevlabToCreateMode();
         }
-      } else if (sub === 'plugin') {
-        showDevlabPanel('plugin');
+      } else if (sub === 'source') {
+        showDevlabPanel('source');
         if (params.edit) {
           loadDevlabForEdit(params.edit);
         } else {
@@ -194,7 +194,7 @@
   }
 
   function showOnly(viewId) {
-    ['view-dashboard', 'view-data-sources', 'view-subscriptions-all', 'view-subscriptions', 'view-activity', 'view-event-detail', 'view-devlab', 'view-remote-dkbs', 'view-dkb-datastores', 'view-all-datastores'].forEach(id => {
+    ['view-dashboard', 'view-data-sources', 'view-subscriptions-all', 'view-subscriptions', 'view-activity', 'view-event-detail', 'view-devlab', 'view-data-destinations', 'view-destinations-detail', 'view-data-targets'].forEach(id => {
       $(id).style.display = (id === viewId) ? 'block' : 'none';
     });
   }
@@ -234,19 +234,19 @@
       // split('/') leaves "?cb=3" attached to the plugin id and breaks
       // the schema fetch (which 200s with the wrong shape).
       params.plugin_id = restWithQuery[0].split('?')[0];
-    } else if (view === 'dkb-datastores' && restWithQuery[0]) {
+    } else if (view === 'destinations-detail' && restWithQuery[0]) {
       params.service_id = restWithQuery[0].split('?')[0];
-    } else if (view === 'remote-dkbs' || view === 'all-datastores') {
+    } else if (view === 'data-destinations' || view === 'data-targets') {
       // no params needed
     }
     if (view === 'devlab') {
-      // Sub-routes: #/devlab/plugin and #/devlab/dkb (optionally with a
+      // Sub-routes: #/devlab/source and #/devlab/destination (optionally with a
       // glued ?edit= query). Legacy #/devlab?edit={plugin_id} (from the
-      // Edit Plugin button) still parses as a plugin-lab edit.
+      // Edit Source button) still parses as a source-lab edit.
       let sub = null;
       let qs = viewQuery;
       if (rest[0]) {
-        const m = rest[0].match(/^(plugin|dkb)(\?.*)?$/);
+        const m = rest[0].match(/^(source|destination)(\?.*)?$/);
         if (m) {
           sub = m[1];
           qs = m[2] || rest[1] || null;
@@ -266,7 +266,7 @@
   }
 
   $('back-to-dashboard').addEventListener('click', () => { location.hash = '#/data-sources'; });
-  $('dkb-back-to-services').addEventListener('click', () => { location.hash = '#/remote-dkbs'; });
+  $('dest-back-to-list').addEventListener('click', () => { location.hash = '#/data-destinations'; });
 
   // ---- Plugins (Data Sources) ----
   async function loadPlugins() {
@@ -461,7 +461,7 @@
     setHealthPill('registry', regOk);
     if (!regOk) {
       const pill = document.querySelector('.health-pill[data-sys="registry"]');
-      if (pill) pill.title = 'Plugin registry is not loaded';
+      if (pill) pill.title = 'Source registry is not loaded';
     }
   }
 
@@ -716,21 +716,21 @@
     const empty = subs.length === 0;
     btn.disabled = !empty;
     btn.title = empty
-      ? 'Delete this plugin and its file from disk'
-      : 'Cannot delete a plugin with existing subscriptions. Delete them first.';
+      ? 'Delete this source and its file from disk'
+      : 'Cannot delete a source with existing subscriptions. Delete them first.';
   }
 
   async function confirmDeletePlugin() {
     if (!currentPlugin) return;
     const name = currentPlugin.name;
-    if (!confirm(`Are you sure you want to delete the plugin '${name}'?\n\nThe plugin file will be removed from disk. This action cannot be undone.`)) return;
+    if (!confirm(`Are you sure you want to delete the source '${name}'?\n\nThe source file will be removed from disk. This action cannot be undone.`)) return;
     try {
       await api(`/plugins/${encodeURIComponent(name)}`, { method: 'DELETE' });
       currentPlugin = null;
       subscriptionsCache = {};
       location.hash = '#/';
       await loadPlugins();
-    } catch (e) { alert('Delete plugin failed: ' + e.message); }
+    } catch (e) { alert('Delete source failed: ' + e.message); }
   }
 
   // ---- Form ----
@@ -1124,8 +1124,8 @@
   // ---- All Subscriptions (cross-plugin list) ----
   let allSubsCache = [];
   let allSubsActivity = {};
-  let dkbServicesCache = {};
-  let dkbDatastoresCache = {};
+  let sinksCache = {};
+  let targetsCache = {};
   let allSubsSort = { key: 'last_updated', dir: 'desc' };
 
   async function loadAllSubscriptions() {
@@ -1237,12 +1237,12 @@
     });
   });
 
-  // ---- DKB Services ----
-  async function loadDkbServices() {
+  // ---- Destinations (Sinks) ----
+  async function loadSinks() {
     try {
-      const services = await api('/dkb_services');
-      dkbServicesCache = services;
-      const grid = $('dkb-service-grid');
+      const services = await api('/sinks');
+      sinksCache = services;
+      const grid = $('destination-grid');
       grid.innerHTML = '';
       for (const s of services) {
         const card = document.createElement('div');
@@ -1254,76 +1254,76 @@
             <small>${escapeHtml(s.description || '')}</small>
           </div>
         `;
-        card.addEventListener('click', () => { location.hash = `#/dkb-datastores/${s.service_id}`; });
+        card.addEventListener('click', () => { location.hash = `#/data-destinations/${s.service_id}`; });
         grid.appendChild(card);
       }
     } catch (e) { console.error(e); }
   }
 
-  // ---- DKB Datastores (per service) ----
-  async function loadDkbDatastores(serviceId) {
+  // ---- Targets (per Destination) ----
+  async function loadTargets(serviceId) {
     try {
-      const services = await api('/dkb_services');
+      const services = await api('/sinks');
       const svc = services.find(s => s.service_id === serviceId);
-      currentDkbService = svc || null;
+      currentSink = svc || null;
       if (svc) {
-        $('dkb-service-title').textContent = svc.name;
-        const iconEl = $('dkb-service-icon');
+        $('destination-title').textContent = svc.name;
+        const iconEl = $('destination-icon');
         iconEl.src = `/assets/${escapeHtml(svc.icon)}`;
         iconEl.onerror = () => { iconEl.src = '/assets/default_icon.png'; };
       }
-      const datastores = await api(`/dkb_services/${serviceId}/datastores`);
-      renderDkbDatastores(datastores);
-      $('dkb-create-datastore-btn').onclick = () => openDkbForm(serviceId, null);
-      $('dkb-edit-service-btn').onclick = () => {
-        if (currentDkbService && currentDkbService.name) {
-          location.hash = `#/devlab/dkb?edit=${encodeURIComponent(currentDkbService.name)}`;
+      const targets = await api(`/sinks/${serviceId}/targets`);
+      renderTargets(targets);
+      $('create-target-btn').onclick = () => openTargetForm(serviceId, null);
+      $('edit-destination-btn').onclick = () => {
+        if (currentSink && currentSink.name) {
+          location.hash = `#/devlab/destination?edit=${encodeURIComponent(currentSink.name)}`;
         }
       };
-      $('dkb-delete-service-btn').onclick = () => confirmDeleteDkbService();
-      updateDeleteDkbServiceBtnState(datastores);
+      $('delete-destination-btn').onclick = () => confirmDeleteSink();
+      updateDeleteSinkBtnState(targets);
     } catch (e) { console.error(e); }
   }
 
-  function updateDeleteDkbServiceBtnState(datastores) {
-    const btn = $('dkb-delete-service-btn');
+  function updateDeleteSinkBtnState(targetList) {
+    const btn = $('delete-destination-btn');
     if (!btn) return;
-    const list = datastores || [];
+    const list = targetList || [];
     const empty = list.length === 0;
     btn.disabled = !empty;
     btn.title = empty
-      ? 'Delete this DKB service and its file from disk'
-      : 'Cannot delete a DKB service with attached datastores. Delete them first.';
+      ? 'Delete this Destination and its file from disk'
+      : 'Cannot delete a Destination with attached targets. Delete them first.';
   }
 
-  async function confirmDeleteDkbService() {
-    if (!currentDkbService) return;
-    const name = currentDkbService.name;
-    if (!confirm(`Are you sure you want to delete the DKB service '${name}'?\n\nThe service file will be removed from disk. This action cannot be undone.`)) return;
+  async function confirmDeleteSink() {
+    if (!currentSink) return;
+    const name = currentSink.name;
+    if (!confirm(`Are you sure you want to delete the Destination '${name}'?\n\nThe service file will be removed from disk. This action cannot be undone.`)) return;
     try {
-      await api(`/dkb_services/${currentDkbService.service_id}`, { method: 'DELETE' });
-      currentDkbService = null;
-      location.hash = '#/remote-dkbs';
-      await loadDkbServices();
-    } catch (e) { alert('Delete DKB service failed: ' + e.message); }
+      await api(`/sinks/${currentSink.service_id}`, { method: 'DELETE' });
+      currentSink = null;
+      location.hash = '#/data-destinations';
+      await loadSinks();
+    } catch (e) { alert('Delete Destination failed: ' + e.message); }
   }
 
-  function renderDkbDatastores(datastores) {
-    const list = $('dkb-datastore-list');
+  function renderTargets(targets) {
+    const list = $('target-list');
     list.innerHTML = '';
-    if (!datastores || !datastores.length) {
-      list.innerHTML = '<p class="sub-row-meta">No datastores yet. Create one to get started.</p>';
+    if (!targets || !targets.length) {
+      list.innerHTML = '<p class="sub-row-meta">No targets yet. Create one to get started.</p>';
       return;
     }
-    for (const ds of datastores) {
-      list.appendChild(buildDkbDatastoreRow(ds));
+    for (const t of targets) {
+      list.appendChild(buildTargetRow(t));
     }
   }
 
-  function buildDkbDatastoreRow(ds) {
+  function buildTargetRow(ds) {
     const row = document.createElement('div');
     row.className = 'subscription-row';
-    row.dataset.dsId = ds.datastore_id;
+    row.dataset.dsId = ds.target_id;
     const status = ds.status || 'ENABLED';
     const isTerminal = status === 'DELETED';
     const canUpdate = ['ENABLED', 'ENQUEUED', 'IN_PROGRESS'].includes(status);
@@ -1351,126 +1351,124 @@
     `;
     const actions = row.querySelector('.sub-row-actions');
     if (canUpdate) {
-      actions.appendChild(button('Update', 'btn-success', () => triggerDkbUpdate(ds.datastore_id)));
+      actions.appendChild(button('Update', 'btn-success', () => triggerTargetUpdate(ds.target_id)));
     }
-    actions.appendChild(button('Edit', 'btn-primary', () => openDkbForm(ds.service_id, ds)));
+    actions.appendChild(button('Edit', 'btn-primary', () => openTargetForm(ds.service_id, ds)));
     if (canEnable) {
-      actions.appendChild(button('Enable', 'btn-primary', () => setDkbStatus(ds.datastore_id, 'ENABLED')));
+      actions.appendChild(button('Enable', 'btn-primary', () => setTargetStatus(ds.target_id, 'ENABLED')));
     } else if (!isTerminal) {
-      actions.appendChild(button('Disable', 'btn-destructive', () => setDkbStatus(ds.datastore_id, 'DISABLED')));
+      actions.appendChild(button('Disable', 'btn-destructive', () => setTargetStatus(ds.target_id, 'DISABLED')));
     }
     if (!isTerminal) {
-      actions.appendChild(button('Delete', 'btn-destructive', () => confirmDkbDelete(ds)));
+      actions.appendChild(button('Delete', 'btn-destructive', () => confirmDeleteTarget(ds)));
     }
     return row;
   }
 
-  // ---- All Datastores ----
-  async function loadAllDatastores() {
+  // ---- All Targets ----
+  async function loadAllTargets() {
     try {
-      const datastores = await api('/dkb_datastores');
-      dkbDatastoresCache = datastores;
-      renderAllDatastoresTable();
+      const targets = await api('/targets');
+      targetsCache = targets;
+      renderAllTargetsTable();
     } catch (e) { console.error(e); }
   }
 
-  function renderAllDatastoresTable() {
-    const list = $('all-datastores-list');
+  function renderAllTargetsTable() {
+    const list = $('targets-list');
     list.innerHTML = '';
-    if (!dkbDatastoresCache || !dkbDatastoresCache.length) {
-      list.innerHTML = '<p class="sub-row-meta" style="padding:16px;">No datastores yet.</p>';
+    if (!targetsCache || !targetsCache.length) {
+      list.innerHTML = '<p class="sub-row-meta" style="padding:16px;">No targets yet.</p>';
       return;
     }
-    for (const ds of dkbDatastoresCache) {
-      list.appendChild(buildAllDatastoresRow(ds));
+    for (const t of targetsCache) {
+      list.appendChild(buildAllTargetsRow(t));
     }
   }
 
-  function buildAllDatastoresRow(ds) {
+  function buildAllTargetsRow(t) {
     const row = document.createElement('div');
     row.className = 'all-subs-row';
-    const status = ds.status || 'ENABLED';
+    const status = t.status || 'ENABLED';
     const isTerminal = status === 'DELETED';
     const canTrigger = ['ENABLED', 'ENQUEUED', 'IN_PROGRESS'].includes(status);
     const canEnable = status === 'ERROR' || status === 'DISABLED';
     const toggleLabel = canEnable ? 'Enable' : 'Disable';
     const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
     row.innerHTML = `
-      <span class="all-subs-col-name">${escapeHtml(ds.name)}</span>
-      <span class="all-subs-col-plugin">${escapeHtml(ds.service_name || '')}</span>
+      <span class="all-subs-col-name">${escapeHtml(t.name)}</span>
+      <span class="all-subs-col-plugin">${escapeHtml(t.service_name || '')}</span>
       <span class="all-subs-col-status"><span class="badge badge-${status}">${escapeHtml(status)}</span></span>
-      <span class="all-subs-col-updated">${escapeHtml(relativeTime(ds.last_updated))}</span>
-      <span class="all-subs-col-edit"><button class="btn btn-primary" data-ds="${escapeHtml(ds.datastore_id)}" data-svc="${escapeHtml(ds.service_id)}" ${isTerminal ? 'disabled' : ''}>Edit</button></span>
-      <span class="all-subs-col-toggle"><button class="btn ${toggleClass}" data-ds="${escapeHtml(ds.datastore_id)}" data-target="${canEnable ? 'ENABLED' : 'DISABLED'}" ${isTerminal ? 'disabled' : ''}>${toggleLabel}</button></span>
-      <span class="all-subs-col-update"><button class="btn btn-success" data-ds="${escapeHtml(ds.datastore_id)}" ${canTrigger ? '' : 'disabled'}>Update</button></span>
+      <span class="all-subs-col-updated">${escapeHtml(relativeTime(t.last_updated))}</span>
+      <span class="all-subs-col-edit"><button class="btn btn-primary" data-ds="${escapeHtml(t.target_id)}" data-svc="${escapeHtml(t.service_id)}" ${isTerminal ? 'disabled' : ''}>Edit</button></span>
+      <span class="all-subs-col-toggle"><button class="btn ${toggleClass}" data-ds="${escapeHtml(t.target_id)}" data-target="${canEnable ? 'ENABLED' : 'DISABLED'}" ${isTerminal ? 'disabled' : ''}>${toggleLabel}</button></span>
+      <span class="all-subs-col-update"><button class="btn btn-success" data-ds="${escapeHtml(t.target_id)}" ${canTrigger ? '' : 'disabled'}>Update</button></span>
     `;
     row.querySelectorAll('button').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const dsId = btn.dataset.ds;
+        const tId = btn.dataset.ds;
         if (btn.textContent === 'Edit') {
-          const detail = await api(`/dkb_datastores/${dsId}`);
-          openDkbForm(detail.service_id, detail);
+          const detail = await api(`/targets/${tId}`);
+          openTargetForm(detail.service_id, detail);
         } else if (btn.textContent === 'Enable' || btn.textContent === 'Disable') {
-          await api(`/dkb_datastores/${dsId}/status`, { method: 'POST', body: JSON.stringify({ status: btn.dataset.target }) });
+          await api(`/targets/${tId}/status`, { method: 'POST', body: JSON.stringify({ status: btn.dataset.target }) });
         } else if (btn.textContent === 'Update') {
-          await api(`/dkb_datastores/${dsId}/update`, { method: 'POST' });
+          await api(`/targets/${tId}/update`, { method: 'POST' });
         }
       });
     });
     return row;
   }
 
-  // ---- DKB Actions ----
-  async function triggerDkbUpdate(dsId) {
-    try { await api(`/dkb_datastores/${dsId}/update`, { method: 'POST' }); }
+  // ---- Target Actions ----
+  async function triggerTargetUpdate(tId) {
+    try { await api(`/targets/${tId}/update`, { method: 'POST' }); }
     catch (e) { alert('Update failed: ' + e.message); }
   }
 
-  async function setDkbStatus(dsId, status) {
-    try { await api(`/dkb_datastores/${dsId}/status`, { method: 'POST', body: JSON.stringify({ status }) }); }
+  async function setTargetStatus(tId, status) {
+    try { await api(`/targets/${tId}/status`, { method: 'POST', body: JSON.stringify({ status }) }); }
     catch (e) { alert('Status change failed: ' + e.message); }
   }
 
-  async function confirmDkbDelete(ds) {
-    if (!confirm(`Delete datastore '${ds.name}'?\n\nRemote files will be removed. This cannot be undone.`)) return;
+  async function confirmDeleteTarget(ds) {
+    if (!confirm(`Delete target '${ds.name}'?\n\nRemote files will be removed. This cannot be undone.`)) return;
     try {
-      await api(`/dkb_datastores/${ds.datastore_id}`, { method: 'DELETE' });
-      if (currentView === 'dkb-datastores' && currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
-      if (currentView === 'all-datastores') loadAllDatastores();
+      await api(`/targets/${ds.target_id}`, { method: 'DELETE' });
+      if (currentView === 'destinations-detail' && currentSinkId) loadTargets(currentSinkId);
+      if (currentView === 'data-targets') loadAllTargets();
     } catch (e) { alert('Delete failed: ' + e.message); }
   }
 
   // ---- DKB Form ----
-  let dkbFormServiceId = null;
-  let dkbFormDatastoreId = null;
-  let dkbAllSubsList = [];
+  let targetFormSinkId = null;
+  let targetFormTargetId = null;
+  let targetFormAllSubs = [];
 
-  async function openDkbForm(serviceId, ds) {
-    dkbFormServiceId = serviceId;
-    dkbFormDatastoreId = ds ? ds.datastore_id : null;
-    const services = await api('/dkb_services');
+  async function openTargetForm(serviceId, ds) {
+    targetFormSinkId = serviceId;
+    targetFormTargetId = ds ? ds.target_id : null;
+    const services = await api('/sinks');
     const svc = services.find(s => s.service_id === serviceId);
-    $('dkb-form-title').textContent = ds ? `Edit Datastore (${svc ? svc.name : ''})` : `Create Datastore (${svc ? svc.name : ''})`;
-    await buildDkbForm(ds, svc);
-    $('dkb-form-modal').style.display = 'flex';
+    $('target-form-title').textContent = ds ? `Edit Target (${svc ? svc.name : ''})` : `Create Data Target (${svc ? svc.name : ''})`;
+    await buildTargetForm(ds, svc);
+    $('target-form-modal').style.display = 'flex';
   }
 
-  async function buildDkbForm(ds, svc) {
-    const fields = $('dkb-form-fields');
+  async function buildTargetForm(ds, svc) {
+    const fields = $('target-form-fields');
     fields.innerHTML = '';
     const isEdit = !!ds;
     // Name
     const nameDiv = document.createElement('div'); nameDiv.className = 'form-field';
-    nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label><input type="text" name="ds_name" value="${escapeHtml(ds ? ds.name : '')}" required />`;
+    nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label><input type="text" name="target_name" value="${escapeHtml(ds ? ds.name : '')}" required />`;
     fields.appendChild(nameDiv);
-    // API URL (pre-fill the service default on create, mirroring the plugin schema)
+    // API URL (pre-fill the service default on create, mirroring the source schema)
     const defaultApiUrl = (svc && svc.default_api_url) ? svc.default_api_url : '';
     const urlDiv = document.createElement('div'); urlDiv.className = 'form-field';
     urlDiv.innerHTML = `<label>API URL <span class="form-field-error">*</span></label><input type="text" name="api_url" value="${escapeHtml(ds ? ds.api_url : defaultApiUrl)}" required />`;
     fields.appendChild(urlDiv);
     // API Key (server-side env default resolves at recon when left blank)
-    // Never set the HTML "required" attribute — mirrors the plugin's schema
-    // renderer, which marks required password fields with a "*" label only.
     const hasKeyDefault = !!(svc && svc.has_api_key_default);
     const keyRequired = !isEdit && !hasKeyDefault;
     const keyPlaceholder = isEdit ? 'leave blank to keep existing' : (hasKeyDefault ? 'leave blank to use server default' : '');
@@ -1478,27 +1476,27 @@
     keyDiv.innerHTML = `<label>API Key ${keyRequired ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" placeholder="${keyPlaceholder}" />
     <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : (hasKeyDefault ? 'Leave blank to use the server-configured default key.' : '')}</small>`;
     fields.appendChild(keyDiv);
-    // ds_extra_params
+    // target_extra_params
     const extraDiv = document.createElement('div'); extraDiv.className = 'form-field';
-    extraDiv.innerHTML = `<label>Extra Params (JSON)</label><textarea name="ds_extra_params" rows="4">${escapeHtml(ds ? JSON.stringify(ds.ds_extra_params || {}, null, 2) : '{}')}</textarea>`;
+    extraDiv.innerHTML = `<label>Extra Params (JSON)</label><textarea name="target_extra_params" rows="4">${escapeHtml(ds ? JSON.stringify(ds.target_extra_params || {}, null, 2) : '{}')}</textarea>`;
     fields.appendChild(extraDiv);
     // Subscription transfer list
     const transferDiv = document.createElement('div'); transferDiv.className = 'form-field';
-    transferDiv.innerHTML = `<label>Linked Subscriptions</label><div class="transfer-list"><div class="transfer-panel"><div class="transfer-header">Available</div><select id="dkb-available-subs" multiple></select></div><div class="transfer-buttons"><button type="button" class="btn btn-primary" id="dkb-transfer-right">&gt;&gt;</button><button type="button" class="btn btn-primary" id="dkb-transfer-left">&lt;&lt;</button></div><div class="transfer-panel"><div class="transfer-header">Linked</div><select id="dkb-linked-subs" multiple></select></div></div>`;
+    transferDiv.innerHTML = `<label>Linked Subscriptions</label><div class="transfer-list"><div class="transfer-panel"><div class="transfer-header">Available</div><select id="target-available-subs" multiple></select></div><div class="transfer-buttons"><button type="button" class="btn btn-primary" id="target-transfer-right">&gt;&gt;</button><button type="button" class="btn btn-primary" id="target-transfer-left">&lt;&lt;</button></div><div class="transfer-panel"><div class="transfer-header">Linked</div><select id="target-linked-subs" multiple></select></div></div>`;
     fields.appendChild(transferDiv);
     // Populate subscription lists
     const allSubs = await api('/subscriptions');
-    dkbAllSubsList = allSubs || [];
+    targetFormAllSubs = allSubs || [];
     const linkedIds = (ds && ds.subscriptions) ? ds.subscriptions.map(s => s.subscription_id) : [];
     populateTransferList(linkedIds);
   }
 
   function populateTransferList(linkedIds) {
-    const avail = $('dkb-available-subs');
-    const linked = $('dkb-linked-subs');
+    const avail = $('target-available-subs');
+    const linked = $('target-linked-subs');
     avail.innerHTML = ''; linked.innerHTML = '';
     const linkedSet = new Set(linkedIds);
-    for (const sub of dkbAllSubsList) {
+    for (const sub of targetFormAllSubs) {
       const opt = document.createElement('option');
       opt.value = sub.id;
       opt.textContent = sub.name;
@@ -1509,47 +1507,47 @@
       }
     }
     // Wire transfer buttons
-    $('dkb-transfer-right').onclick = () => {
+    $('target-transfer-right').onclick = () => {
       const selected = Array.from(avail.selectedOptions);
       for (const opt of selected) { linked.appendChild(opt); }
     };
-    $('dkb-transfer-left').onclick = () => {
+    $('target-transfer-left').onclick = () => {
       const selected = Array.from(linked.selectedOptions);
       for (const opt of selected) { avail.appendChild(opt); }
     };
   }
 
-  $('dkb-form-cancel').addEventListener('click', () => { $('dkb-form-modal').style.display = 'none'; });
+  $('target-form-cancel').addEventListener('click', () => { $('target-form-modal').style.display = 'none'; });
 
-  $('dkb-form').addEventListener('submit', async (ev) => {
+  $('target-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
-    const fd = new FormData($('dkb-form'));
-    const name = fd.get('ds_name');
+    const fd = new FormData($('target-form'));
+    const name = fd.get('target_name');
     const apiUrl = fd.get('api_url');
     const apiKey = fd.get('api_key');
-    let dsExtra = fd.get('ds_extra_params');
-    try { dsExtra = JSON.parse(dsExtra); } catch (e) { dsExtra = {}; }
-    const linked = Array.from($('dkb-linked-subs').options).map(o => o.value);
-    const body = { name, api_url: apiUrl, api_key: apiKey, ds_extra_params: dsExtra, subscription_ids: linked };
+    let extra = fd.get('target_extra_params');
+    try { extra = JSON.parse(extra); } catch (e) { extra = {}; }
+    const linked = Array.from($('target-linked-subs').options).map(o => o.value);
+    const body = { name, api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked };
     try {
-      if (dkbFormDatastoreId) {
-        await api(`/dkb_datastores/${dkbFormDatastoreId}`, { method: 'PUT', body: JSON.stringify(body) });
+      if (targetFormTargetId) {
+        await api(`/targets/${targetFormTargetId}`, { method: 'PUT', body: JSON.stringify(body) });
       } else {
-        await api(`/dkb_services/${dkbFormServiceId}/datastores`, { method: 'POST', body: JSON.stringify(body) });
+        await api(`/sinks/${targetFormSinkId}/targets`, { method: 'POST', body: JSON.stringify(body) });
       }
-      $('dkb-form-modal').style.display = 'none';
-      if (currentView === 'dkb-datastores' && currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
-      if (currentView === 'all-datastores') loadAllDatastores();
+      $('target-form-modal').style.display = 'none';
+      if (currentView === 'destinations-detail' && currentSinkId) loadTargets(currentSinkId);
+      if (currentView === 'data-targets') loadAllTargets();
     } catch (e) { alert('Save failed: ' + e.message); }
   });
 
-  // ---- DKB SSE handler ----
-  function handleDatastoreUpdate(payload) {
-    if (!payload || !payload.datastore_id) return;
-    if (currentView === 'dkb-datastores') {
-      if (currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
-    } else if (currentView === 'all-datastores') {
-      loadAllDatastores();
+  // ---- Target SSE handler ----
+  function handleTargetUpdate(payload) {
+    if (!payload || !payload.target_id) return;
+    if (currentView === 'destinations-detail') {
+      if (currentSinkId) loadTargets(currentSinkId);
+    } else if (currentView === 'data-targets') {
+      loadAllTargets();
     }
   }
 
@@ -1558,19 +1556,19 @@
   function showDevlabLanding() {
     $('devlab-landing').style.display = 'block';
     $('devlab-plugin-panel').style.display = 'none';
-    $('devlab-dkb-panel').style.display = 'none';
+    $('devlab-destination-panel').style.display = 'none';
   }
 
   function showDevlabPanel(which) {
     $('devlab-landing').style.display = 'none';
-    $('devlab-plugin-panel').style.display = (which === 'plugin') ? 'block' : 'none';
-    $('devlab-dkb-panel').style.display = (which === 'dkb') ? 'block' : 'none';
+    $('devlab-plugin-panel').style.display = (which === 'source') ? 'block' : 'none';
+    $('devlab-destination-panel').style.display = (which === 'destination') ? 'block' : 'none';
   }
 
-  $('devlab-tile-plugin').addEventListener('click', () => { location.hash = '#/devlab/plugin'; });
-  $('devlab-tile-dkb').addEventListener('click', () => { location.hash = '#/devlab/dkb'; });
+  $('devlab-tile-source').addEventListener('click', () => { location.hash = '#/devlab/source'; });
+  $('devlab-tile-destination').addEventListener('click', () => { location.hash = '#/devlab/destination'; });
   $('devlab-back').addEventListener('click', () => { location.hash = '#/devlab'; });
-  $('dkb-devlab-back').addEventListener('click', () => { location.hash = '#/devlab'; });
+  $('dest-devlab-back').addEventListener('click', () => { location.hash = '#/devlab'; });
 
   // ---- Plugin Development Guide ----
   let _cachedGuideMd = null;
@@ -1657,58 +1655,58 @@
 
   // ---- Remote DKB Developer Lab ----
 
-  let dkbDevlabEditName = null;
+  let sinkDevlabEditName = null;
 
-  async function loadDkbDevlabForEdit(serviceName) {
-    dkbDevlabEditName = serviceName;
-    const banner = $('dkb-devlab-edit-banner');
-    const nameInput = $('dkb-devlab-name');
-    const codeInput = $('dkb-devlab-code');
-    const iconInput = $('dkb-devlab-icon');
+  async function loadSinkDevlabForEdit(serviceName) {
+    sinkDevlabEditName = serviceName;
+    const banner = $('dest-devlab-edit-banner');
+    const nameInput = $('dest-devlab-name');
+    const codeInput = $('dest-devlab-code');
+    const iconInput = $('dest-devlab-icon');
     nameInput.value = serviceName;
     nameInput.readOnly = true;
     codeInput.value = 'Loading…';
     iconInput.value = '';
     banner.style.display = 'block';
-    banner.innerHTML = `<strong>Editing existing DKB service: ${escapeHtml(serviceName)}</strong> &mdash; the service name is locked; update the code and metadata below.`;
+    banner.innerHTML = `<strong>Editing existing Destination: ${escapeHtml(serviceName)}</strong> &mdash; the service name is locked; update the code and metadata below.`;
     try {
-      const r = await api(`/dkb_dev_lab/load/${encodeURIComponent(serviceName)}`);
+      const r = await api(`/sink_dev_lab/load/${encodeURIComponent(serviceName)}`);
       if (r.ok && r.code != null) {
         codeInput.value = r.code;
       } else {
         codeInput.value = '';
-        $('dkb-devlab-result').className = 'devlab-result error';
-        $('dkb-devlab-result').textContent = '✗ Could not load DKB service source.';
+        $('dest-devlab-result').className = 'devlab-result error';
+        $('dest-devlab-result').textContent = '✗ Could not load Destination source.';
       }
     } catch (e) {
       codeInput.value = '';
-      $('dkb-devlab-result').className = 'devlab-result error';
-      $('dkb-devlab-result').textContent = '✗ ' + e.message;
+      $('dest-devlab-result').className = 'devlab-result error';
+      $('dest-devlab-result').textContent = '✗ ' + e.message;
     }
   }
 
-  function resetDkbDevlabToCreateMode() {
-    dkbDevlabEditName = null;
-    const banner = $('dkb-devlab-edit-banner');
+  function resetSinkDevlabToCreateMode() {
+    sinkDevlabEditName = null;
+    const banner = $('dest-devlab-edit-banner');
     banner.style.display = 'none';
     banner.innerHTML = '';
-    const nameInput = $('dkb-devlab-name');
+    const nameInput = $('dest-devlab-name');
     nameInput.readOnly = false;
     nameInput.value = '';
-    $('dkb-devlab-code').value = '';
-    $('dkb-devlab-icon').value = '';
-    $('dkb-devlab-result').className = 'devlab-result';
-    $('dkb-devlab-result').textContent = '';
+    $('dest-devlab-code').value = '';
+    $('dest-devlab-icon').value = '';
+    $('dest-devlab-result').className = 'devlab-result';
+    $('dest-devlab-result').textContent = '';
   }
 
-  $('dkb-devlab-test-btn').addEventListener('click', async () => {
-    const name = $('dkb-devlab-name').value;
-    const code = $('dkb-devlab-code').value;
-    const result = $('dkb-devlab-result');
+  $('dest-devlab-test-btn').addEventListener('click', async () => {
+    const name = $('dest-devlab-name').value;
+    const code = $('dest-devlab-code').value;
+    const result = $('dest-devlab-result');
     result.className = 'devlab-result';
     result.textContent = 'Testing...';
     try {
-      const r = await api('/dkb_dev_lab/validate', { method: 'POST', body: JSON.stringify({ name, code }) });
+      const r = await api('/sink_dev_lab/validate', { method: 'POST', body: JSON.stringify({ name, code }) });
       if (r.ok) {
         result.classList.add('success');
         result.textContent = '✓ Validation passed';
@@ -1722,11 +1720,11 @@
     }
   });
 
-  $('dkb-devlab-save-btn').addEventListener('click', async () => {
-    const name = $('dkb-devlab-name').value;
-    const code = $('dkb-devlab-code').value;
-    const iconFile = $('dkb-devlab-icon').files[0];
-    const result = $('dkb-devlab-result');
+  $('dest-devlab-save-btn').addEventListener('click', async () => {
+    const name = $('dest-devlab-name').value;
+    const code = $('dest-devlab-code').value;
+    const iconFile = $('dest-devlab-icon').files[0];
+    const result = $('dest-devlab-result');
     result.className = 'devlab-result';
     result.textContent = 'Saving...';
     let icon_b64 = null;
@@ -1739,12 +1737,12 @@
       });
     }
     try {
-      const r = await api('/dkb_dev_lab/save', { method: 'POST', body: JSON.stringify({ name, code, icon_base64: icon_b64 }) });
+      const r = await api('/sink_dev_lab/save', { method: 'POST', body: JSON.stringify({ name, code, icon_base64: icon_b64 }) });
       result.classList.add('success');
       if (r.mode === 'edit') {
-        result.textContent = '✓ DKB service updated. The new code will be picked up by the file watcher within seconds.';
+        result.textContent = '✓ Destination updated. The new code will be picked up by the file watcher within seconds.';
       } else {
-        result.textContent = '✓ Saved. DKB service will appear in Remote DKBs within seconds.';
+        result.textContent = '✓ Saved. Destination will appear in Data Destinations within seconds.';
       }
     } catch (e) {
       result.classList.add('error');
@@ -1825,11 +1823,11 @@
         handleSubscriptionUpdate(data.data);
       } else if (data.type === 'subscription_deleted') {
         handleSubscriptionDeleted(data.data);
-      } else if (data.type === 'datastore_update') {
-        handleDatastoreUpdate(data.data);
-      } else if (data.type === 'datastore_deleted') {
-        if (currentView === 'all-datastores') loadAllDatastores();
-        if (currentView === 'dkb-datastores' && currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
+      } else if (data.type === 'target_update') {
+        handleTargetUpdate(data.data);
+      } else if (data.type === 'target_deleted') {
+        if (currentView === 'data-targets') loadAllTargets();
+        if (currentView === 'destinations-detail' && currentSinkId) loadTargets(currentSinkId);
       }
       // 'snapshot_complete' is informational; no action needed.
     };

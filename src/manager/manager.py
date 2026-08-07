@@ -78,9 +78,9 @@ from utils.misc_utils import (
     send_smtp_notification,
     validate_config_against_schema,
 )
-from utils.dkb_registry import DKBRegistry
 from utils.queue_utils import QueueManager, wait_for_redis
 from utils.registry import PluginRegistry
+from utils.sink_registry import SinkRegistry
 
 from .registry import ManagerPluginRegistry
 
@@ -242,12 +242,12 @@ async def lifespan(app: FastAPI):
     STATE["registry"] = reg
     reg.reload()
 
-    # -- build DKB registry --
-    dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component="dkb_registry", log_file=LOG_FILE)
-    dkb_registry.reload_all()
-    for rec in dkb_registry.list_records():
-        db.upsert_dkb_service(rec.service_name, rec.metadata.get("description", ""))
-    STATE["dkb_registry"] = dkb_registry
+    # -- build Sink registry --
+    sink_registry = SinkRegistry(sinks_dir="/src/sinks", component="sink_registry", log_file=LOG_FILE)
+    sink_registry.reload_all()
+    for rec in sink_registry.list_records():
+        db.upsert_sink(rec.service_name, rec.metadata.get("description", ""))
+    STATE["sink_registry"] = sink_registry
 
     # -- start trigger coordinator --
     from manager.scheduler import TriggerCoordinator
@@ -327,20 +327,20 @@ async def _listen_bridge() -> None:
 
 
 async def _handle_notify(payload: str) -> None:
-    """Forward a pg_notify payload to SSE clients — either subscription or datastore."""
+    """Forward a pg_notify payload to SSE clients — either subscription or target."""
     db: DatabaseManager = STATE["db"]
-    # Check if payload is DKB datastore JSON
+    # Check if payload is Sink target JSON
     try:
-        dkb_payload = json.loads(payload)
-        if isinstance(dkb_payload, dict) and dkb_payload.get("type") == "datastore":
-            ds_id = dkb_payload["datastore_id"]
-            ds = db.get_datastore(ds_id)
-            if ds is None:
+        sink_payload = json.loads(payload)
+        if isinstance(sink_payload, dict) and sink_payload.get("type") == "target":
+            target_id = sink_payload["target_id"]
+            t = db.get_target(target_id)
+            if t is None:
                 return
-            subs = db.list_datastore_subscriptions(ds_id)
+            subs = db.list_target_subscriptions(target_id)
             await _broadcast_sse({
-                "type": "datastore_update",
-                "data": _serialise_datastore(ds, subs, db),
+                "type": "target_update",
+                "data": _serialise_target(t, subs, db),
             })
             return
     except (json.JSONDecodeError, KeyError):
@@ -359,19 +359,16 @@ async def _handle_notify(payload: str) -> None:
     })
 
 
-def _serialise_datastore(ds, subs, db) -> Dict[str, Any]:
-    """Serialize a dkb_datastore with its subscriptions and derived status."""
-    svc_row = db.get_dkb_service(ds.service_id)
+def _serialise_target(t, subs, db) -> Dict[str, Any]:
+    """Serialize a target with its subscriptions and derived status."""
+    svc_row = db.get_sink(t.service_id)
     service_name = svc_row.name if svc_row else ""
     svc_icon = ""
-    reg: ManagerPluginRegistry = STATE.get("registry")
-    if reg:
-        from utils.dkb_registry import DKBRegistry as _DKBR
-        dkb_reg: _DKBR = STATE.get("dkb_registry")
-        if dkb_reg:
-            rec = dkb_reg.get(service_name)
-            if rec:
-                svc_icon = rec.icon
+    sink_reg: SinkRegistry = STATE.get("sink_registry")
+    if sink_reg:
+        rec = sink_reg.get(service_name)
+        if rec:
+            svc_icon = rec.icon
     status = "ENABLED"
     last_updated = None
     for s in subs:
@@ -386,15 +383,15 @@ def _serialise_datastore(ds, subs, db) -> Dict[str, Any]:
         if s.last_updated and (last_updated is None or s.last_updated > last_updated):
             last_updated = s.last_updated
     return {
-        "datastore_id": ds.id,
-        "service_id": ds.service_id,
+        "target_id": t.id,
+        "service_id": t.service_id,
         "service_name": service_name,
         "service_icon": svc_icon,
-        "name": ds.name,
-        "api_url": ds.api_url,
-        "has_api_key": bool(ds.api_key),
-        "remote_datastore_id": ds.remote_datastore_id,
-        "ds_extra_params": ds.ds_extra_params or {},
+        "name": t.name,
+        "api_url": t.api_url,
+        "has_api_key": bool(t.api_key),
+        "remote_target_id": t.remote_target_id,
+        "target_extra_params": t.target_extra_params or {},
         "status": status,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "subscriptions": [
@@ -464,14 +461,14 @@ async def _watchdog_loop() -> None:
 # File watcher — debounced hot-swap
 # ---------------------------------------------------------------------------
 async def _file_watcher() -> None:
-    """Debounced hot-swap watcher for plugins and DKB services.
+    """Debounced hot-swap watcher for plugins and Sink services.
 
     Identical logic for both directories: track file mtimes, detect
     add/modify/remove, debounce, then reload. Plugins rebuild the
-    ManagerPluginRegistry; DKB services rebuild the DKBRegistry and
-    upsert ``dkb_service`` rows for any newly added services.
+    ManagerPluginRegistry; Sink services rebuild the SinkRegistry and
+    upsert ``sink`` rows for any newly added services.
     """
-    targets = [("/src/plugins", "registry"), ("/src/dkbservices", "dkb_registry")]
+    targets = [("/src/plugins", "registry"), ("/src/sinks", "sink_registry")]
     last_mtimes: Dict[str, float] = {}
     debounce_until: float = 0.0
     pending_change: Optional[str] = None
@@ -509,14 +506,14 @@ async def _file_watcher() -> None:
                 LOG.debug("file_change_detected", action="file_watcher", result=pending_change)
                 for dir_path, state_key in targets:
                     reg = STATE[state_key]
-                    if state_key == "dkb_registry":
+                    if state_key == "sink_registry":
                         reg.reload_all()
                         for rec in reg.list_records():
                             try:
-                                STATE["db"].upsert_dkb_service(
+                                STATE["db"].upsert_sink(
                                     rec.service_name, rec.metadata.get("description", ""))
                             except Exception as exc:  # noqa: BLE001
-                                LOG.warning("dkb_service_upsert_failed",
+                                LOG.warning("sink_service_upsert_failed",
                                             action="file_watcher", service=rec.service_name, error=str(exc))
                     else:
                         reg.reload()
@@ -1248,48 +1245,48 @@ def _validate_plugin_code(code: str, plugin_name: str) -> Dict[str, Any]:
     return {"ok": True, "plugin_id": sanitized}
 
 
-_DKB_ABSTRACT_METHODS = [
+_SINK_ABSTRACT_METHODS = [
     "add_datafile",
     "update_datafile",
     "remove_datafile",
-    "add_datastore",
-    "remove_datastore",
-    "clear_datastore",
+    "add_target",
+    "remove_target",
+    "clear_target",
 ]
 
 
-def _find_dkb_class_in_module(module: Any) -> Optional[Type[Any]]:
-    """Return the single BaseDKBService subclass defined in ``module``."""
-    from utils.dkb_service_base import BaseDKBService
+def _find_sink_class_in_module(module: Any) -> Optional[Type[Any]]:
+    """Return the single BaseSink subclass defined in ``module``."""
+    from utils.sink_base import BaseSink
     import inspect as _inspect
     found = None
     for _, obj in _inspect.getmembers(module, _inspect.isclass):
-        if obj is BaseDKBService:
+        if obj is BaseSink:
             continue
-        if issubclass(obj, BaseDKBService) and obj.__module__ == module.__name__:
+        if issubclass(obj, BaseSink) and obj.__module__ == module.__name__:
             found = obj
             break
     return found
 
 
-def _validate_dkb_code(code: str, service_name: str) -> Dict[str, Any]:
-    """Run a static validation pass against DKB service code.
+def _validate_sink_code(code: str, service_name: str) -> Dict[str, Any]:
+    """Run a static validation pass against Sink service code.
 
-    Mirrors ``_validate_plugin_code`` but for ``BaseDKBService`` subclasses:
+    Mirrors ``_validate_plugin_code`` but for ``BaseSink`` subclasses:
     the class must define the ``metadata`` dict (with a ``name`` key) and
     implement all six abstract remote-operation methods. The service name
-    must already be sanitized (it becomes the ``*_DKB.py`` file stem).
+    must already be sanitized (it becomes the ``*Sink.py`` file stem).
     """
     try:
         sanitized = sanitize_name(service_name)
     except ValueError as exc:
-        return {"ok": False, "error": f"Invalid DKB service name: {exc}"}
+        return {"ok": False, "error": f"Invalid Sink service name: {exc}"}
     if sanitized != service_name:
-        return {"ok": False, "error": f"DKB service name must already be sanitized; got {service_name!r}"}
+        return {"ok": False, "error": f"Sink service name must already be sanitized; got {service_name!r}"}
 
     import ast
     try:
-        tree = ast.parse(code, filename=f"{service_name}_DKB.py")
+        tree = ast.parse(code, filename=f"{service_name}Sink.py")
     except SyntaxError as exc:
         return {"ok": False, "error": f"Syntax error: {exc}"}
 
@@ -1298,15 +1295,15 @@ def _validate_dkb_code(code: str, service_name: str) -> Dict[str, Any]:
         if isinstance(node, ast.ClassDef):
             for base in node.bases:
                 bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
-                if "BaseDKBService" in bn:
+                if "BaseSink" in bn:
                     found_class = node
                     break
         if found_class:
             break
     if found_class is None:
-        return {"ok": False, "error": "No class inheriting from BaseDKBService found"}
+        return {"ok": False, "error": "No class inheriting from BaseSink found"}
 
-    for method in _DKB_ABSTRACT_METHODS:
+    for method in _SINK_ABSTRACT_METHODS:
         has_method = any(
             isinstance(n, ast.FunctionDef) and n.name == method for n in ast.walk(found_class)
         )
@@ -1348,7 +1345,7 @@ def _validate_dkb_code(code: str, service_name: str) -> Dict[str, Any]:
                         break
             break
     if not meta_name:
-        return {"ok": False, "error": "Missing metadata['name'] string in DKB service class"}
+        return {"ok": False, "error": "Missing metadata['name'] string in Sink service class"}
     try:
         if sanitize_name(meta_name) != sanitized:
             return {
@@ -1451,62 +1448,62 @@ async def _sse_generator_with_queue(client_queue: asyncio.Queue):
 
 
 # ---------------------------------------------------------------------------
-# DKB Dev Lab endpoints
+# Sink Dev Lab endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/api/dkb_dev_lab/validate")
-def api_dkb_dev_lab_validate(body: Dict[str, Any] = Body(...)):
+@app.post("/api/sink_dev_lab/validate")
+def api_sink_dev_lab_validate(body: Dict[str, Any] = Body(...)):
     code = body.get("code", "")
     service_name = body.get("name", "")
     if not service_name:
-        raise HTTPException(status_code=400, detail="DKB service name is required")
+        raise HTTPException(status_code=400, detail="Sink service name is required")
     if len(service_name) > MAX_PLUGIN_NAME_LEN:
         raise HTTPException(
             status_code=400,
-            detail=f"DKB service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
+            detail=f"Sink service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
         )
-    return _validate_dkb_code(code, service_name)
+    return _validate_sink_code(code, service_name)
 
 
-@app.get("/api/dkb_dev_lab/load/{service_name}")
-def api_dkb_dev_lab_load(service_name: str):
-    """Return the on-disk source code of an existing DKB service for the
-    Edit DKB flow. Mirrors ``api_dev_lab_load`` for plugins."""
-    dkb_reg: DKBRegistry = STATE.get("dkb_registry")
-    rec = dkb_reg.get(service_name) if dkb_reg is not None else None
+@app.get("/api/sink_dev_lab/load/{service_name}")
+def api_sink_dev_lab_load(service_name: str):
+    """Return the on-disk source code of an existing Sink service for the
+    Edit Destination flow. Mirrors ``api_dev_lab_load`` for plugins."""
+    sink_reg: SinkRegistry = STATE.get("sink_registry")
+    rec = sink_reg.get(service_name) if sink_reg is not None else None
     if rec is None:
-        raise HTTPException(status_code=404, detail=f"DKB service {service_name!r} not found")
+        raise HTTPException(status_code=404, detail=f"Sink service {service_name!r} not found")
     try:
         with open(rec.file_path, "r", encoding="utf-8") as f:
             code = f.read()
     except FileNotFoundError:
         raise HTTPException(
             status_code=404,
-            detail=f"DKB service source file not found: {rec.file_path}",
+            detail=f"Sink service source file not found: {rec.file_path}",
         )
     return {"ok": True, "name": rec.service_name, "code": code}
 
 
-@app.post("/api/dkb_dev_lab/save")
-def api_dkb_dev_lab_save(body: Dict[str, Any] = Body(...)):
+@app.post("/api/sink_dev_lab/save")
+def api_sink_dev_lab_save(body: Dict[str, Any] = Body(...)):
     code = body.get("code", "")
     service_name = body.get("name", "")
     icon_b64 = body.get("icon_base64")
     if not service_name:
-        raise HTTPException(status_code=400, detail="DKB service name is required")
+        raise HTTPException(status_code=400, detail="Sink service name is required")
     if len(service_name) > MAX_PLUGIN_NAME_LEN:
         raise HTTPException(
             status_code=400,
-            detail=f"DKB service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
+            detail=f"Sink service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
         )
-    result = _validate_dkb_code(code, service_name)
+    result = _validate_sink_code(code, service_name)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Validation failed"))
     sanitized = result["service_name"]
     if icon_b64:
-        code = _set_metadata_icon_in_source(code, f"{sanitized}.png", base_class_marker="BaseDKBService")
-    target_path = f"/src/dkbservices/{sanitized}_DKB.py"
-    tmp_path = f"/tmp/.{sanitized}_DKB.py.tmp"
+        code = _set_metadata_icon_in_source(code, f"{sanitized}.png", base_class_marker="BaseSink")
+    target_path = f"/src/sinks/{sanitized}Sink.py"
+    tmp_path = f"/tmp/.{sanitized}Sink.py.tmp"
     with open(tmp_path, "w") as f:
         f.write(code)
     # Final import sanity check.
@@ -1516,17 +1513,17 @@ def api_dkb_dev_lab_save(body: Dict[str, Any] = Body(...)):
         if "/src" not in _sys.path:
             _sys.path.insert(0, "/src")
         from importlib.machinery import SourceFileLoader
-        loader = SourceFileLoader(f"_dkb_dev_{sanitized}", tmp_path)
-        spec = importlib.util.spec_from_loader(f"_dkb_dev_{sanitized}", loader)
+        loader = SourceFileLoader(f"_sink_dev_{sanitized}", tmp_path)
+        spec = importlib.util.spec_from_loader(f"_sink_dev_{sanitized}", loader)
         if spec is None or spec.loader is None:
             raise ValueError(f"Could not build spec for {tmp_path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        new_cls = _find_dkb_class_in_module(module)
+        new_cls = _find_sink_class_in_module(module)
         if new_cls is None:
-            raise ValueError("No BaseDKBService subclass found in saved code")
+            raise ValueError("No BaseSink subclass found in saved code")
         if getattr(new_cls, "__abstractmethods__", None):
-            raise ValueError(f"DKB service class {new_cls.__name__} is abstract; implement all abstract methods")
+            raise ValueError(f"Sink service class {new_cls.__name__} is abstract; implement all abstract methods")
     except Exception as exc:  # noqa: BLE001
         try:
             os.remove(tmp_path)
@@ -1566,21 +1563,21 @@ def api_dkb_dev_lab_save(body: Dict[str, Any] = Body(...)):
 
 
 # ---------------------------------------------------------------------------
-# DKB (Downstream Knowledge Base) API endpoints
+# Sink / Target API endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/dkb_services")
-def api_dkb_services():
+@app.get("/api/sinks")
+def api_list_sinks():
     db: DatabaseManager = STATE["db"]
-    dkb_reg: DKBRegistry = STATE.get("dkb_registry")
-    services = db.list_dkb_services()
+    sink_reg: SinkRegistry = STATE.get("sink_registry")
+    services = db.list_sinks()
     result = []
     for svc in services:
-        datastores = db.list_datastores(service_id=svc.id)
+        targets = db.list_targets(service_id=svc.id)
         icon = ""
         defaults = {"api_url": "", "has_api_key_default": False}
-        if dkb_reg:
-            rec = dkb_reg.get(svc.name)
+        if sink_reg:
+            rec = sink_reg.get(svc.name)
             if rec:
                 icon = rec.icon
                 try:
@@ -1594,41 +1591,41 @@ def api_dkb_services():
             "icon": icon,
             "default_api_url": defaults.get("api_url", ""),
             "has_api_key_default": defaults.get("has_api_key_default", False),
-            "datastore_count": len(datastores),
+            "target_count": len(targets),
         })
     return result
 
 
-@app.delete("/api/dkb_services/{service_id}")
-def api_delete_dkb_service(service_id: str):
-    """Delete a DKB service. Mirrors ``api_delete_plugin``: only allowed
-    when the service has zero attached datastores. Removes the file, the
+@app.delete("/api/sinks/{service_id}")
+def api_delete_sink(service_id: str):
+    """Delete a Sink service. Mirrors ``api_delete_plugin``: only allowed
+    when the service has zero attached targets. Removes the file, the
     in-memory record, and the DB row."""
     db: DatabaseManager = STATE["db"]
-    dkb_reg: DKBRegistry = STATE.get("dkb_registry")
-    svc = db.get_dkb_service(service_id)
+    sink_reg: SinkRegistry = STATE.get("sink_registry")
+    svc = db.get_sink(service_id)
     if svc is None:
-        raise HTTPException(status_code=404, detail="DKB service not found")
-    datastores = db.list_datastores(service_id=service_id)
-    if datastores:
+        raise HTTPException(status_code=404, detail="Sink not found")
+    targets = db.list_targets(service_id=service_id)
+    if targets:
         raise HTTPException(
             status_code=409,
-            detail=f"Cannot delete DKB service with {len(datastores)} attached datastore(s)",
+            detail=f"Cannot delete Sink with {len(targets)} attached target(s)",
         )
     # Delete the file, the in-memory record, and the DB row
-    if dkb_reg is not None:
-        rec = dkb_reg.get(svc.name)
+    if sink_reg is not None:
+        rec = sink_reg.get(svc.name)
         if rec is not None:
             try:
                 os.remove(rec.file_path)
             except FileNotFoundError:
                 pass
     try:
-        db.delete_dkb_service(service_id)
+        db.delete_sink(service_id)
     except Exception:
         pass
-    if dkb_reg is not None:
-        dkb_reg.records.pop(svc.name, None)
+    if sink_reg is not None:
+        sink_reg.records.pop(svc.name, None)
     # Remove output directory
     import shutil
     out_dir = f"/output/{svc.name}"
@@ -1637,37 +1634,37 @@ def api_delete_dkb_service(service_id: str):
     return {"ok": True}
 
 
-@app.get("/api/dkb_services/{service_id}/datastores")
-def api_dkb_service_datastores(service_id: str):
+@app.get("/api/sinks/{service_id}/targets")
+def api_list_sink_targets(service_id: str):
     db: DatabaseManager = STATE["db"]
-    ds_list = db.list_datastores(service_id=service_id)
-    svc_row = db.get_dkb_service(service_id)
+    t_list = db.list_targets(service_id=service_id)
+    svc_row = db.get_sink(service_id)
     service_name = svc_row.name if svc_row else ""
     result = []
-    for ds in ds_list:
-        subs = db.list_datastore_subscriptions(ds.id)
-        result.append(_serialise_datastore(ds, subs, db))
+    for t in t_list:
+        subs = db.list_target_subscriptions(t.id)
+        result.append(_serialise_target(t, subs, db))
     return result
 
 
-@app.get("/api/dkb_datastores")
-def api_dkb_datastores():
+@app.get("/api/targets")
+def api_list_targets():
     db: DatabaseManager = STATE["db"]
-    all_ds = db.list_datastores()
+    all_t = db.list_targets()
     result = []
-    for ds in all_ds:
-        subs = db.list_datastore_subscriptions(ds.id)
-        result.append(_serialise_datastore(ds, subs, db))
+    for t in all_t:
+        subs = db.list_target_subscriptions(t.id)
+        result.append(_serialise_target(t, subs, db))
     return result
 
 
-@app.get("/api/dkb_datastores/{datastore_id}")
-def api_dkb_datastore_detail(datastore_id: str):
+@app.get("/api/targets/{target_id}")
+def api_target_detail(target_id: str):
     db: DatabaseManager = STATE["db"]
-    ds = db.get_datastore(datastore_id)
-    if ds is None:
-        raise HTTPException(status_code=404, detail="Datastore not found")
-    subs = db.list_datastore_subscriptions(datastore_id)
+    t = db.get_target(target_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    subs = db.list_target_subscriptions(target_id)
     # Enrich with subscription names
     enriched = []
     for s in subs:
@@ -1680,18 +1677,18 @@ def api_dkb_datastore_detail(datastore_id: str):
             "last_updated": s.last_updated.isoformat() if s.last_updated else None,
             "last_message": s.last_message,
         })
-    data = _serialise_datastore(ds, subs, db)
+    data = _serialise_target(t, subs, db)
     data["subscriptions"] = enriched
     return data
 
 
-@app.post("/api/dkb_services/{service_id}/datastores")
-def api_dkb_create_datastore(service_id: str, body: Dict[str, Any] = Body(...)):
+@app.post("/api/sinks/{service_id}/targets")
+def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     db: DatabaseManager = STATE["db"]
     queue: QueueManager = STATE["queue"]
-    svc = db.get_dkb_service(service_id)
+    svc = db.get_sink(service_id)
     if svc is None:
-        raise HTTPException(status_code=404, detail="DKB service not found")
+        raise HTTPException(status_code=404, detail="Sink not found")
     name = body.get("name", "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
@@ -1699,52 +1696,52 @@ def api_dkb_create_datastore(service_id: str, body: Dict[str, Any] = Body(...)):
     if not api_url:
         raise HTTPException(status_code=400, detail="api_url is required")
     api_key = body.get("api_key", "").strip()
-    ds_extra = body.get("ds_extra_params", {})
-    if isinstance(ds_extra, str):
+    t_extra = body.get("target_extra_params", {})
+    if isinstance(t_extra, str):
         try:
-            ds_extra = json.loads(ds_extra)
+            t_extra = json.loads(t_extra)
         except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="ds_extra_params must be valid JSON")
+            raise HTTPException(status_code=400, detail="target_extra_params must be valid JSON")
     sub_ids = body.get("subscription_ids", [])
     if not isinstance(sub_ids, list):
         raise HTTPException(status_code=400, detail="subscription_ids must be a list")
 
-    ds = db.create_datastore(service_id, name, api_url, api_key, ds_extra)
+    t = db.create_target(service_id, name, api_url, api_key, t_extra)
     if sub_ids:
-        db.link_datastore_subscriptions(ds.id, sub_ids, status="ENQUEUED")
+        db.link_target_subscriptions(t.id, sub_ids, status="ENQUEUED")
         for sid in sub_ids:
-            queue.push_primary(sid, operation="DKB_ONLY")
+            queue.push_primary(sid, operation="SINK_ONLY")
 
-    subs = db.list_datastore_subscriptions(ds.id)
-    return _serialise_datastore(ds, subs, db)
+    subs = db.list_target_subscriptions(t.id)
+    return _serialise_target(t, subs, db)
 
 
-@app.put("/api/dkb_datastores/{datastore_id}")
-def api_dkb_update_datastore(datastore_id: str, body: Dict[str, Any] = Body(...)):
+@app.put("/api/targets/{target_id}")
+def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
     db: DatabaseManager = STATE["db"]
     queue: QueueManager = STATE["queue"]
-    ds = db.get_datastore(datastore_id)
-    if ds is None:
-        raise HTTPException(status_code=404, detail="Datastore not found")
+    t = db.get_target(target_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Target not found")
     name = body.get("name")
     api_url = body.get("api_url")
     api_key = body.get("api_key")
-    ds_extra = body.get("ds_extra_params")
+    t_extra = body.get("target_extra_params")
 
-    if isinstance(ds_extra, str):
+    if isinstance(t_extra, str):
         try:
-            ds_extra = json.loads(ds_extra)
+            t_extra = json.loads(t_extra)
         except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="ds_extra_params must be valid JSON")
+            raise HTTPException(status_code=400, detail="target_extra_params must be valid JSON")
 
-    db.update_datastore(datastore_id, name=name, api_url=api_url, api_key=api_key, ds_extra_params=ds_extra)
+    db.update_target(target_id, name=name, api_url=api_url, api_key=api_key, target_extra_params=t_extra)
 
     # Diff subscriptions
     new_sub_ids = body.get("subscription_ids", [])
     if not isinstance(new_sub_ids, list):
         raise HTTPException(status_code=400, detail="subscription_ids must be a list")
 
-    current_subs = db.list_datastore_subscriptions(datastore_id)
+    current_subs = db.list_target_subscriptions(target_id)
     current_ids = {s.subscription_id for s in current_subs}
     new_ids = set(new_sub_ids)
 
@@ -1752,69 +1749,69 @@ def api_dkb_update_datastore(datastore_id: str, body: Dict[str, Any] = Body(...)
     removed = current_ids - new_ids
 
     if added:
-        db.link_datastore_subscriptions(datastore_id, list(added), status="ENQUEUED")
+        db.link_target_subscriptions(target_id, list(added), status="ENQUEUED")
     if removed:
-        db.set_datastore_subscriptions_status(datastore_id, list(removed), status="DELETED")
+        db.set_target_subscriptions_status(target_id, list(removed), status="DELETED")
 
     # Enqueue ALL related sub_ids
     all_related = current_ids | new_ids
     for sid in all_related:
-        queue.push_primary(sid, operation="DKB_ONLY")
+        queue.push_primary(sid, operation="SINK_ONLY")
 
-    subs = db.list_datastore_subscriptions(datastore_id)
-    return _serialise_datastore(ds, subs, db)
+    subs = db.list_target_subscriptions(target_id)
+    return _serialise_target(t, subs, db)
 
 
-@app.delete("/api/dkb_datastores/{datastore_id}")
-def api_dkb_delete_datastore(datastore_id: str):
+@app.delete("/api/targets/{target_id}")
+def api_delete_target(target_id: str):
     db: DatabaseManager = STATE["db"]
     queue: QueueManager = STATE["queue"]
-    ds = db.get_datastore(datastore_id)
-    if ds is None:
-        raise HTTPException(status_code=404, detail="Datastore not found")
-    subs = db.list_datastore_subscriptions(datastore_id)
+    t = db.get_target(target_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    subs = db.list_target_subscriptions(target_id)
     sub_ids = list({s.subscription_id for s in subs})
     if sub_ids:
-        db.set_datastore_subscriptions_status(datastore_id, sub_ids, status="DELETED")
+        db.set_target_subscriptions_status(target_id, sub_ids, status="DELETED")
         for sid in sub_ids:
-            queue.push_primary(sid, operation="DKB_ONLY")
-    db.delete_datastore_datafiles_for_datastore(datastore_id)
-    db.delete_datastore_subscriptions_for_datastore(datastore_id)
-    db.delete_datastore_row(datastore_id)
+            queue.push_primary(sid, operation="SINK_ONLY")
+    db.delete_target_datafiles_for_target(target_id)
+    db.delete_target_subscriptions_for_target(target_id)
+    db.delete_target_row(target_id)
     _schedule_sse_broadcast({
-        "type": "datastore_deleted",
-        "data": {"datastore_id": datastore_id, "service_id": ds.service_id},
+        "type": "target_deleted",
+        "data": {"target_id": target_id, "service_id": t.service_id},
     })
     return {"deleted": True}
 
 
-@app.post("/api/dkb_datastores/{datastore_id}/update")
-def api_dkb_update_datastore_trigger(datastore_id: str):
+@app.post("/api/targets/{target_id}/update")
+def api_trigger_target_update(target_id: str):
     db: DatabaseManager = STATE["db"]
     queue: QueueManager = STATE["queue"]
-    subs = db.list_datastore_subscriptions(datastore_id)
+    subs = db.list_target_subscriptions(target_id)
     sub_ids = list({s.subscription_id for s in subs})
     for sid in sub_ids:
-        queue.push_primary(sid, operation="DKB_ONLY")
+        queue.push_primary(sid, operation="SINK_ONLY")
     return {"enqueued": len(sub_ids)}
 
 
-@app.post("/api/dkb_datastores/{datastore_id}/status")
-def api_dkb_datastore_status(datastore_id: str, body: Dict[str, Any] = Body(...)):
+@app.post("/api/targets/{target_id}/status")
+def api_set_target_status(target_id: str, body: Dict[str, Any] = Body(...)):
     db: DatabaseManager = STATE["db"]
     queue: QueueManager = STATE["queue"]
-    ds = db.get_datastore(datastore_id)
-    if ds is None:
-        raise HTTPException(status_code=404, detail="Datastore not found")
+    t = db.get_target(target_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Target not found")
     new_status = body.get("status", "").upper()
     if new_status not in ("ENABLED", "DISABLED"):
         raise HTTPException(status_code=400, detail="status must be ENABLED or DISABLED")
-    subs = db.list_datastore_subscriptions(datastore_id)
+    subs = db.list_target_subscriptions(target_id)
     sub_ids = [s.subscription_id for s in subs]
     if sub_ids:
-        db.set_datastore_subscriptions_status(datastore_id, sub_ids, status=new_status)
+        db.set_target_subscriptions_status(target_id, sub_ids, status=new_status)
         for sid in sub_ids:
-            queue.push_primary(sid, operation="DKB_ONLY")
+            queue.push_primary(sid, operation="SINK_ONLY")
     return {"updated": len(sub_ids)}
 
 

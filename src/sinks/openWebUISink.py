@@ -1,10 +1,10 @@
-"""OpenWebUI DKB service — syncs files to an Open WebUI Knowledge Base.
+"""OpenWebUI Sink service — syncs files to an Open WebUI Knowledge Base.
 
-Implements the six abstract ``BaseDKBService`` methods against the Open WebUI
+Implements the six abstract ``BaseSink`` methods against the Open WebUI
 REST API (``{api_url}/api/v1``). The upload/link lifecycle mirrors the legacy
 ``owui_sync`` flow:
 
-  * A Knowledge Base (``AutoKB_{datastore}``) is the remote datastore.
+  * A Knowledge Base (``AutoKB_{target}``) is the remote target.
   * Files are uploaded to the global file repository, then *linked* into the
     Knowledge Base via ``knowledge/{kb_id}/file/add``.
   * Updates upload a new version, link it, then delete the old one so no
@@ -16,11 +16,11 @@ import time
 
 import requests
 
-from utils.dkb_service_base import BaseDKBService
 from utils.misc_utils import sanitize_name
+from utils.sink_base import BaseSink
 
 
-class OpenWebUIDKB(BaseDKBService):
+class OpenWebUISink(BaseSink):
     metadata = {
         "name": "openWebUI",
         "description": "Open WebUI Knowledge Base",
@@ -29,8 +29,8 @@ class OpenWebUIDKB(BaseDKBService):
     default_api_url = "http://openwebui-app:8080"
     api_key_env_var = "OPENWEBUI_API_KEY"
 
-    def __init__(self, datastore_row, db):
-        super().__init__(datastore_row, db)
+    def __init__(self, target_row, db):
+        super().__init__(target_row, db)
         self.api_url = (self.api_url or self.default_api_url).rstrip("/")
         self.api_key = self.api_key or (os.environ.get(self.api_key_env_var, "") if self.api_key_env_var else "")
         self._api_root = self.api_url + "/api/v1"
@@ -167,7 +167,7 @@ class OpenWebUIDKB(BaseDKBService):
     def add_datafile(self, path: str) -> str:
         file_id = self._upload_file(path)
         try:
-            self._link_to_kb(self.remote_datastore_id, file_id)
+            self._link_to_kb(self.remote_target_id, file_id)
         except Exception:
             try:
                 self._delete_file(file_id)
@@ -181,7 +181,7 @@ class OpenWebUIDKB(BaseDKBService):
         if new_id == remote_datafile_id:
             return new_id  # remote deduped by content → nothing to clean up
         try:
-            self._link_to_kb(self.remote_datastore_id, new_id)
+            self._link_to_kb(self.remote_target_id, new_id)
         except Exception:
             try:
                 self._delete_file(new_id)
@@ -194,14 +194,14 @@ class OpenWebUIDKB(BaseDKBService):
     def remove_datafile(self, remote_datafile_id: str) -> None:
         self._delete_file(remote_datafile_id)
 
-    def add_datastore(self) -> str:
+    def add_target(self) -> str:
         kb_id = self._create_kb(self._kb_name())
         if not kb_id:
             raise RuntimeError("openWebUI create KB returned no id")
         return kb_id
 
-    def remove_datastore(self) -> None:
-        kb_id = self.remote_datastore_id
+    def remove_target(self) -> None:
+        kb_id = self.remote_target_id
         if not kb_id:
             return
         for f in self._kb_files(kb_id):
@@ -209,8 +209,8 @@ class OpenWebUIDKB(BaseDKBService):
                 self._delete_file(f["id"])
         self._delete_kb(kb_id)
 
-    def clear_datastore(self) -> None:
-        kb_id = self.remote_datastore_id
+    def clear_target(self) -> None:
+        kb_id = self.remote_target_id
         if not kb_id:
             return
         for f in self._kb_files(kb_id):
@@ -218,4 +218,4 @@ class OpenWebUIDKB(BaseDKBService):
                 self._delete_file(f["id"])
 
 
-__all__ = ["OpenWebUIDKB"]
+__all__ = ["OpenWebUISink"]

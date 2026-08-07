@@ -1,4 +1,4 @@
-"""Test plugin for DKB end-to-end tests.
+"""Test plugin for Sink end-to-end tests.
 
 Writes two files to the output directory with known content.
 """
@@ -10,11 +10,11 @@ from utils.misc_utils import SubscriptionCancelledError
 from utils.plugin_base import BaseSubscription
 
 
-class TestDKBWriterPlugin(BaseSubscription):
+class TestSinkWriterPlugin(BaseSubscription):
     metadata = {
-        "name": "testDKBWriterPlugin",
+        "name": "testSinkWriterPlugin",
         "icon": "default_icon.png",
-        "description": "Writes test files for DKB e2e tests.",
+        "description": "Writes test files for Sink e2e tests.",
         "sub_type": "SCHEDULED",
     }
 
@@ -31,7 +31,7 @@ class TestDKBWriterPlugin(BaseSubscription):
         tmp1 = f"/tmp/{self._subscription_id}_hello.md"
         tmp2 = f"/tmp/{self._subscription_id}_world.md"
         with open(tmp1, "w") as f:
-            f.write("# Hello\n\nContent from testDKBWriterPlugin.\n")
+            f.write("# Hello\n\nContent from testSinkWriterPlugin.\n")
         progress_callback(50)
         with open(tmp2, "w") as f:
             f.write("# World\n\nMore test content.\n")
@@ -40,4 +40,4 @@ class TestDKBWriterPlugin(BaseSubscription):
         self.move_to_destination(tmp2)
 
 
-__all__ = ["TestDKBWriterPlugin"]
+__all__ = ["TestSinkWriterPlugin"]

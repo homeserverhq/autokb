@@ -105,33 +105,33 @@ class PluginRegistryState(Base):
 
 
 # ---------------------------------------------------------------------------
-# DKB Models
+# Sink / Target Models
 # ---------------------------------------------------------------------------
-class DKBService(Base):
-    __tablename__ = "dkb_service"
+class Sink(Base):
+    __tablename__ = "sink"
     id = Column(String(36), primary_key=True)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
 
-    datastores = relationship("DKBDatastore", back_populates="service", cascade="all, delete-orphan")
+    targets = relationship("Target", back_populates="service", cascade="all, delete-orphan")
 
 
-class DKBDatastore(Base):
-    __tablename__ = "dkb_datastore"
+class Target(Base):
+    __tablename__ = "target"
     id = Column(String(36), primary_key=True)
-    service_id = Column(String(36), ForeignKey("dkb_service.id", ondelete="CASCADE"), nullable=False, index=True)
+    service_id = Column(String(36), ForeignKey("sink.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     api_url = Column(Text, nullable=False)
     api_key = Column(Text, nullable=False)
-    remote_datastore_id = Column(Text, nullable=True)
-    ds_extra_params = Column(JSON, default=dict)
+    remote_target_id = Column(Text, nullable=True)
+    target_extra_params = Column(JSON, default=dict)
 
-    service = relationship("DKBService", back_populates="datastores")
+    service = relationship("Sink", back_populates="targets")
 
 
-class DatastoreSubscription(Base):
-    __tablename__ = "datastore_subscriptions"
-    datastore_id = Column(String(36), ForeignKey("dkb_datastore.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+class TargetSubscription(Base):
+    __tablename__ = "target_subscriptions"
+    target_id = Column(String(36), ForeignKey("target.id", ondelete="CASCADE"), nullable=False, primary_key=True)
     subscription_id = Column(String(36), ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False, primary_key=True)
     status = Column(String(32), nullable=False, default="ENQUEUED")
     last_updated = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -149,9 +149,9 @@ class AKBDatafile(Base):
     last_checked = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class DatastoreDatafile(Base):
-    __tablename__ = "datastore_datafile"
-    datastore_id = Column(String(36), ForeignKey("dkb_datastore.id", ondelete="CASCADE"), nullable=False, primary_key=True)
+class TargetDatafile(Base):
+    __tablename__ = "target_datafile"
+    target_id = Column(String(36), ForeignKey("target.id", ondelete="CASCADE"), nullable=False, primary_key=True)
     datafile_id = Column(String(36), ForeignKey("akb_datafile.id", ondelete="CASCADE"), nullable=False, primary_key=True)
     remote_datafile_id = Column(Text, nullable=False)
     hash = Column(Text, nullable=False)
@@ -639,171 +639,171 @@ class DatabaseManager:
             if existing is not None:
                 s.delete(existing)
 
-    # ----- DKB service CRUD -----
-    def upsert_dkb_service(self, name: str, description: str = "") -> Any:
+    # ----- Sink service CRUD -----
+    def upsert_sink(self, name: str, description: str = "") -> Any:
         with self.get_session() as s:
-            existing = s.query(DKBService).filter(DKBService.name == name).first()
+            existing = s.query(Sink).filter(Sink.name == name).first()
             if existing:
                 if description:
                     existing.description = description
                 return existing
-            svc = DKBService(id=str(uuid7()), name=name, description=description)
+            svc = Sink(id=str(uuid7()), name=name, description=description)
             s.add(svc)
             try:
                 s.flush()
             except IntegrityError:
                 s.rollback()
-                existing = s.query(DKBService).filter(DKBService.name == name).first()
+                existing = s.query(Sink).filter(Sink.name == name).first()
                 return existing
             return svc
 
-    def list_dkb_services(self) -> List[DKBService]:
+    def list_sinks(self) -> List[Sink]:
         with self.get_session() as s:
-            return s.query(DKBService).order_by(DKBService.name).all()
+            return s.query(Sink).order_by(Sink.name).all()
 
-    def get_dkb_service(self, service_id: str) -> Optional[DKBService]:
+    def get_sink(self, service_id: str) -> Optional[Sink]:
         with self.get_session() as s:
-            return s.query(DKBService).filter(DKBService.id == service_id).first()
+            return s.query(Sink).filter(Sink.id == service_id).first()
 
-    def delete_dkb_service(self, service_id: str) -> None:
+    def delete_sink(self, service_id: str) -> None:
         with self.get_session() as s:
-            existing = s.query(DKBService).filter(DKBService.id == service_id).first()
+            existing = s.query(Sink).filter(Sink.id == service_id).first()
             if existing is not None:
                 s.delete(existing)
 
-    # ----- datastore CRUD -----
-    def create_datastore(self, service_id: str, name: str, api_url: str, api_key: str,
-                         ds_extra_params: Dict[str, Any] = None) -> DKBDatastore:
+    # ----- Target CRUD -----
+    def create_target(self, service_id: str, name: str, api_url: str, api_key: str,
+                      target_extra_params: Dict[str, Any] = None) -> Target:
         encrypted = self._cipher.encrypt(api_key) if api_key else ""
-        ds = DKBDatastore(
+        t = Target(
             id=str(uuid7()),
             service_id=service_id, name=name, api_url=api_url,
             api_key=encrypted,
-            ds_extra_params=ds_extra_params or {},
+            target_extra_params=target_extra_params or {},
         )
         with self.get_session() as s:
-            s.add(ds)
+            s.add(t)
             s.flush()
-            self._log.info("datastore_created", datastore_id=ds.id, name=name)
-            return ds
+            self._log.info("target_created", target_id=t.id, name=name)
+            return t
 
-    def get_datastore(self, datastore_id: str) -> Optional[DKBDatastore]:
+    def get_target(self, target_id: str) -> Optional[Target]:
         with self.get_session() as s:
-            return s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).first()
+            return s.query(Target).filter(Target.id == target_id).first()
 
-    def list_datastores(self, service_id: Optional[str] = None) -> List[DKBDatastore]:
+    def list_targets(self, service_id: Optional[str] = None) -> List[Target]:
         with self.get_session() as s:
-            q = s.query(DKBDatastore)
+            q = s.query(Target)
             if service_id:
-                q = q.filter(DKBDatastore.service_id == service_id)
-            return q.order_by(DKBDatastore.name).all()
+                q = q.filter(Target.service_id == service_id)
+            return q.order_by(Target.name).all()
 
-    def update_datastore(self, datastore_id: str, *, name: str = None, api_url: str = None,
-                         api_key: str = None, ds_extra_params: Dict[str, Any] = None) -> Optional[DKBDatastore]:
+    def update_target(self, target_id: str, *, name: str = None, api_url: str = None,
+                      api_key: str = None, target_extra_params: Dict[str, Any] = None) -> Optional[Target]:
         with self.get_session() as s:
-            ds = s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).first()
-            if not ds:
+            t = s.query(Target).filter(Target.id == target_id).first()
+            if not t:
                 return None
             if name is not None:
-                ds.name = name
+                t.name = name
             if api_url is not None:
-                ds.api_url = api_url
+                t.api_url = api_url
             if api_key is not None and api_key.strip():
-                ds.api_key = self._cipher.encrypt(api_key)
-            if ds_extra_params is not None:
-                ds.ds_extra_params = ds_extra_params
+                t.api_key = self._cipher.encrypt(api_key)
+            if target_extra_params is not None:
+                t.target_extra_params = target_extra_params
             s.flush()
-            s.refresh(ds)
-            return ds
+            s.refresh(t)
+            return t
 
-    def set_datastore_remote_id(self, datastore_id: str, remote_id: str) -> None:
+    def set_target_remote_id(self, target_id: str, remote_id: str) -> None:
         with self.get_session() as s:
-            s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).update({"remote_datastore_id": remote_id})
+            s.query(Target).filter(Target.id == target_id).update({"remote_target_id": remote_id})
 
-    def delete_datastore_row(self, datastore_id: str) -> None:
+    def delete_target_row(self, target_id: str) -> None:
         with self.get_session() as s:
-            ds = s.query(DKBDatastore).filter(DKBDatastore.id == datastore_id).first()
-            if ds:
-                s.delete(ds)
+            t = s.query(Target).filter(Target.id == target_id).first()
+            if t:
+                s.delete(t)
 
-    def count_datastore_subscriptions_for_datastore(self, datastore_id: str) -> int:
+    def count_target_subscriptions_for_target(self, target_id: str) -> int:
         with self.get_session() as s:
-            return s.query(DatastoreSubscription).filter(
-                DatastoreSubscription.datastore_id == datastore_id
+            return s.query(TargetSubscription).filter(
+                TargetSubscription.target_id == target_id
             ).count()
 
-    # ----- datastore-subscription link -----
-    def list_datastore_subscriptions(self, datastore_id: str) -> List[DatastoreSubscription]:
+    # ----- target-subscription link -----
+    def list_target_subscriptions(self, target_id: str) -> List[TargetSubscription]:
         with self.get_session() as s:
-            return s.query(DatastoreSubscription).filter(
-                DatastoreSubscription.datastore_id == datastore_id
+            return s.query(TargetSubscription).filter(
+                TargetSubscription.target_id == target_id
             ).all()
 
-    def list_datastores_for_subscription(self, sub_id: str) -> List[DatastoreSubscription]:
+    def list_targets_for_subscription(self, sub_id: str) -> List[TargetSubscription]:
         with self.get_session() as s:
-            return s.query(DatastoreSubscription).filter(
-                DatastoreSubscription.subscription_id == sub_id
+            return s.query(TargetSubscription).filter(
+                TargetSubscription.subscription_id == sub_id
             ).all()
 
-    def link_datastore_subscriptions(self, datastore_id: str, sub_ids: List[str], status: str = "ENQUEUED") -> None:
+    def link_target_subscriptions(self, target_id: str, sub_ids: List[str], status: str = "ENQUEUED") -> None:
         with self.get_session() as s:
             for sid in sub_ids:
-                existing = s.query(DatastoreSubscription).filter(
-                    DatastoreSubscription.datastore_id == datastore_id,
-                    DatastoreSubscription.subscription_id == sid,
+                existing = s.query(TargetSubscription).filter(
+                    TargetSubscription.target_id == target_id,
+                    TargetSubscription.subscription_id == sid,
                 ).first()
                 if not existing:
-                    s.add(DatastoreSubscription(
-                        datastore_id=datastore_id, subscription_id=sid,
+                    s.add(TargetSubscription(
+                        target_id=target_id, subscription_id=sid,
                         status=status,
                         last_updated=datetime.now(timezone.utc),
                     ))
-            self._notify_datastore(datastore_id)
+            self._notify_target(target_id)
 
-    def set_datastore_subscriptions_status(self, datastore_id: str, sub_ids: List[str], status: str,
-                                           message: str = None) -> None:
+    def set_target_subscriptions_status(self, target_id: str, sub_ids: List[str], status: str,
+                                        message: str = None) -> None:
         now = datetime.now(timezone.utc)
         with self.get_session() as s:
             for sid in sub_ids:
-                row = s.query(DatastoreSubscription).filter(
-                    DatastoreSubscription.datastore_id == datastore_id,
-                    DatastoreSubscription.subscription_id == sid,
+                row = s.query(TargetSubscription).filter(
+                    TargetSubscription.target_id == target_id,
+                    TargetSubscription.subscription_id == sid,
                 ).first()
                 if row:
                     row.status = status
                     row.last_updated = now
                     if message is not None:
                         row.last_message = message
-            self._notify_datastore(datastore_id)
+            self._notify_target(target_id)
 
-    def set_datastore_subscription_status(self, datastore_id: str, sub_id: str, status: str,
-                                          message: str = None) -> None:
+    def set_target_subscription_status(self, target_id: str, sub_id: str, status: str,
+                                       message: str = None) -> None:
         now = datetime.now(timezone.utc)
         with self.get_session() as s:
-            row = s.query(DatastoreSubscription).filter(
-                DatastoreSubscription.datastore_id == datastore_id,
-                DatastoreSubscription.subscription_id == sub_id,
+            row = s.query(TargetSubscription).filter(
+                TargetSubscription.target_id == target_id,
+                TargetSubscription.subscription_id == sub_id,
             ).first()
             if row:
                 row.status = status
                 row.last_updated = now
                 if message is not None:
                     row.last_message = message
-            self._notify_datastore(datastore_id)
+            self._notify_target(target_id)
 
-    def delete_datastore_subscription(self, datastore_id: str, sub_id: str) -> None:
+    def delete_target_subscription(self, target_id: str, sub_id: str) -> None:
         with self.get_session() as s:
-            row = s.query(DatastoreSubscription).filter(
-                DatastoreSubscription.datastore_id == datastore_id,
-                DatastoreSubscription.subscription_id == sub_id,
+            row = s.query(TargetSubscription).filter(
+                TargetSubscription.target_id == target_id,
+                TargetSubscription.subscription_id == sub_id,
             ).first()
             if row:
                 s.delete(row)
 
-    def delete_datastore_subscriptions_for_datastore(self, datastore_id: str) -> None:
+    def delete_target_subscriptions_for_target(self, target_id: str) -> None:
         with self.get_session() as s:
-            s.query(DatastoreSubscription).filter(
-                DatastoreSubscription.datastore_id == datastore_id
+            s.query(TargetSubscription).filter(
+                TargetSubscription.target_id == target_id
             ).delete()
 
     # ----- akb_datafile -----
@@ -868,71 +868,71 @@ class DatabaseManager:
         with self.get_session() as s:
             return s.query(AKBDatafile).filter(AKBDatafile.subscription_id == sub_id).all()
 
-    def list_datafiles_for_datastore(self, datastore_id: str) -> List[DatastoreDatafile]:
+    def list_datafiles_for_target(self, target_id: str) -> List[TargetDatafile]:
         with self.get_session() as s:
-            return s.query(DatastoreDatafile).filter(
-                DatastoreDatafile.datastore_id == datastore_id
+            return s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id
             ).all()
 
-    # ----- datastore_datafile -----
-    def get_datastore_datafile(self, datastore_id: str, datafile_id: str) -> Optional[DatastoreDatafile]:
+    # ----- target_datafile -----
+    def get_target_datafile(self, target_id: str, datafile_id: str) -> Optional[TargetDatafile]:
         with self.get_session() as s:
-            return s.query(DatastoreDatafile).filter(
-                DatastoreDatafile.datastore_id == datastore_id,
-                DatastoreDatafile.datafile_id == datafile_id,
+            return s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.datafile_id == datafile_id,
             ).first()
 
-    def insert_datastore_datafile(self, datastore_id: str, datafile_id: str, remote_id: str, datafile_hash: str) -> None:
+    def insert_target_datafile(self, target_id: str, datafile_id: str, remote_id: str, datafile_hash: str) -> None:
         with self.get_session() as s:
-            s.add(DatastoreDatafile(
-                datastore_id=datastore_id, datafile_id=datafile_id,
+            s.add(TargetDatafile(
+                target_id=target_id, datafile_id=datafile_id,
                 remote_datafile_id=remote_id, hash=datafile_hash,
             ))
-            self._notify_datastore(datastore_id)
+            self._notify_target(target_id)
 
-    def update_datastore_datafile_hash(self, datastore_id: str, datafile_id: str, new_hash: str) -> None:
+    def update_target_datafile_hash(self, target_id: str, datafile_id: str, new_hash: str) -> None:
         with self.get_session() as s:
-            s.query(DatastoreDatafile).filter(
-                DatastoreDatafile.datastore_id == datastore_id,
-                DatastoreDatafile.datafile_id == datafile_id,
+            s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.datafile_id == datafile_id,
             ).update({"hash": new_hash})
 
-    def update_datastore_datafile_remote_id(self, datastore_id: str, datafile_id: str, new_remote_id: str) -> None:
+    def update_target_datafile_remote_id(self, target_id: str, datafile_id: str, new_remote_id: str) -> None:
         with self.get_session() as s:
-            s.query(DatastoreDatafile).filter(
-                DatastoreDatafile.datastore_id == datastore_id,
-                DatastoreDatafile.datafile_id == datafile_id,
+            s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.datafile_id == datafile_id,
             ).update({"remote_datafile_id": new_remote_id})
 
-    def delete_datastore_datafile(self, datastore_id: str, datafile_id: str) -> None:
+    def delete_target_datafile(self, target_id: str, datafile_id: str) -> None:
         with self.get_session() as s:
-            s.query(DatastoreDatafile).filter(
-                DatastoreDatafile.datastore_id == datastore_id,
-                DatastoreDatafile.datafile_id == datafile_id,
+            s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.datafile_id == datafile_id,
             ).delete()
 
-    def delete_datastore_datafiles_for_datastore(self, datastore_id: str) -> None:
+    def delete_target_datafiles_for_target(self, target_id: str) -> None:
         with self.get_session() as s:
-            s.query(DatastoreDatafile).filter(
-                DatastoreDatafile.datastore_id == datastore_id
+            s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id
             ).delete()
 
-    # ----- DKB notify -----
-    def _notify_datastore(self, datastore_id: str) -> None:
+    # ----- Target notify -----
+    def _notify_target(self, target_id: str) -> None:
         try:
-            payload = json.dumps({"type": "datastore", "datastore_id": datastore_id}, sort_keys=True, separators=(",", ":"))
+            payload = json.dumps({"type": "target", "target_id": target_id}, sort_keys=True, separators=(",", ":"))
             with self.get_session() as s:
                 s.execute(text(f"SELECT pg_notify('{NOTIFY_CHANNEL}', :payload)"), {"payload": payload})
         except Exception:
             pass
 
-    def decrypt_datastore_api_key(self, ds: DKBDatastore) -> str:
-        if not ds.api_key:
+    def decrypt_target_api_key(self, t: Target) -> str:
+        if not t.api_key:
             return ""
         try:
-            return self._cipher.decrypt(ds.api_key)
+            return self._cipher.decrypt(t.api_key)
         except Exception:
-            return ds.api_key  # fallback: pass through
+            return t.api_key  # fallback: pass through
 
     # ----- helpers -----
     def decrypt_config(self, sub: Subscription, password_field_names: List[str]) -> Dict[str, Any]:
@@ -975,6 +975,6 @@ def run_migrations(database_url: str) -> None:
 
 __all__ = [
     "DatabaseManager", "Base", "Subscription", "EventLog", "PluginRegistryState",
-    "DKBService", "DKBDatastore", "DatastoreSubscription", "AKBDatafile", "DatastoreDatafile",
+    "Sink", "Target", "TargetSubscription", "AKBDatafile", "TargetDatafile",
     "run_migrations",
 ]

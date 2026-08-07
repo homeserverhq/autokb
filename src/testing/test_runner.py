@@ -31,19 +31,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
-# DKB-specific imports
+# Sink-specific imports
 from utils.constants import (
-    OPERATION_FULL, OPERATION_DKB_ONLY,
+    OPERATION_FULL, OPERATION_SINK_ONLY,
     STATE_ENABLED, STATE_ENQUEUED, STATE_ERROR, STATE_DISABLED,
 )
 from utils.database import (
-    AKBDatafile, DKBService, DKBDatastore,
-    DatabaseManager, DatastoreDatafile, DatastoreSubscription,
+    AKBDatafile, Sink, Target,
+    DatabaseManager, TargetDatafile, TargetSubscription,
     EventLog, PluginRegistryState, Subscription,
     run_migrations,
 )
-from utils.dkb_service_base import BaseDKBService, compute_file_hash
-from utils.dkb_registry import DKBRegistry
+from utils.sink_base import BaseSink, compute_file_hash
+from utils.sink_registry import SinkRegistry
 from utils.queue_utils import QueueManager, _encode_item, _decode_item, P_QUEUE_KEY, S_QUEUE_KEY
 from utils.misc_utils import uuid7
 
@@ -280,19 +280,19 @@ def wait_for_new_event(sub_id: str, prev_count: int, timeout: float = 30.0) -> D
 
 
 # ---------------------------------------------------------------------------
-# DKB test helpers (reused by both e2e tests)
+# Sink test helpers (reused by both e2e tests)
 # ---------------------------------------------------------------------------
 
-def _reset_dkb_calls():
+def _reset_sink_calls():
     import os as _os
-    for p in ("/output/.dkb_e2e_calls.json",):
+    for p in ("/output/.sink_e2e_calls.json",):
         if _os.path.isfile(p):
             _os.remove(p)
 
 
-def _read_dkb_calls() -> List[List]:
+def _read_sink_calls() -> List[List]:
     import json as _json, os as _os
-    p = "/output/.dkb_e2e_calls.json"
+    p = "/output/.sink_e2e_calls.json"
     if not _os.path.isfile(p):
         return []
     with open(p) as f:
@@ -301,7 +301,7 @@ def _read_dkb_calls() -> List[List]:
 
 def _write_output_file(sub_name: str, fname: str, content: str) -> str:
     import os as _os
-    p = f"/output/testDKBWriterPlugin/{sub_name}/{fname}"
+    p = f"/output/testSinkWriterPlugin/{sub_name}/{fname}"
     _os.makedirs(_os.path.dirname(p), exist_ok=True)
     with open(p, "w") as f:
         f.write(content)
@@ -310,7 +310,7 @@ def _write_output_file(sub_name: str, fname: str, content: str) -> str:
 
 def _rm_output_dir(sub_name: str):
     import os as _os, shutil as _su
-    d = f"/output/testDKBWriterPlugin/{sub_name}"
+    d = f"/output/testSinkWriterPlugin/{sub_name}"
     if _os.path.isdir(d):
         _su.rmtree(d)
 
@@ -684,29 +684,29 @@ def _sync_test_plugins() -> None:
     _log(f"Synced {synced} test plugins from {src_dir} → {dst_dir}")
 
 
-def _sync_test_dkbs() -> None:
-    """Copy every DKB service file from the testing source directory into
-    /src/dkbservices/. Mirrors ``_sync_test_plugins`` — the Manager's file
-    watcher hot-swaps it in (reload + upsert the ``dkb_service`` row) and the
+def _sync_test_sinks() -> None:
+    """Copy every Sink service file from the testing source directory into
+    /src/sinks/. Mirrors ``_sync_test_plugins`` — the Manager's file
+    watcher hot-swaps it in (reload + upsert the ``sink`` row) and the
     Worker lazy-loads it via ``get_or_load`` during recon.
     """
-    src_dir = os.path.join(os.path.dirname(__file__), "dkbservices")
-    dst_dir = "/src/dkbservices"
-    if not os.path.isdir(src_dir):
-        _log(f"Warning: test DKB source directory {src_dir} does not exist; skipping sync")
+    sync_src = os.path.join(os.path.dirname(__file__), "sinks")
+    sync_dst = "/src/sinks"
+    if not os.path.isdir(sync_src):
+        _log(f"Warning: test Sink source directory {sync_src} does not exist; skipping sync")
         return
     synced = 0
-    for fname in sorted(os.listdir(src_dir)):
+    for fname in sorted(os.listdir(sync_src)):
         if not fname.endswith(".py") or fname.startswith("__"):
             continue
-        src_path = os.path.join(src_dir, fname)
-        dst_path = os.path.join(dst_dir, fname)
+        src_path = os.path.join(sync_src, fname)
+        dst_path = os.path.join(sync_dst, fname)
         try:
             shutil.copy(src_path, dst_path)
             synced += 1
         except OSError as exc:
             _log(f"Warning: failed to sync {fname}: {exc}")
-    _log(f"Synced {synced} test DKB services from {src_dir} → {dst_dir}")
+    _log(f"Synced {synced} test Sink services from {sync_src} → {sync_dst}")
 
 
 def _wait_for_plugin_loaded(plugin_id: str, timeout: float = 20.0) -> bool:
@@ -1516,43 +1516,43 @@ def _parse_argv(argv: List[str]) -> Tuple[bool, bool]:
 
 
 # ---------------------------------------------------------------------------
-# DKB e2e tests
+# Sink e2e tests
 # ---------------------------------------------------------------------------
 
-def test_dkb_full_pipeline() -> Tuple[bool, str]:
+def test_sink_full_pipeline() -> Tuple[bool, str]:
     """FULL trigger: upstream (plugin writes hello.md + world.md) + downstream recon."""
-    _reset_dkb_calls()
+    _reset_sink_calls()
     uid = str(time.time()).replace(".", "")[-8:]
     sub_name = f"e2e-full-{uid}"
-    ds_name = f"e2e-full-ds-{uid}"
+    t_name = f"e2e-full-ds-{uid}"
     sub_id = None
-    ds_id = None
+    t_id = None
     try:
-        sub = create_sub("testDKBWriterPlugin", sub_name, {}, cron="0 0 * * *")
+        sub = create_sub("testSinkWriterPlugin", sub_name, {}, cron="0 0 * * *")
         sub_id = sub["id"]
     except Exception as exc:
-        return False, f"DKB full: create_sub failed: {exc}"
+        return False, f"Sink full: create_sub failed: {exc}"
 
     try:
-        svcs = api_get("/api/dkb_services")
+        svcs = api_get("/api/sinks")
         svc_id = None
         for s in svcs:
-            if s.get("name") == "testDKB":
+            if s.get("name") == "test":
                 svc_id = s["service_id"]
                 break
         if not svc_id:
-            return False, "DKB full: testDKB service not found"
+            return False, "Sink full: testSink service not found"
 
-        # Create datastore linked to sub
-        ds = api_post(f"/api/dkb_services/{svc_id}/datastores", {
-            "name": ds_name, "api_url": "http://fake/api", "api_key": "test",
-            "ds_extra_params": {}, "subscription_ids": [sub_id],
+        # Create target linked to sub
+        ds = api_post(f"/api/sinks/{svc_id}/targets", {
+            "name": t_name, "api_url": "http://fake/api", "api_key": "test",
+            "target_extra_params": {}, "subscription_ids": [sub_id],
         })
-        ds_id = ds["datastore_id"]
+        t_id = ds["target_id"]
     except Exception as exc:
         try: requests.delete(f"{MANAGER_URL}/api/subscriptions/{sub_id}", headers=_api_headers(), timeout=10)
         except Exception: pass
-        return False, f"DKB full: setup failed: {exc}"
+        return False, f"Sink full: setup failed: {exc}"
 
     try:
         # Place a manual file to verify recon picks it up
@@ -1562,15 +1562,15 @@ def test_dkb_full_pipeline() -> Tuple[bool, str]:
         try:
             trigger_sub(sub_id)
         except Exception as exc:
-            return False, f"DKB full: trigger failed: {exc}"
+            return False, f"Sink full: trigger failed: {exc}"
 
-        # Wait for datastore_subscription → ENABLED
+        # Wait for target_subscription → ENABLED
         deadline = time.time() + 120
         last_status = None
         while time.time() < deadline:
             try:
-                ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
-                subs_detail = ds_det.get("subscriptions", [])
+                t_det = api_get(f"/api/targets/{t_id}")
+                subs_detail = t_det.get("subscriptions", [])
                 if subs_detail:
                     last_status = subs_detail[0].get("status", "")
                     if last_status == "ENABLED":
@@ -1579,82 +1579,82 @@ def test_dkb_full_pipeline() -> Tuple[bool, str]:
                 pass
             time.sleep(2)
         if last_status != "ENABLED":
-            return False, f"DKB full: ds_sub did not reach ENABLED (last={last_status})"
+            return False, f"Sink full: ds_sub did not reach ENABLED (last={last_status})"
 
-        # Verify DKB service calls
-        calls = _read_dkb_calls()
+        # Verify Sink service calls
+        calls = _read_sink_calls()
         add_files = [c for c in calls if c[0] == "add_datafile"]
         found = " ".join(c[1] for c in add_files)
         if "manual.md" not in found:
-            return False, f"DKB full: manual.md not added: {found[:200]}"
+            return False, f"Sink full: manual.md not added: {found[:200]}"
         if "hello.md" not in found:
-            return False, f"DKB full: hello.md not added: {found[:200]}"
+            return False, f"Sink full: hello.md not added: {found[:200]}"
         if "world.md" not in found:
-            return False, f"DKB full: world.md not added: {found[:200]}"
+            return False, f"Sink full: world.md not added: {found[:200]}"
 
-        return True, f"DKB full pipeline OK ({len(add_files)} files added)"
+        return True, f"Sink full pipeline OK ({len(add_files)} files added)"
     finally:
         try:
-            if ds_id is not None:
-                requests.delete(f"{MANAGER_URL}/api/dkb_datastores/{ds_id}", headers=_api_headers(), timeout=10)
+            if t_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/targets/{t_id}", headers=_api_headers(), timeout=10)
         except Exception:
             pass
         if sub_id is not None:
             _delete_sub(sub_id)
 
 
-def test_dkb_only_recon() -> Tuple[bool, str]:
-    """DKB_ONLY trigger: upstream skipped, downstream recon runs."""
-    _reset_dkb_calls()
+def test_sink_only_recon() -> Tuple[bool, str]:
+    """SINK_ONLY trigger: upstream skipped, downstream recon runs."""
+    _reset_sink_calls()
     uid = str(time.time()).replace(".", "")[-8:]
-    sub_name = f"e2e-dkbonly-{uid}"
-    ds_name = f"e2e-dkbonly-ds-{uid}"
+    sub_name = f"e2e-sinkonly-{uid}"
+    t_name = f"e2e-sinkonly-ds-{uid}"
     sub_id = None
-    ds_id = None
+    t_id = None
     try:
-        sub = create_sub("testDKBWriterPlugin", sub_name, {}, cron="0 0 * * *")
+        sub = create_sub("testSinkWriterPlugin", sub_name, {}, cron="0 0 * * *")
         sub_id = sub["id"]
     except Exception as exc:
-        return False, f"DKB-only: create_sub failed: {exc}"
+        return False, f"Sink-only: create_sub failed: {exc}"
 
     try:
-        svcs = api_get("/api/dkb_services")
+        svcs = api_get("/api/sinks")
         svc_id = None
         for s in svcs:
-            if s.get("name") == "testDKB":
+            if s.get("name") == "test":
                 svc_id = s["service_id"]
                 break
-        ds = api_post(f"/api/dkb_services/{svc_id}/datastores", {
-            "name": ds_name, "api_url": "http://fake/api", "api_key": "test",
-            "ds_extra_params": {}, "subscription_ids": [sub_id],
+        ds = api_post(f"/api/sinks/{svc_id}/targets", {
+            "name": t_name, "api_url": "http://fake/api", "api_key": "test",
+            "target_extra_params": {}, "subscription_ids": [sub_id],
         })
-        ds_id = ds["datastore_id"]
+        t_id = ds["target_id"]
     except Exception as exc:
         try: requests.delete(f"{MANAGER_URL}/api/subscriptions/{sub_id}", headers=_api_headers(), timeout=10)
         except Exception: pass
-        return False, f"DKB-only: setup failed: {exc}"
+        return False, f"Sink-only: setup failed: {exc}"
 
     try:
         # Place a file — plugin won't run so this is the only file
-        _write_output_file(sub_name, "only_file.md", "DKB-only test.\n")
+        _write_output_file(sub_name, "only_file.md", "Sink-only test.\n")
 
         # Snapshot sub heartbeat to verify upstream didn't run
         sub_before = api_get(f"/api/subscriptions/{sub_id}")
         hb_before = sub_before.get("last_heartbeat", "") or ""
 
-        # Trigger DKB_ONLY via datastore update
+        # Trigger SINK_ONLY via target update
         try:
-            api_post(f"/api/dkb_datastores/{ds_id}/update", {})
+            api_post(f"/api/targets/{t_id}/update", {})
         except Exception as exc:
-            return False, f"DKB-only: trigger failed: {exc}"
+            return False, f"Sink-only: trigger failed: {exc}"
 
         # Wait for ds_sub → ENABLED
         deadline = time.time() + 60
         last_status = None
         while time.time() < deadline:
             try:
-                ds_det = api_get(f"/api/dkb_datastores/{ds_id}")
-                subs_detail = ds_det.get("subscriptions", [])
+                t_det = api_get(f"/api/targets/{t_id}")
+                subs_detail = t_det.get("subscriptions", [])
                 if subs_detail:
                     last_status = subs_detail[0].get("status", "")
                     if last_status == "ENABLED":
@@ -1663,28 +1663,28 @@ def test_dkb_only_recon() -> Tuple[bool, str]:
                 pass
             time.sleep(2)
         if last_status != "ENABLED":
-            return False, f"DKB-only: ds_sub did not reach ENABLED (last={last_status})"
+            return False, f"Sink-only: ds_sub did not reach ENABLED (last={last_status})"
 
-        # Verify DKB service calls
-        calls = _read_dkb_calls()
+        # Verify Sink service calls
+        calls = _read_sink_calls()
         add_files = [c for c in calls if c[0] == "add_datafile"]
         found = " ".join(c[1] for c in add_files)
         if "only_file.md" not in found:
-            return False, f"DKB-only: only_file.md not added: {found[:200]}"
+            return False, f"Sink-only: only_file.md not added: {found[:200]}"
 
         # Verify NO upstream (plugin output files should NOT exist)
-        hello_path = f"/output/testDKBWriterPlugin/{sub_name}/hello.md"
-        world_path = f"/output/testDKBWriterPlugin/{sub_name}/world.md"
+        hello_path = f"/output/testSinkWriterPlugin/{sub_name}/hello.md"
+        world_path = f"/output/testSinkWriterPlugin/{sub_name}/world.md"
         if os.path.isfile(hello_path):
-            return False, "DKB-only: hello.md exists (upstream should not have run)"
+            return False, "Sink-only: hello.md exists (upstream should not have run)"
         if os.path.isfile(world_path):
-            return False, "DKB-only: world.md exists (upstream should not have run)"
+            return False, "Sink-only: world.md exists (upstream should not have run)"
 
-        return True, "DKB-only recon OK (upstream skipped, downstream completed)"
+        return True, "Sink-only recon OK (upstream skipped, downstream completed)"
     finally:
         try:
-            if ds_id is not None:
-                requests.delete(f"{MANAGER_URL}/api/dkb_datastores/{ds_id}", headers=_api_headers(), timeout=10)
+            if t_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/targets/{t_id}", headers=_api_headers(), timeout=10)
         except Exception:
             pass
         if sub_id is not None:
@@ -1692,38 +1692,38 @@ def test_dkb_only_recon() -> Tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# DKB unit test helpers and functions
+# Sink unit test helpers and functions
 # ---------------------------------------------------------------------------
 
-DKB_DATABASE_URL = os.environ.get("DATABASE_URL",
+SINK_DATABASE_URL = os.environ.get("DATABASE_URL",
                                    "postgresql://autokb:autokb@autokb-db:5432/autokb")
-DKB_REDIS_URL = os.environ.get("REDIS_URL", "redis://autokb-redis:6379/0")
-DKB_TEST_OUTPUT = "/tmp/dkb_test_output"
+SINK_REDIS_URL = os.environ.get("REDIS_URL", "redis://autokb-redis:6379/0")
+SINK_TEST_OUTPUT = "/tmp/sink_test_output"
 
 
-def _dkb_db():
-    return DatabaseManager(DKB_DATABASE_URL, component="test_dkb_runner")
+def _sink_db():
+    return DatabaseManager(SINK_DATABASE_URL, component="test_sink_runner")
 
 
-def _dkb_queue():
-    return QueueManager(DKB_REDIS_URL)
+def _sink_queue():
+    return QueueManager(SINK_REDIS_URL)
 
 
 _MOCK_REMOTE_ID = "remote-file-123"
-_MOCK_DATASTORE_ID = "remote-ds-abc"
+_MOCK_TARGET_ID = "remote-ds-abc"
 _MOCK_REMOTE_UPDATED = "remote-updated-456"
 
 
-class _MockDKBService(BaseDKBService):
-    """Concrete DKB service for testing — records all calls."""
-    metadata = {"name": "MockDKB", "description": "Test DKB service", "icon": "mock.png"}
+class _MockSink(BaseSink):
+    """Concrete Sink service for testing — records all calls."""
+    metadata = {"name": "MockSink", "description": "Test Sink service", "icon": "mock.png"}
 
-    def __init__(self, datastore_row, db):
-        super().__init__(datastore_row, db)
+    def __init__(self, target_row, db):
+        super().__init__(target_row, db)
         self.calls = []
 
     def add_datafile(self, path: str) -> str:
-        self.calls.append(("add_datafile", path, self.remote_datastore_id))
+        self.calls.append(("add_datafile", path, self.remote_target_id))
         return _MOCK_REMOTE_ID
 
     def update_datafile(self, remote_datafile_id: str, path: str) -> str:
@@ -1733,19 +1733,19 @@ class _MockDKBService(BaseDKBService):
     def remove_datafile(self, remote_datafile_id: str) -> None:
         self.calls.append(("remove_datafile", remote_datafile_id))
 
-    def add_datastore(self) -> str:
-        self.calls.append(("add_datastore",))
-        return _MOCK_DATASTORE_ID
+    def add_target(self) -> str:
+        self.calls.append(("add_target",))
+        return _MOCK_TARGET_ID
 
-    def remove_datastore(self) -> None:
-        self.calls.append(("remove_datastore",))
+    def remove_target(self) -> None:
+        self.calls.append(("remove_target",))
 
-    def clear_datastore(self) -> None:
-        self.calls.append(("clear_datastore",))
+    def clear_target(self) -> None:
+        self.calls.append(("clear_target",))
 
 
-def _dkb_create_fixtures(db):
-    """Create a DKB service, datastore, and subscription for tests."""
+def _sink_create_fixtures(db):
+    """Create a Sink service, datastore, and subscription for tests."""
     with db.get_session() as s:
         from utils.database import Subscription, PluginRegistryState
         test_plugin = s.query(PluginRegistryState).filter(
@@ -1763,13 +1763,13 @@ def _dkb_create_fixtures(db):
             sub_type="SCHEDULED", cron="0 0 * * *",
         ))
         s.flush()
-    svc = db.upsert_dkb_service("TestService", "Test Description")
-    ds = db.create_datastore(svc.id, "TestDS", "https://example.com", "test-key", {})
-    db.link_datastore_subscriptions(ds.id, [sub_id], status=STATE_ENABLED)
+    svc = db.upsert_sink("TestSinkService", "Test Description")
+    ds = db.create_target(svc.id, "TestTarget", "https://example.com", "test-key", {})
+    db.link_target_subscriptions(ds.id, [sub_id], status=STATE_ENABLED)
     return sub_id, ds
 
 
-def _dkb_api_delete(path):
+def _sink_api_delete(path):
     import urllib.request, urllib.error
     req = urllib.request.Request(f"http://localhost:80{path}", method="DELETE")
     req.add_header("X-Api-Key", BACKEND_KEY)
@@ -1797,85 +1797,85 @@ def _get_sub_name(db, sub_id):
 
 # ---- 1. Database CRUD tests ----
 
-def _dkb_test_svc_crud(db, sub, ds):
-    svc = db.upsert_dkb_service("MyService", "desc")
+def _sink_test_svc_crud(db, sub, ds):
+    svc = db.upsert_sink("MyService", "desc")
     if not svc.id:
         return False, "service id None"
-    fetched = db.get_dkb_service(svc.id)
+    fetched = db.get_sink(svc.id)
     if fetched.name != "MyService":
         return False, f"expected MyService got {fetched.name}"
-    svc2 = db.upsert_dkb_service("MyService", "updated")
+    svc2 = db.upsert_sink("MyService", "updated")
     if svc2.id != svc.id:
         return False, "upsert idempotency failed"
-    services = db.list_dkb_services()
+    services = db.list_sinks()
     if svc.id not in [s.id for s in services]:
         return False, "service not in list"
     with db.get_session() as s:
-        s.query(DKBService).filter(DKBService.id == svc.id).delete()
+        s.query(Sink).filter(Sink.id == svc.id).delete()
     return True, "OK"
 
 
 def _dkb_test_ds_crud(db, sub, ds):
-    svc = db.upsert_dkb_service("Svc", "")
-    ds2 = db.create_datastore(svc.id, "MyDS", "https://example.com/api", "secret_key", {"extra": "value"})
+    svc = db.upsert_sink("Svc", "")
+    ds2 = db.create_target(svc.id, "MyDS", "https://example.com/api", "secret_key", {"extra": "value"})
     if not ds2.id:
         return False, "ds id None"
-    fetched = db.get_datastore(ds2.id)
+    fetched = db.get_target(ds2.id)
     if fetched.name != "MyDS":
         return False, f"expected MyDS got {fetched.name}"
     if fetched.api_url != "https://example.com/api":
         return False, "api_url mismatch"
     if fetched.api_key == "secret_key":
         return False, "api_key not encrypted"
-    decrypted = db.decrypt_datastore_api_key(fetched)
+    decrypted = db.decrypt_target_api_key(fetched)
     if decrypted != "secret_key":
         return False, "decrypt failed"
-    updated = db.update_datastore(ds2.id, name="MyDS-Updated")
+    updated = db.update_target(ds2.id, name="MyDS-Updated")
     if updated.name != "MyDS-Updated":
         return False, "update failed"
-    db.set_datastore_remote_id(ds2.id, "remote-xyz")
-    fetched2 = db.get_datastore(ds2.id)
-    if fetched2.remote_datastore_id != "remote-xyz":
+    db.set_target_remote_id(ds2.id, "remote-xyz")
+    fetched2 = db.get_target(ds2.id)
+    if fetched2.remote_target_id != "remote-xyz":
         return False, "remote_id not set"
     with db.get_session() as s:
-        s.query(DKBDatastore).filter(DKBDatastore.id == ds2.id).delete()
-        s.query(DKBService).filter(DKBService.id == svc.id).delete()
+        s.query(Target).filter(Target.id == ds2.id).delete()
+        s.query(Sink).filter(Sink.id == svc.id).delete()
     return True, "OK"
 
 
 def _dkb_test_link_crud(db, sub, ds):
-    svc = db.upsert_dkb_service("Svc", "")
-    ds2 = db.create_datastore(svc.id, "DS", "url", "key", {})
-    db.link_datastore_subscriptions(ds2.id, [sub], status="ENABLED")
-    links = db.list_datastore_subscriptions(ds2.id)
+    svc = db.upsert_sink("Svc", "")
+    ds2 = db.create_target(svc.id, "DS", "url", "key", {})
+    db.link_target_subscriptions(ds2.id, [sub], status="ENABLED")
+    links = db.list_target_subscriptions(ds2.id)
     if len(links) != 1:
         return False, f"expected 1 link got {len(links)}"
     if links[0].subscription_id != sub:
         return False, "sub_id mismatch"
     if links[0].status != "ENABLED":
         return False, "status mismatch"
-    subs_for = db.list_datastores_for_subscription(sub)
+    subs_for = db.list_targets_for_subscription(sub)
     if not subs_for:
         return False, "no datastores for sub"
-    db.set_datastore_subscription_status(ds2.id, sub, "ERROR", message="oops")
-    links2 = db.list_datastore_subscriptions(ds2.id)
+    db.set_target_subscription_status(ds2.id, sub, "ERROR", message="oops")
+    links2 = db.list_target_subscriptions(ds2.id)
     if links2[0].status != "ERROR":
         return False, "status not updated"
     if links2[0].last_message != "oops":
         return False, "message mismatch"
-    db.delete_datastore_subscription(ds2.id, sub)
-    links3 = db.list_datastore_subscriptions(ds2.id)
+    db.delete_target_subscription(ds2.id, sub)
+    links3 = db.list_target_subscriptions(ds2.id)
     if len(links3) != 0:
         return False, "link not deleted"
     with db.get_session() as s:
-        s.query(DKBDatastore).filter(DKBDatastore.id == ds2.id).delete()
-        s.query(DKBService).filter(DKBService.id == svc.id).delete()
+        s.query(Target).filter(Target.id == ds2.id).delete()
+        s.query(Sink).filter(Sink.id == svc.id).delete()
     return True, "OK"
 
 
 def _dkb_test_datafile_crud(db, sub, ds):
-    test_path = os.path.join(DKB_TEST_OUTPUT, "test_file.md")
-    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
+    test_path = os.path.join(SINK_TEST_OUTPUT, "test_file.md")
+    os.makedirs(SINK_TEST_OUTPUT, exist_ok=True)
     with open(test_path, "w") as f:
         f.write("# Hello\nWorld\n")
     size = os.path.getsize(test_path)
@@ -1907,28 +1907,28 @@ def _dkb_test_datafile_crud(db, sub, ds):
 
 
 def _dkb_test_ds_df_crud(db, sub, ds):
-    test_path = os.path.join(DKB_TEST_OUTPUT, "df_test.md")
-    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
+    test_path = os.path.join(SINK_TEST_OUTPUT, "df_test.md")
+    os.makedirs(SINK_TEST_OUTPUT, exist_ok=True)
     with open(test_path, "w") as f:
         f.write("data")
     h = compute_file_hash(test_path)
     df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
                                    os.path.getmtime(test_path), h)
-    db.insert_datastore_datafile(ds.id, df.id, "remote-001", h)
-    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    db.insert_target_datafile(ds.id, df.id, "remote-001", h)
+    ds_df = db.get_target_datafile(ds.id, df.id)
     if not ds_df:
         return False, "ds_df not created"
     if ds_df.remote_datafile_id != "remote-001":
         return False, "remote_id mismatch"
-    db.update_datastore_datafile_hash(ds.id, df.id, "newhash456")
-    ds_df2 = db.get_datastore_datafile(ds.id, df.id)
+    db.update_target_datafile_hash(ds.id, df.id, "newhash456")
+    ds_df2 = db.get_target_datafile(ds.id, df.id)
     if ds_df2.hash != "newhash456":
         return False, "hash not updated"
-    items = db.list_datafiles_for_datastore(ds.id)
+    items = db.list_datafiles_for_target(ds.id)
     if len(items) != 1:
         return False, f"expected 1 item got {len(items)}"
-    db.delete_datastore_datafile(ds.id, df.id)
-    ds_df3 = db.get_datastore_datafile(ds.id, df.id)
+    db.delete_target_datafile(ds.id, df.id)
+    ds_df3 = db.get_target_datafile(ds.id, df.id)
     if ds_df3 is not None:
         return False, "ds_df not deleted"
     with db.get_session() as s:
@@ -1940,7 +1940,7 @@ def _dkb_test_ds_df_crud(db, sub, ds):
 
 def _dkb_test_queue_encoding():
     import json
-    for op in (OPERATION_FULL, OPERATION_DKB_ONLY):
+    for op in (OPERATION_FULL, OPERATION_SINK_ONLY):
         enc = _encode_item("sub-123", op)
         dec = _decode_item(enc)
         if dec["sub_id"] != "sub-123" or dec["operation"] != op:
@@ -1949,28 +1949,28 @@ def _dkb_test_queue_encoding():
 
 
 def _dkb_test_queue_roundtrip():
-    q = _dkb_queue()
+    q = _sink_queue()
     test_key = "test_isolated_q_runner"
     q.client.delete(test_key)
     try:
         q.client.lpush(test_key, _encode_item("sub-a", OPERATION_FULL))
-        q.client.lpush(test_key, _encode_item("sub-b", OPERATION_DKB_ONLY))
-        q.client.lpush(test_key, _encode_item("sub-a", OPERATION_DKB_ONLY))
+        q.client.lpush(test_key, _encode_item("sub-b", OPERATION_SINK_ONLY))
+        q.client.lpush(test_key, _encode_item("sub-a", OPERATION_SINK_ONLY))
         items = q.client.lrange(test_key, 0, -1)
         parsed = [_decode_item(i) for i in items]
         sub_a_full = [p for p in parsed if p and p["sub_id"] == "sub-a" and p["operation"] == OPERATION_FULL]
         if len(sub_a_full) != 1:
             return False, f"expected 1 sub-a FULL got {len(sub_a_full)}"
-        sub_a_dkb = [p for p in parsed if p and p["sub_id"] == "sub-a" and p["operation"] == OPERATION_DKB_ONLY]
+        sub_a_dkb = [p for p in parsed if p and p["sub_id"] == "sub-a" and p["operation"] == OPERATION_SINK_ONLY]
         if len(sub_a_dkb) != 1:
-            return False, f"expected 1 sub-a DKB_ONLY got {len(sub_a_dkb)}"
+            return False, f"expected 1 sub-a SINK_ONLY got {len(sub_a_dkb)}"
         keep = [i for i in items if _decode_item(i) and _decode_item(i)["sub_id"] != "sub-a"]
         removed = len(items) - len(keep)
         if removed != 2:
             return False, f"expected 2 removed got {removed}"
         sub_b_full = [p for p in [_decode_item(i) for i in keep] if p and p["sub_id"] == "sub-b" and p["operation"] == OPERATION_FULL]
         if len(sub_b_full) != 0:
-            return False, "sub-b should be DKB_ONLY"
+            return False, "sub-b should be SINK_ONLY"
         return True, "OK"
     finally:
         q.client.delete(test_key)
@@ -1979,7 +1979,7 @@ def _dkb_test_queue_roundtrip():
 # ---- 3. DKB registry test ----
 
 def _dkb_test_registry_load():
-    reg = DKBRegistry(dkbs_dir="/src/dkbservices", component="test_dkb_runner_reg")
+    reg = SinkRegistry(sinks_dir="/src/sinks", component="test_dkb_runner_reg")
     reg.reload_all()
     records = reg.list_records()
     names = [r.service_name for r in records]
@@ -1993,8 +1993,8 @@ def _dkb_test_registry_load():
 # ---- 4. Service base class tests ----
 
 def _dkb_test_compute_hash():
-    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
-    test_path = os.path.join(DKB_TEST_OUTPUT, "hash_test.txt")
+    os.makedirs(SINK_TEST_OUTPUT, exist_ok=True)
+    test_path = os.path.join(SINK_TEST_OUTPUT, "hash_test.txt")
     content = b"Hello World! " * 1000
     with open(test_path, "wb") as f:
         f.write(content)
@@ -2007,11 +2007,11 @@ def _dkb_test_compute_hash():
 
 
 def _dkb_test_base_add_datafile(db, sub, ds):
-    ds_row = db.get_datastore(ds.id)
-    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
-    svc = _MockDKBService(ds_row, db)
-    svc.remote_datastore_id = "mock-remote-id"
-    test_path = os.path.join(DKB_TEST_OUTPUT, "base_add.md")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote-id"
+    test_path = os.path.join(SINK_TEST_OUTPUT, "base_add.md")
     with open(test_path, "w") as f:
         f.write("test content")
     svc.base_add_datafile(sub, test_path)
@@ -2020,62 +2020,62 @@ def _dkb_test_base_add_datafile(db, sub, ds):
         return False, "df not created via base_add_datafile"
     if ("add_datafile", test_path, "mock-remote-id") not in svc.calls:
         return False, "add_datafile not called"
-    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    ds_df = db.get_target_datafile(ds.id, df.id)
     if not ds_df:
         return False, "ds_df not created"
     with db.get_session() as s:
-        s.query(DatastoreDatafile).filter(
-            DatastoreDatafile.datastore_id == ds.id,
-            DatastoreDatafile.datafile_id == df.id).delete()
+        s.query(TargetDatafile).filter(
+            TargetDatafile.target_id == ds.id,
+            TargetDatafile.datafile_id == df.id).delete()
         s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
     return True, "OK"
 
 
 def _dkb_test_base_update_datafile(db, sub, ds):
-    ds_row = db.get_datastore(ds.id)
-    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
-    svc = _MockDKBService(ds_row, db)
-    svc.remote_datastore_id = "mock-remote-id"
-    test_path = os.path.join(DKB_TEST_OUTPUT, "base_update.md")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote-id"
+    test_path = os.path.join(SINK_TEST_OUTPUT, "base_update.md")
     with open(test_path, "w") as f:
         f.write("original")
     h = compute_file_hash(test_path)
     df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
                                    os.path.getmtime(test_path), h)
-    db.insert_datastore_datafile(ds.id, df.id, "remote-old", h)
+    db.insert_target_datafile(ds.id, df.id, "remote-old", h)
     new_hash = "newhash123"
     svc.base_update_datafile(df.id, new_hash)
     if ("update_datafile", "remote-old", test_path) not in svc.calls:
         return False, "update_datafile not called"
-    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    ds_df = db.get_target_datafile(ds.id, df.id)
     if ds_df.hash != new_hash:
         return False, "hash not updated"
     if ds_df.remote_datafile_id != _MOCK_REMOTE_UPDATED:
         return False, "remote id not updated"
     with db.get_session() as s:
-        s.query(DatastoreDatafile).filter(
-            DatastoreDatafile.datastore_id == ds.id,
-            DatastoreDatafile.datafile_id == df.id).delete()
+        s.query(TargetDatafile).filter(
+            TargetDatafile.target_id == ds.id,
+            TargetDatafile.datafile_id == df.id).delete()
         s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
     return True, "OK"
 
 
 def _dkb_test_base_remove_datafile(db, sub, ds):
-    ds_row = db.get_datastore(ds.id)
-    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
-    svc = _MockDKBService(ds_row, db)
-    svc.remote_datastore_id = "mock-remote-id"
-    test_path = os.path.join(DKB_TEST_OUTPUT, "base_remove.md")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote-id"
+    test_path = os.path.join(SINK_TEST_OUTPUT, "base_remove.md")
     with open(test_path, "w") as f:
         f.write("remove me")
     h = compute_file_hash(test_path)
     df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
                                    os.path.getmtime(test_path), h)
-    db.insert_datastore_datafile(ds.id, df.id, "remote-del", h)
+    db.insert_target_datafile(ds.id, df.id, "remote-del", h)
     svc.base_remove_datafile(df.id)
     if ("remove_datafile", "remote-del") not in svc.calls:
         return False, "remove_datafile not called"
-    ds_df = db.get_datastore_datafile(ds.id, df.id)
+    ds_df = db.get_target_datafile(ds.id, df.id)
     if ds_df is not None:
         return False, "ds_df not removed"
     with db.get_session() as s:
@@ -2083,18 +2083,18 @@ def _dkb_test_base_remove_datafile(db, sub, ds):
     return True, "OK"
 
 
-def _dkb_test_base_add_datastore(db, sub, ds):
-    ds_row = db.get_datastore(ds.id)
-    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
-    if ds_row.remote_datastore_id is not None:
-        return False, "expected no remote_id before add_datastore"
-    svc = _MockDKBService(ds_row, db)
-    svc.base_add_datastore()
-    if ("add_datastore",) not in svc.calls:
-        return False, "add_datastore not called"
-    refreshed = db.get_datastore(ds.id)
-    if refreshed.remote_datastore_id != _MOCK_DATASTORE_ID:
-        return False, "remote_datastore_id not set"
+def _dkb_test_base_add_target(db, sub, ds):
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    if ds_row.remote_target_id is not None:
+        return False, "expected no remote_id before add_target"
+    svc = _MockSink(ds_row, db)
+    svc.base_add_target()
+    if ("add_target",) not in svc.calls:
+        return False, "add_target not called"
+    refreshed = db.get_target(ds.id)
+    if refreshed.remote_target_id != _MOCK_TARGET_ID:
+        return False, "remote_target_id not set"
     return True, "OK"
 
 
@@ -2102,10 +2102,10 @@ def _dkb_test_base_add_datastore(db, sub, ds):
 
 def _dkb_test_recon_add(db, sub, ds):
     from unittest.mock import MagicMock, patch
-    with patch("worker.dkb_recon._get_service") as mock_get:
-        from worker.dkb_recon import reconcile_subscription_datastores
+    with patch("worker.sink_recon._get_service") as mock_get:
+        from worker.sink_recon import reconcile_subscription_targets
         mock_svc = MagicMock()
-        mock_svc.remote_datastore_id = "mock-remote"
+        mock_svc.remote_target_id = "mock-remote"
         mock_svc.name = "TestSvc"
         mock_svc.base_add_datafile = MagicMock()
         mock_svc.base_update_datafile = MagicMock()
@@ -2113,7 +2113,7 @@ def _dkb_test_recon_add(db, sub, ds):
         mock_get.return_value = mock_svc
         sub_row = db.get_subscription(sub)
         _write_output_file_test(sub_row.name, "article.md", "# Test\nContent here.")
-        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
         if not mock_svc.base_add_datafile.called:
             return False, "base_add_datafile not called"
     return True, "OK"
@@ -2121,68 +2121,68 @@ def _dkb_test_recon_add(db, sub, ds):
 
 def _dkb_test_recon_remove(db, sub, ds):
     from unittest.mock import MagicMock, patch
-    test_path = os.path.join(DKB_TEST_OUTPUT, "test_plugin", "test_sub", "old.md")
+    test_path = os.path.join(SINK_TEST_OUTPUT, "test_plugin", "test_sub", "old.md")
     os.makedirs(os.path.dirname(test_path), exist_ok=True)
     with open(test_path, "w") as f:
         f.write("old content")
     h = compute_file_hash(test_path)
     os.remove(test_path)
     df = db.get_or_create_datafile(sub, test_path, 100, 1000.0, h)
-    db.insert_datastore_datafile(ds.id, df.id, "remote-old", h)
-    with patch("worker.dkb_recon._get_service") as mock_get:
-        from worker.dkb_recon import reconcile_subscription_datastores
+    db.insert_target_datafile(ds.id, df.id, "remote-old", h)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        from worker.sink_recon import reconcile_subscription_targets
         mock_svc = MagicMock()
-        mock_svc.remote_datastore_id = "mock-remote"
+        mock_svc.remote_target_id = "mock-remote"
         mock_svc.name = "TestSvc"
         mock_svc.base_add_datafile = MagicMock()
         mock_svc.base_remove_datafile = MagicMock()
         mock_get.return_value = mock_svc
         sub_row = db.get_subscription(sub)
-        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
         if not mock_svc.base_remove_datafile.called:
             return False, "base_remove_datafile not called"
     with db.get_session() as s:
-        s.query(DatastoreDatafile).filter(
-            DatastoreDatafile.datastore_id == ds.id,
-            DatastoreDatafile.datafile_id == df.id).delete()
+        s.query(TargetDatafile).filter(
+            TargetDatafile.target_id == ds.id,
+            TargetDatafile.datafile_id == df.id).delete()
         s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
     return True, "OK"
 
 
 def _dkb_test_recon_skip_disabled(db, sub, ds):
     from unittest.mock import MagicMock, patch
-    db.set_datastore_subscription_status(ds.id, sub, STATE_DISABLED)
+    db.set_target_subscription_status(ds.id, sub, STATE_DISABLED)
     sub_row = db.get_subscription(sub)
     _write_output_file_test(sub_row.name, "enabled_only.md", "should be skipped")
-    with patch("worker.dkb_recon._get_service") as mock_get:
-        from worker.dkb_recon import reconcile_subscription_datastores
+    with patch("worker.sink_recon._get_service") as mock_get:
+        from worker.sink_recon import reconcile_subscription_targets
         mock_svc = MagicMock()
         mock_get.return_value = mock_svc
         sub_row = db.get_subscription(sub)
-        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
         mock_svc.base_add_datafile.assert_not_called()
         mock_svc.base_remove_datafile.assert_not_called()
     # Re-enable for next test's cleanup
-    db.set_datastore_subscription_status(ds.id, sub, STATE_ENABLED)
+    db.set_target_subscription_status(ds.id, sub, STATE_ENABLED)
     return True, "OK"
 
 
 def _dkb_test_recon_error(db, sub, ds):
     from unittest.mock import MagicMock, patch
-    ds_row = db.get_datastore(ds.id)
-    ds_row.api_key = db.decrypt_datastore_api_key(ds_row)
-    svc = _MockDKBService(ds_row, db)
-    svc.remote_datastore_id = "mock-remote"
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote"
     svc.add_datafile = MagicMock(side_effect=RuntimeError("API failure"))
-    svc.add_datastore = MagicMock()
+    svc.add_target = MagicMock()
     sub_row = db.get_subscription(sub)
     _write_output_file_test(sub_row.name, "error_test.md", "will fail")
-    with patch("worker.dkb_recon._get_service") as mock_get:
-        from worker.dkb_recon import reconcile_subscription_datastores
+    with patch("worker.sink_recon._get_service") as mock_get:
+        from worker.sink_recon import reconcile_subscription_targets
         mock_get.return_value = svc
         sub_row = db.get_subscription(sub)
-        reconcile_subscription_datastores(sub_row, db, MagicMock(), MagicMock())
-        links = db.list_datastore_subscriptions(ds.id)
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+        links = db.list_target_subscriptions(ds.id)
         if links[0].status != STATE_ENABLED:
             return False, "link should stay ENABLED after per-file error"
     with db.get_session() as s:
@@ -2194,13 +2194,13 @@ def _dkb_test_recon_error(db, sub, ds):
 
 
 def _run_dkb_unit_tests():
-    """Run all DKB unit tests inline, return (passed, total, results)."""
+    """Run all Sink unit tests inline, return (passed, total, results)."""
     tests = [
-        ("DKB CRUD — service", lambda db, sub, ds: _dkb_test_svc_crud(db, sub, ds)),
+        ("DKB CRUD — service", lambda db, sub, ds: _sink_test_svc_crud(db, sub, ds)),
         ("DKB CRUD — datastore", lambda db, sub, ds: _dkb_test_ds_crud(db, sub, ds)),
         ("DKB CRUD — subscription link", lambda db, sub, ds: _dkb_test_link_crud(db, sub, ds)),
         ("DKB CRUD — datafile", lambda db, sub, ds: _dkb_test_datafile_crud(db, sub, ds)),
-        ("DKB CRUD — datastore datafile", lambda db, sub, ds: _dkb_test_ds_df_crud(db, sub, ds)),
+        ("DKB CRUD — target datafile", lambda db, sub, ds: _dkb_test_ds_df_crud(db, sub, ds)),
         ("DKB Queue — encoding", None),
         ("DKB Queue — roundtrip", None),
         ("DKB Registry — load", None),
@@ -2208,7 +2208,7 @@ def _run_dkb_unit_tests():
         ("DKB Service — base_add_datafile", lambda db, sub, ds: _dkb_test_base_add_datafile(db, sub, ds)),
         ("DKB Service — base_update_datafile", lambda db, sub, ds: _dkb_test_base_update_datafile(db, sub, ds)),
         ("DKB Service — base_remove_datafile", lambda db, sub, ds: _dkb_test_base_remove_datafile(db, sub, ds)),
-        ("DKB Service — base_add_datastore", lambda db, sub, ds: _dkb_test_base_add_datastore(db, sub, ds)),
+        ("DKB Service — base_add_target", lambda db, sub, ds: _dkb_test_base_add_target(db, sub, ds)),
         ("DKB Recon — adds new file", lambda db, sub, ds: _dkb_test_recon_add(db, sub, ds)),
         ("DKB Recon — removes deleted file", lambda db, sub, ds: _dkb_test_recon_remove(db, sub, ds)),
         ("DKB Recon — skips disabled DS", lambda db, sub, ds: _dkb_test_recon_skip_disabled(db, sub, ds)),
@@ -2216,10 +2216,10 @@ def _run_dkb_unit_tests():
     ]
 
     results = []
-    db = _dkb_db()
-    queue = _dkb_queue()
+    db = _sink_db()
+    queue = _sink_queue()
     try:
-        run_migrations(DKB_DATABASE_URL)
+        run_migrations(SINK_DATABASE_URL)
         for key in (P_QUEUE_KEY, S_QUEUE_KEY):
             while queue.client.llen(key):
                 queue.client.rpop(key)
@@ -2233,20 +2233,20 @@ def _run_dkb_unit_tests():
                               (_dkb_test_compute_hash(), "OK")
                 else:
                     # Create fresh fixtures per test
-                    os.makedirs(DKB_TEST_OUTPUT, exist_ok=True)
-                    sub_id, ds = _dkb_create_fixtures(db)
+                    os.makedirs(SINK_TEST_OUTPUT, exist_ok=True)
+                    sub_id, ds = _sink_create_fixtures(db)
                     try:
                         ok, msg = fn(db, sub_id, ds)
                     finally:
                         _delete_sub(sub_id)
-                        _dkb_api_delete(f"/api/dkb_datastores/{ds.id}")
+                        _sink_api_delete(f"/api/targets/{ds.id}")
                         with db.get_session() as s:
-                            s.query(DKBService).filter(
-                                DKBService.name == "TestService").delete()
+                            s.query(Sink).filter(
+                                Sink.name == "TestSinkService").delete()
                             s.query(PluginRegistryState).filter(
                                 PluginRegistryState.plugin_id == "test_plugin").delete()
-                    if os.path.isdir(DKB_TEST_OUTPUT):
-                        shutil.rmtree(DKB_TEST_OUTPUT)
+                    if os.path.isdir(SINK_TEST_OUTPUT):
+                        shutil.rmtree(SINK_TEST_OUTPUT)
                     output_plugin_dir = "/output/test_plugin"
                     if os.path.isdir(output_plugin_dir):
                         shutil.rmtree(output_plugin_dir)
@@ -2304,77 +2304,74 @@ def _cleanup_test_plugins() -> None:
     except Exception as exc:  # noqa: BLE001
         _log(f"warning: plugin deregistration sweep failed: {exc}")
 
-    # Deregister test DKB services via API (mirrors the plugin path).
-    # testDKB has zero datastores after the e2e tests, so the delete is
-    # allowed and removes the file + the dkb_service row.
+    # Deregister test Sink services via API (mirrors the plugin path).
+    # testSink has zero datastores after the e2e tests, so the delete is
+    # allowed and removes the file + the sink row.
     try:
-        svcs = api_get("/api/dkb_services")
+        svcs = api_get("/api/sinks")
         for svc in svcs:
-            if svc.get("name") == "testDKB":
+            if svc.get("name") == "test":
                 try:
                     requests.delete(
-                        f"{MANAGER_URL}/api/dkb_services/{svc['service_id']}",
+                        f"{MANAGER_URL}/api/sinks/{svc['service_id']}",
                         headers=_api_headers(), timeout=10,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    _log(f"warning: failed to deregister DKB service testDKB: {exc}")
+                    _log(f"warning: failed to deregister Sink service testSink: {exc}")
     except Exception as exc:  # noqa: BLE001
-        _log(f"warning: DKB service deregistration sweep failed: {exc}")
+        _log(f"warning: Sink service deregistration sweep failed: {exc}")
 
     # Fallback: remove the test DKB file directly if it is still present
-    dkb_path = "/src/dkbservices/testDKB_DKB.py"
+    sink_path = "/src/sinks/testSink.py"
     try:
-        if os.path.isfile(dkb_path):
-            os.remove(dkb_path)
-            _log(f"Removed leftover {dkb_path}")
-    except Exception as exc:  # noqa: BLE001
-        _log(f"warning: failed to remove {dkb_path}: {exc}")
-
+        if os.path.isfile(sink_path):
+            os.remove(sink_path)
+    except Exception:
+        pass
 
 def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
     """Scan DB + filesystem for leftover test artifacts. Any found = FAIL + clean.
     Runs once at the very end of main(), after _cleanup_test_plugins().
     """
     leaked: list[str] = []
-    db2 = _dkb_db()
+    db2 = _sink_db()
     try:
         with db2.get_session() as s:
-            # 1. DKB tables (existing checks)
-            svc_names = ("TestService", "MyService", "Svc", "testDKB")
-            ds_names = ("TestDS", "MyDS", "MyDS-Updated", "DS")
-            leaked_svcs = s.query(DKBService).filter(
-                DKBService.name.in_(svc_names)).all()
+            svc_names = ("TestSinkService", "MyService", "Svc", "test")
+            t_names = ("TestTarget", "MyDS", "MyDS-Updated", "DS")
+            leaked_svcs = s.query(Sink).filter(
+                Sink.name.in_(svc_names)).all()
             for svc in leaked_svcs:
-                leaked.append(f"DKBService(id={svc.id[:8]}, name={svc.name!r})")
+                leaked.append(f"Sink(id={svc.id[:8]}, name={svc.name!r})")
             svc_ids = [svc.id for svc in leaked_svcs]
-            leaked_dss = s.query(DKBDatastore).filter(
-                DKBDatastore.name.in_(ds_names) |
-                (DKBDatastore.service_id.in_(svc_ids))).all()
-            for ds in leaked_dss:
-                leaked.append(f"DKBDatastore(id={ds.id[:8]}, name={ds.name!r})")
-            ds_ids = [ds.id for ds in leaked_dss]
+            leaked_targs = s.query(Target).filter(
+                Target.name.in_(t_names) |
+                (Target.service_id.in_(svc_ids))).all()
+            for t in leaked_targs:
+                leaked.append(f"Target(id={t.id[:8]}, name={t.name!r})")
+            t_ids = [t.id for t in leaked_targs]
             leaked_files = s.query(AKBDatafile).filter(
-                AKBDatafile.path.like("/tmp/dkb_test_output%") |
+                AKBDatafile.path.like("/tmp/sink_test_output%") |
                 AKBDatafile.path.like("/output/test_plugin/test_sub%")
             ).all()
             for f in leaked_files:
                 leaked.append(f"AKBDatafile(id={f.id[:8]}, path={f.path!r})")
             file_ids = [f.id for f in leaked_files]
-            if ds_ids:
-                s.query(DatastoreDatafile).filter(
-                    DatastoreDatafile.datastore_id.in_(ds_ids)).delete(synchronize_session=False)
-                s.query(DatastoreSubscription).filter(
-                    DatastoreSubscription.datastore_id.in_(ds_ids)).delete(synchronize_session=False)
-                s.query(DKBDatastore).filter(
-                    DKBDatastore.id.in_(ds_ids)).delete(synchronize_session=False)
+            if t_ids:
+                s.query(TargetDatafile).filter(
+                    TargetDatafile.target_id.in_(t_ids)).delete(synchronize_session=False)
+                s.query(TargetSubscription).filter(
+                    TargetSubscription.target_id.in_(t_ids)).delete(synchronize_session=False)
+                s.query(Target).filter(
+                    Target.id.in_(t_ids)).delete(synchronize_session=False)
             if file_ids:
-                s.query(DatastoreDatafile).filter(
-                    DatastoreDatafile.datafile_id.in_(file_ids)).delete(synchronize_session=False)
+                s.query(TargetDatafile).filter(
+                    TargetDatafile.datafile_id.in_(file_ids)).delete(synchronize_session=False)
                 s.query(AKBDatafile).filter(
                     AKBDatafile.id.in_(file_ids)).delete(synchronize_session=False)
             if svc_ids:
-                s.query(DKBService).filter(
-                    DKBService.id.in_(svc_ids)).delete(synchronize_session=False)
+                s.query(Sink).filter(
+                    Sink.id.in_(svc_ids)).delete(synchronize_session=False)
 
             # 2. Subscriptions: test-only rows
             test_subs = s.query(Subscription).filter(
@@ -2420,7 +2417,7 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
         "longRunningFailurePlugin", "longRunningSuccessPlugin",
         "monitorErrorPlugin", "monitorNeverTriggerPlugin",
         "moveToDestErrorPlugin", "noHeartbeatPlugin", "nonZeroExitPlugin",
-        "passwordPlugin", "schemaBreakingPlugin", "testDKBWriterPlugin",
+        "passwordPlugin", "schemaBreakingPlugin", "testSinkWriterPlugin",
         "test_plugin", "zombiePlugin"}
     output_root = "/output"
     if os.path.isdir(output_root):
@@ -2440,14 +2437,14 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
                     leaked.append(f"/src/plugins/{fname}")
                     os.remove(fpath)
 
-    # 7. Filesystem: /src/dkbservices test DKB files (should be gone after cleanup)
-    dkbs_dir = "/src/dkbservices"
-    if os.path.isdir(dkbs_dir):
-        for fname in sorted(os.listdir(dkbs_dir)):
-            if fname == "testDKB_DKB.py":
-                fpath = os.path.join(dkbs_dir, fname)
+    # 7. Filesystem: /src/sinks test Sink files (should be gone after cleanup)
+    sinks_dir = "/src/sinks"
+    if os.path.isdir(sinks_dir):
+        for fname in sorted(os.listdir(sinks_dir)):
+            if fname == "testSink.py":
+                fpath = os.path.join(sinks_dir, fname)
                 if os.path.isfile(fpath):
-                    leaked.append(f"/src/dkbservices/{fname}")
+                    leaked.append(f"/src/sinks/{fname}")
                     os.remove(fpath)
 
     if leaked:
@@ -2464,7 +2461,6 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
 def main() -> int:
     ok, reset_mode = _parse_argv(sys.argv)
     if not ok:
@@ -2473,11 +2469,6 @@ def main() -> int:
     _log(f"Test runner starting; manager={MANAGER_URL} (reset={reset_mode})")
 
     if reset_mode:
-        # Wipe before the health check so the manager isn't hit with
-        # work while we're still validating connectivity. We still
-        # need a reachable manager to clear subs/log, but the plugin
-        # file + /output cleanup happens unconditionally.
-        # Wait briefly for the manager to come up before the wipe.
         deadline = time.time() + 60
         manager_up = False
         while time.time() < deadline:
@@ -2508,31 +2499,29 @@ def main() -> int:
         _log("Manager never became healthy")
         return 2
 
-    # Sync test plugins from src/testing/plugins/ to /src/plugins/
-    # before verifying the registry or cleaning up state.
+    # Sync test plugins
     _sync_test_plugins()
 
-    # Sync test DKB services (e.g. testDKB) from src/testing/dkbservices/
-    # to /src/dkbservices/. The Manager's file watcher hot-swaps them in.
-    _sync_test_dkbs()
+    # Sync test Sink services
+    _sync_test_sinks()
 
-    # Wait for the Manager to hot-swap testDKB in and upsert its row.
-    _log("Waiting for testDKB to appear in /api/dkb_services...")
+    # Wait for the Manager to hot-swap testSink in and upsert its row.
+    _log("Waiting for testSink to appear in /api/sinks...")
     dkb_deadline = time.time() + 60
     test_dkb_ready = False
     while time.time() < dkb_deadline:
         try:
-            svcs = api_get("/api/dkb_services")
-            if any(s.get("name") == "testDKB" for s in svcs):
+            svcs = api_get("/api/sinks")
+            if any(s.get("name") == "test" for s in svcs):
                 test_dkb_ready = True
                 break
         except Exception:
             pass
         time.sleep(2.0)
     if not test_dkb_ready:
-        _log("TIMEOUT waiting for testDKB service to hot-swap in")
+        _log("TIMEOUT waiting for testSink service to hot-swap in")
         return 3
-    _log("testDKB service hot-swapped in OK")
+    _log("testSink service hot-swapped in OK")
 
     # Wait for the file watcher to detect the synced plugins and reload
     # the registry. Without this, the registry may still only contain
@@ -2600,7 +2589,7 @@ def main() -> int:
         "configValidationPlugin", "nonZeroExitPlugin", "zombiePlugin",
         "moveToDestErrorPlugin", "longNamePlugin32CharNameForUITes",
         "eventOftenPlugin",         "deleteAllPlugin",
-        "testDKBWriterPlugin",
+        "testSinkWriterPlugin",
     }
     missing = expected_loaded - loaded
     if missing:
@@ -2638,8 +2627,8 @@ def main() -> int:
         ("Plugin Test 24 — eventOften", test_event_often),
         ("Plugin Test 25 — deleteAll", test_delete_subscription_and_plugin),
         ("Plugin Test 26 — cronRandomize", test_cron_randomize),
-        ("DKB Test 27 — full pipeline", test_dkb_full_pipeline),
-        ("DKB Test 28 — DKB-only recon", test_dkb_only_recon),
+        ("DKB Test 27 — full pipeline", test_sink_full_pipeline),
+        ("DKB Test 28 — Sink-only recon", test_sink_only_recon),
     ]
 
     results: List[Tuple[str, bool, str]] = []
@@ -2663,10 +2652,10 @@ def main() -> int:
         mark = "✅" if ok else "❌"
         _log(f"  {mark} {name}: {msg}")
 
-    # Run DKB unit tests (inline)
-    _log("\n=== Running DKB unit tests ===")
+    # Run Sink unit tests (inline)
+    _log("\n=== Running Sink unit tests ===")
     dkb_passed, dkb_total, dkb_results = _run_dkb_unit_tests()
-    _log(f"DKB unit tests: {dkb_passed}/{dkb_total} passed")
+    _log(f"Sink unit tests: {dkb_passed}/{dkb_total} passed")
     results.extend(dkb_results)
 
     # Cleanup test plugins (files + API deregister) before leak check

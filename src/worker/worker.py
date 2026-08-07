@@ -24,7 +24,7 @@ from utils.constants import (
     DEBOUNCE_PHASE_SECONDS,
     HEARTBEAT_TIMEOUT,
     LOCK_TTL,
-    OPERATION_DKB_ONLY,
+    OPERATION_SINK_ONLY,
     OPERATION_FULL,
     P_QUEUE_KEY,
     S_QUEUE_KEY,
@@ -38,12 +38,12 @@ from utils.constants import (
 )
 from utils.constants import EXIT_SUCCESS
 from utils.database import DatabaseManager, EventLog, Subscription
-from utils.dkb_registry import DKBRegistry
+from utils.sink_registry import SinkRegistry
 from utils.misc_utils import get_logger
 from utils.queue_utils import QueueManager, wait_for_redis
 from utils.registry import PluginRegistry
 from worker.execution_engine import execute_subscription, ExecutionResult, _send_smtp_for_worker
-from worker.dkb_recon import reconcile_subscription_datastores
+from worker.sink_recon import reconcile_subscription_targets
 
 
 LOG_FILE = "/logs/worker.log"
@@ -70,15 +70,15 @@ def _main() -> None:
     registry.reload_all()
     log.info("registry_loaded", action="startup", result="ok", plugins=len(registry.list_records()))
 
-    dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component="dkb_registry", log_file=LOG_FILE)
-    dkb_registry.reload_all()
-    log.info("dkb_registry_loaded", action="startup", result="ok", services=len(dkb_registry.list_records()))
+    sink_registry = SinkRegistry(sinks_dir="/src/sinks", component="sink_registry", log_file=LOG_FILE)
+    sink_registry.reload_all()
+    log.info("sink_registry_loaded", action="startup", result="ok", services=len(sink_registry.list_records()))
 
     processes: List[mp.Process] = []
     for i in range(WORKER_COUNT):
         p = mp.Process(
             target=_worker_loop,
-            args=(i, db, registry, dkb_registry, DATABASE_URL, REDIS_URL),
+            args=(i, db, registry, sink_registry, DATABASE_URL, REDIS_URL),
             daemon=False,
         )
         p.start()
@@ -92,7 +92,7 @@ def _main() -> None:
                 log.warning("worker_died", action="respawn", result=f"idx={i}")
                 p = mp.Process(
                     target=_worker_loop,
-                    args=(i, db, registry, dkb_registry, DATABASE_URL, REDIS_URL),
+                    args=(i, db, registry, sink_registry, DATABASE_URL, REDIS_URL),
                     daemon=False,
                 )
                 p.start()
@@ -116,7 +116,7 @@ def _wait_for_db(log) -> DatabaseManager:
 
 
 def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
-                 registry: PluginRegistry, dkb_registry: DKBRegistry,
+                 registry: PluginRegistry, sink_registry: SinkRegistry,
                  db_url: str, redis_url: str) -> None:
     log = get_logger(f"worker-{worker_idx}", LOG_FILE)
     log.info("worker_started", action="startup", result=f"idx={worker_idx}")
@@ -126,8 +126,8 @@ def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
     db = DatabaseManager(db_url, log_file=LOG_FILE, component=f"db-{worker_idx}")
     registry = PluginRegistry(plugins_dir="/src/plugins", component=f"plugin_loader-{worker_idx}", log_file=LOG_FILE)
     registry.reload_all()
-    dkb_registry = DKBRegistry(dkbs_dir="/src/dkbservices", component=f"dkb_registry-{worker_idx}", log_file=LOG_FILE)
-    dkb_registry.reload_all()
+    sink_registry = SinkRegistry(sinks_dir="/src/sinks", component=f"sink_registry-{worker_idx}", log_file=LOG_FILE)
+    sink_registry.reload_all()
 
     iteration = 0
     while True:
@@ -142,7 +142,7 @@ def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
 
             # Resolve operation: if popped item or any queued item is FULL → FULL
             has_full = popped_op == OPERATION_FULL or queue.any_full_for(sub_id)
-            op = OPERATION_FULL if has_full else OPERATION_DKB_ONLY
+            op = OPERATION_FULL if has_full else OPERATION_SINK_ONLY
             queue.drain_all(sub_id)
 
             if not queue.acquire_lock(sub_id, blocking=True):
@@ -152,7 +152,7 @@ def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
 
             log.debug("execution_claimed", sub_id=sub_id, action="claim", result=f"op={op}")
             try:
-                _process_sub_inner(worker_idx, sub_id, op, queue, db, registry, dkb_registry, log)
+                _process_sub_inner(worker_idx, sub_id, op, queue, db, registry, sink_registry, log)
             finally:
                 queue.release_lock(sub_id)
                 log.debug("lock_released", sub_id=sub_id, action="lock", result="released")
@@ -166,11 +166,11 @@ def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
 
 def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
                        queue: QueueManager, db: DatabaseManager,
-                       registry: PluginRegistry, dkb_registry: DKBRegistry, log) -> None:
+                       registry: PluginRegistry, sink_registry: SinkRegistry, log) -> None:
     """Inner loop for a single subscription_id.
 
     * ``operation=FULL`` — run upstream, debounce, re-eval, recon, re-eval.
-    * ``operation=DKB_ONLY`` — run downstream recon only (no upstream).
+    * ``operation=SINK_ONLY`` — run downstream recon only (no upstream).
     """
     while True:
         queue.drain_all(sub_id)
@@ -180,10 +180,10 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
             log.debug("subscription_missing", sub_id=sub_id, action="cleanup", result="skipped")
             return
 
-        # --- DKB_ONLY: downstream recon only ---
-        if operation == OPERATION_DKB_ONLY:
+        # --- SINK_ONLY: downstream recon only ---
+        if operation == OPERATION_SINK_ONLY:
             if sub.status not in (STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS):
-                log.debug("dkb_only_skipped", sub_id=sub_id, name=sub.name,
+                log.debug("sink_only_skipped", sub_id=sub_id, name=sub.name,
                           action="skip", result=f"status={sub.status}")
                 return
             db.try_enqueue(sub_id)
@@ -194,7 +194,7 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
             if sub is None:
                 return
             try:
-                reconcile_subscription_datastores(sub, db, dkb_registry, queue, log)
+                reconcile_subscription_targets(sub, db, sink_registry, queue, log)
             finally:
                 cur = db.get_subscription(sub_id)
                 if cur and cur.status in (STATE_IN_PROGRESS, STATE_ENQUEUED):
@@ -205,7 +205,7 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
 
         if sub.status == STATE_DELETED:
             log.info("subscription_cleanup_starting", sub_id=sub_id, name=sub.name)
-            _cleanup_subscription(sub, dkb_registry, db, log)
+            _cleanup_subscription(sub, sink_registry, db, log)
             return
 
         if sub.status in (STATE_DISABLED, STATE_ERROR):
@@ -237,7 +237,7 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
         result = execute_subscription(sub, rec, db, log)
 
         if result.outcome == "deleted":
-            _cleanup_subscription(sub, dkb_registry, db, log)
+            _cleanup_subscription(sub, sink_registry, db, log)
             return
         if result.outcome == "skipped_disabled":
             return
@@ -286,10 +286,10 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
             operation = OPERATION_FULL  # any queue item → full
             continue
 
-        # 9. DKB recon (downstream sync)
+        # 9. Sink recon (downstream sync)
         sub = db.get_subscription(sub_id)
         if sub and sub.status in (STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS):
-            reconcile_subscription_datastores(sub, db, dkb_registry, queue, log)
+            reconcile_subscription_targets(sub, db, sink_registry, queue, log)
 
         # 10. Re-eval #2: check if a FULL item appeared during recon
         if queue.any_full_for(sub_id):
@@ -306,11 +306,11 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
         return
 
 
-def _cleanup_subscription(sub: Subscription, dkb_registry: DKBRegistry, parent_db: DatabaseManager,
+def _cleanup_subscription(sub: Subscription, sink_registry: SinkRegistry, parent_db: DatabaseManager,
                           log) -> None:
-    """Remove output dir, DKB remote files + rows, then the subscription DB row.
+    """Remove output dir, Sink remote files + rows, then the subscription DB row.
 
-    Uses Q5 ordering: output dir removal → DKB cleanup → subscription row deletion.
+    Uses Q5 ordering: output dir removal → Sink cleanup → subscription row deletion.
     """
     out_dir = f"/output/{sub.plugin_id}/{sub.name}"
     if os.path.isdir(out_dir):
@@ -320,8 +320,8 @@ def _cleanup_subscription(sub: Subscription, dkb_registry: DKBRegistry, parent_d
         except Exception as exc:
             log.error("output_directory_remove_failed", sub_id=sub.id, action="cleanup", result=str(exc))
 
-    # DKB cleanup: remove remote files + rows for every datastore_subscription
-    _cleanup_subscription_datastores(sub, dkb_registry, parent_db, log)
+    # Sink cleanup: remove remote files + rows for every target_subscription
+    _cleanup_subscription_targets(sub, sink_registry, parent_db, log)
 
     # Delete the subscription DB row (retry loop from original code)
     max_attempts = 3
@@ -357,33 +357,33 @@ def _cleanup_subscription(sub: Subscription, dkb_registry: DKBRegistry, parent_d
         pass
 
 
-def _cleanup_subscription_datastores(sub: Subscription, dkb_registry: DKBRegistry,
+def _cleanup_subscription_targets(sub: Subscription, sink_registry: SinkRegistry,
                                       db: DatabaseManager, log) -> None:
-    """Remove all DKB artifacts for a deleted subscription."""
-    from worker.dkb_recon import _get_service, _remove_orphan_datastore
+    """Remove all Sink artifacts for a deleted subscription."""
+    from worker.sink_recon import _get_service, _remove_orphan_target
 
-    ds_links = db.list_datastores_for_subscription(sub.id)
-    datastores_seen = set()
-    for ds_link in ds_links:
-        datastore_id = ds_link.datastore_id
-        datastores_seen.add(datastore_id)
-        ds_df_rows = db.list_datafiles_for_datastore(datastore_id)
-        for ds_df in ds_df_rows:
+    t_links = db.list_targets_for_subscription(sub.id)
+    targets_seen = set()
+    for t_link in t_links:
+        target_id = t_link.target_id
+        targets_seen.add(target_id)
+        t_df_rows = db.list_datafiles_for_target(target_id)
+        for t_df in t_df_rows:
             try:
-                ds_row = db.get_datastore(datastore_id)
-                if ds_row:
-                    svc = _get_service(ds_row, db, dkb_registry, log)
+                t_row = db.get_target(target_id)
+                if t_row:
+                    svc = _get_service(t_row, db, sink_registry, log)
                     if svc:
-                        svc.base_remove_datafile(ds_df.datafile_id)
+                        svc.base_remove_datafile(t_df.datafile_id)
             except Exception as exc:
-                log.warning("dkb_cleanup_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
-        db.delete_datastore_subscription(datastore_id, sub.id)
+                log.warning("sink_cleanup_remove_failed", datafile_id=t_df.datafile_id, error=str(exc))
+        db.delete_target_subscription(target_id, sub.id)
 
-    # For each datastore now orphaned, call remove_datastore + delete row
-    for did in datastores_seen:
-        remaining = db.count_datastore_subscriptions_for_datastore(did)
+    # For each target now orphaned, call remove_target + delete row
+    for did in targets_seen:
+        remaining = db.count_target_subscriptions_for_target(did)
         if remaining == 0:
-            _remove_orphan_datastore(did, db, dkb_registry, log)
+            _remove_orphan_target(did, db, sink_registry, log)
 
     # Delete orphan akb_datafile rows for this subscription
     for df in db.list_datafiles_for_subscription(sub.id):

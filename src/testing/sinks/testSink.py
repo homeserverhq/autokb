@@ -1,16 +1,16 @@
-"""Test DKB service for end-to-end testing.
+"""Test Sink service for end-to-end testing.
 
 Records every abstract method call to a JSON-lines file at
-/output/.dkb_e2e_calls.json so the test harness can read it after recon.
+/output/.sink_e2e_calls.json so the test harness can read it after recon.
 """
 
 import json
 import os
 
-from utils.dkb_service_base import BaseDKBService
+from utils.sink_base import BaseSink
 
 
-_CALLS_FILE = "/output/.dkb_e2e_calls.json"
+_CALLS_FILE = "/output/.sink_e2e_calls.json"
 
 
 def _record(method: str, *args):
@@ -19,10 +19,10 @@ def _record(method: str, *args):
         f.write(json.dumps([method] + list(args), separators=(",", ":")) + "\n")
 
 
-class TestDKBDKB(BaseDKBService):
+class TestSink(BaseSink):
     metadata = {
-        "name": "testDKB",
-        "description": "End-to-end test DKB service",
+        "name": "test",
+        "description": "End-to-end test Sink service",
         "icon": "default_icon.png",
     }
 
@@ -42,16 +42,16 @@ class TestDKBDKB(BaseDKBService):
     def remove_datafile(self, remote_datafile_id: str) -> None:
         _record("remove_datafile", remote_datafile_id)
 
-    def add_datastore(self) -> str:
-        rid = "test-remote-ds-id"
-        _record("add_datastore", rid)
+    def add_target(self) -> str:
+        rid = "test-remote-target-id"
+        _record("add_target", rid)
         return rid
 
-    def remove_datastore(self) -> None:
-        _record("remove_datastore")
+    def remove_target(self) -> None:
+        _record("remove_target")
 
-    def clear_datastore(self) -> None:
-        _record("clear_datastore")
+    def clear_target(self) -> None:
+        _record("clear_target")
 
 
-__all__ = ["TestDKBDKB"]
+__all__ = ["TestSink"]

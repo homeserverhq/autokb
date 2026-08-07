@@ -13,8 +13,8 @@ from .constants import (
     ALL_OPERATIONS,
     LOCK_KEY_PREFIX,
     LOCK_TTL,
-    OPERATION_DKB_ONLY,
     OPERATION_FULL,
+    OPERATION_SINK_ONLY,
     P_QUEUE_KEY,
     S_QUEUE_KEY,
     STARTUP_RETRY_SLEEP,
@@ -79,7 +79,7 @@ def _decode_item(raw: str) -> Optional[Dict[str, str]]:
 class QueueManager:
     """Wrapper around Redis for the two-tier queue and safety locks.
 
-    Queue items are JSON ``{"sub_id": ..., "operation": "FULL"|"DKB_ONLY"}``.
+    Queue items are JSON ``{"sub_id": ..., "operation": "FULL"|"SINK_ONLY"}``.
     """
 
     def __init__(self, url: str):

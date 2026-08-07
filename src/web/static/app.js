@@ -1806,7 +1806,7 @@
     codeInput.value = 'Loading…';
     iconInput.value = '';
     banner.style.display = 'block';
-    banner.innerHTML = `<strong>Editing existing Destination: ${escapeHtml(serviceName)}</strong> &mdash; the service name is locked; update the code and metadata below.`;
+    banner.innerHTML = `<strong>Editing existing sink: ${escapeHtml(serviceName)}</strong> &mdash; the service name is locked; update the code and metadata below.`;
     try {
       const r = await api(`/sink_dev_lab/load/${encodeURIComponent(serviceName)}`);
       if (r.ok && r.code != null) {

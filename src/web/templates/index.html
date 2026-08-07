@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoKB</title>
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=54" />
+  <link rel="stylesheet" href="/static/styles.css?v=56" />
 </head>
 <body>
   <!-- Login page -->
@@ -57,29 +57,29 @@
                 Target and the Destination syncs that Source's output to the remote system automatically.
               </p>
 
-              <h3>How to use an existing Source</h3>
+              <h3>How to use an existing Source plugin</h3>
               <ol>
-                <li>Open <strong>Data Sources</strong> in the sidebar. Each tile is a registered Source connector.</li>
-                <li>Click a Source tile to see its subscriptions, then click <strong>+ Create New Subscription</strong>.</li>
+                <li>Open <strong>Data Sources</strong> in the sidebar. Each tile is a registered Source plugin.</li>
+                <li>Click a Source plugin tile to see its subscriptions, then click <strong>+ Create New Subscription</strong>.</li>
                 <li>Fill in the required fields (like connection details or URLs) and save.</li>
               </ol>
 
-              <h3>How to create your own Source</h3>
+              <h3>How to create your own Source plugin</h3>
               <ol>
                 <li>Open <strong>Developer Lab</strong> in the sidebar and pick <strong>Source Developer</strong>.</li>
                 <li>Below the code editor you'll find the <strong>Plugin Development Guide</strong> —
-                    a complete walkthrough for building a Source connector (plugin). You can copy it and use it as a
+                    a complete walkthrough for building a Source plugin. You can copy it and use it as a
                     skill prompt for an AI coding assistant.</li>
                 <li>Write or paste your plugin code in the editor, give it a name, and optionally
                     upload a <code>.png</code> icon (max 512&times;512).</li>
                 <li>Click <strong>Test</strong> to check for errors, then <strong>Save</strong> to
-                    deploy. Your Source appears in Data Sources within seconds.</li>
+                    deploy. Your Source plugin appears in Data Sources within seconds.</li>
               </ol>
 
-              <h3>How to use an existing Destination</h3>
+              <h3>How to use an existing Destination sink</h3>
               <ol>
-                <li>Open <strong>Data Destinations</strong> in the sidebar. Each tile is a registered Destination connector.</li>
-                <li>Click a Destination tile to see its Data Targets, then click <strong>+ Create New Data Target</strong>.</li>
+                <li>Open <strong>Data Destinations</strong> in the sidebar. Each tile is a registered Destination sink.</li>
+                <li>Click a Destination sink tile to see its Data Targets, then click <strong>+ Create New Data Target</strong>.</li>
                 <li>Fill in the required fields (Name, API URL, API Key) and optionally Extra Params (JSON).</li>
                 <li>Use the <strong>Linked Subscriptions</strong> transfer list to pick which subscriptions' output
                     should sync to this target.</li>
@@ -87,14 +87,14 @@
                     <strong>Edit</strong> to change settings, or <strong>Disable</strong>/<strong>Delete</strong> to stop it.</li>
               </ol>
 
-              <h3>How to create your own Destination</h3>
+              <h3>How to create your own Destination sink</h3>
               <ol>
                 <li>Open <strong>Developer Lab</strong> in the sidebar and pick <strong>Destination Developer</strong>.</li>
-                <li>Paste a Destination connector class that subclasses <code>BaseSink</code> — see the existing
+                <li>Paste a Destination sink class that subclasses <code>BaseSink</code> — see the existing
                     services in <strong>Data Destinations</strong> for reference.</li>
                 <li>Give it a name and optionally upload a <code>.png</code> icon (max 512&times;512).</li>
                 <li>Click <strong>Test</strong> to check for errors, then <strong>Save</strong> to deploy.
-                    Your Destination appears in Data Destinations within seconds.</li>
+                    Your Destination sink appears in Data Destinations within seconds.</li>
               </ol>
             </article>
             <aside id="dashboard-stats" class="dashboard-stats">
@@ -354,6 +354,6 @@
   </div>
 
   <script src="/static/marked.min.js"></script>
-  <script src="/static/app.js?v=54"></script>
+  <script src="/static/app.js?v=56"></script>
 </body>
 </html>

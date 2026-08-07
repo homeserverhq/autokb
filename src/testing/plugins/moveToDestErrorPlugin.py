@@ -6,7 +6,7 @@ from utils.plugin_base import BaseSubscription
 class moveToDestErrorPlugin(BaseSubscription):
     metadata = {
         "name": "moveToDestErrorPlugin",
-            "display_name": "moveToDestErrorPlugin",
+        "display_name": "moveToDestErrorPlugin",
         "icon": "default_icon.png",
         "description": "Invalid output path plugin (Test 20)",
         "sub_type": "SCHEDULED",

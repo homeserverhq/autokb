@@ -1538,7 +1538,7 @@ def test_sink_full_pipeline() -> Tuple[bool, str]:
         svcs = api_get("/api/sinks")
         svc_id = None
         for s in svcs:
-            if s.get("name") == "test":
+            if s.get("name") == "testSink":
                 svc_id = s["service_id"]
                 break
         if not svc_id:
@@ -1622,7 +1622,7 @@ def test_sink_only_recon() -> Tuple[bool, str]:
         svcs = api_get("/api/sinks")
         svc_id = None
         for s in svcs:
-            if s.get("name") == "test":
+            if s.get("name") == "testSink":
                 svc_id = s["service_id"]
                 break
         ds = api_post(f"/api/sinks/{svc_id}/targets", {
@@ -1984,10 +1984,10 @@ def _dkb_test_registry_load():
     reg.reload_all()
     records = reg.list_records()
     names = [r.service_name for r in records]
-    if "openWebUI" not in names:
-        return False, "openWebUI not in registry"
-    if "cognee" not in names:
-        return False, "cognee not in registry"
+    if "openWebUISink" not in names:
+        return False, "openWebUISink not in registry"
+    if "cogneeSink" not in names:
+        return False, "cogneeSink not in registry"
     return True, "OK"
 
 
@@ -2311,7 +2311,7 @@ def _cleanup_test_plugins() -> None:
     try:
         svcs = api_get("/api/sinks")
         for svc in svcs:
-            if svc.get("name") == "test":
+            if svc.get("name") == "testSink":
                 try:
                     requests.delete(
                         f"{MANAGER_URL}/api/sinks/{svc['service_id']}",
@@ -2338,7 +2338,7 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
     db2 = _sink_db()
     try:
         with db2.get_session() as s:
-            svc_names = ("TestSinkService", "MyService", "Svc", "test")
+            svc_names = ("TestSinkService", "MyService", "Svc", "testSink")
             t_names = ("TestTarget", "MyDS", "MyDS-Updated", "DS")
             leaked_svcs = s.query(Sink).filter(
                 Sink.name.in_(svc_names)).all()
@@ -2513,7 +2513,7 @@ def main() -> int:
     while time.time() < dkb_deadline:
         try:
             svcs = api_get("/api/sinks")
-            if any(s.get("name") == "test" for s in svcs):
+            if any(s.get("name") == "testSink" for s in svcs):
                 test_dkb_ready = True
                 break
         except Exception:

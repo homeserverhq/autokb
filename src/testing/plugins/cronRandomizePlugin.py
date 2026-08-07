@@ -8,7 +8,7 @@ from utils.plugin_base import BaseSubscription
 class cronRandomizePlugin(BaseSubscription):
     metadata = {
         "name": "cronRandomizePlugin",
-            "display_name": "cronRandomizePlugin",
+        "display_name": "cronRandomizePlugin",
         "icon": "default_icon.png",
         "description": "Cron randomization test (Test 26)",
         "sub_type": "SCHEDULED",

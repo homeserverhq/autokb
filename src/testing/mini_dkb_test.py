@@ -82,11 +82,11 @@ log("=== DKB/Sink mini test runner ===")
 _sync_sinks()
 
 # Wait for test sink to appear
-log("Waiting for 'test' sink in /api/sinks...")
+log("Waiting for 'testSink' in /api/sinks...")
 for _ in range(15):
     svcs = api_get("/api/sinks")
-    if any(s.get("name") == "test" for s in svcs):
-        log("test sink loaded OK")
+    if any(s.get("name") == "testSink" for s in svcs):
+        log("testSink sink loaded OK")
         break
     time.sleep(2)
 else:
@@ -108,7 +108,7 @@ try:
     log(f"  created sub {sub_id}")
 
     svcs = api_get("/api/sinks")
-    svc_id = next(s["service_id"] for s in svcs if s.get("name") == "test")
+    svc_id = next(s["service_id"] for s in svcs if s.get("name") == "testSink")
 
     t = api_post(f"/api/sinks/{svc_id}/targets", {
         "name": t_name, "api_url": "http://fake/api", "api_key": "test",
@@ -169,7 +169,7 @@ try:
     log(f"  created sub {sub_id}")
 
     svcs = api_get("/api/sinks")
-    svc_id = next(s["service_id"] for s in svcs if s.get("name") == "test")
+    svc_id = next(s["service_id"] for s in svcs if s.get("name") == "testSink")
 
     t = api_post(f"/api/sinks/{svc_id}/targets", {
         "name": t_name, "api_url": "http://fake/api", "api_key": "test",
@@ -231,9 +231,9 @@ from utils.sink_registry import SinkRegistry
 log("\n--- TEST 4: Unit — Registry ---")
 reg = SinkRegistry(sinks_dir="/src/sinks", component="mini_reg")
 reg.reload_all()
-rec = reg.get("test")
-assert rec is not None, "test sink not loaded"
-assert rec.service_name == "test", f"wrong name: {rec.service_name}"
+rec = reg.get("testSink")
+assert rec is not None, "testSink sink not loaded"
+assert rec.service_name == "testSink", f"wrong name: {rec.service_name}"
 log("  PASS: registry load")
 
 log("\n--- TEST 5: Unit — BaseSink instantiation ---")

@@ -9,7 +9,7 @@ from utils.plugin_base import BaseSubscription
 class deleteAllPlugin(BaseSubscription):
     metadata = {
         "name": "deleteAllPlugin",
-            "display_name": "deleteAllPlugin",
+        "display_name": "deleteAllPlugin",
         "icon": "default_icon.png",
         "description": "Delete-all test plugin (Test 25)",
         "sub_type": "SCHEDULED",

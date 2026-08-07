@@ -10,7 +10,7 @@ from utils.constants import HEARTBEAT_TIMEOUT
 class longRunningSuccessPlugin(BaseSubscription):
     metadata = {
         "name": "longRunningSuccessPlugin",
-            "display_name": "longRunningSuccessPlugin",
+        "display_name": "longRunningSuccessPlugin",
         "icon": "default_icon.png",
         "description": "Long running success plugin (Test 4)",
         "sub_type": "SCHEDULED",

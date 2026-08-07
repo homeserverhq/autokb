@@ -21,8 +21,8 @@ def _record(method: str, *args):
 
 class TestSink(BaseSink):
     metadata = {
-        "name": "test",
-            "display_name": "test",
+        "name": "testSink",
+        "display_name": "testSink",
         "description": "End-to-end test Sink service",
         "icon": "default_icon.png",
     }

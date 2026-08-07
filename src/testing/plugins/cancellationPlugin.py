@@ -18,7 +18,7 @@ from utils.constants import HEARTBEAT_TIMEOUT
 class cancellationPlugin(BaseSubscription):
     metadata = {
         "name": "cancellationPlugin",
-            "display_name": "cancellationPlugin",
+        "display_name": "cancellationPlugin",
         "icon": "cancellationPlugin.png",
         "description": "Graceful cancellation plugin (Test 7)",
         "sub_type": "SCHEDULED",

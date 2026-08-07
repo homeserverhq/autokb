@@ -1299,7 +1299,11 @@ def _set_metadata_display_name_in_source(code: str, display_name: str,
         return code
     line_no, col = name_end
     lines = code.splitlines(keepends=True)
-    lines[line_no] = lines[line_no][:col] + f', "display_name": {new_value_repr}' + lines[line_no][col:]
+    name_line = lines[line_no]
+    indent = name_line[: len(name_line) - len(name_line.lstrip())]
+    lines[line_no] = (
+        lines[line_no][:col] + ",\n" + indent + f'"display_name": {new_value_repr}' + lines[line_no][col:]
+    )
     return "".join(lines)
 
 
@@ -1407,7 +1411,7 @@ def _validate_sink_code(code: str, service_name: str) -> Dict[str, Any]:
 
     import ast
     try:
-        tree = ast.parse(code, filename=f"{service_name}Sink.py")
+        tree = ast.parse(code, filename=f"{service_name}.py")
     except SyntaxError as exc:
         return {"ok": False, "error": f"Syntax error: {exc}"}
 
@@ -1628,8 +1632,8 @@ def api_sink_dev_lab_save(body: Dict[str, Any] = Body(...)):
     if icon_b64:
         code = _set_metadata_icon_in_source(code, f"{sanitized}.png", base_class_marker="BaseSink")
     code = _set_metadata_display_name_in_source(code, display_name, "BaseSink")
-    target_path = f"/src/sinks/{sanitized}Sink.py"
-    tmp_path = f"/tmp/.{sanitized}Sink.py.tmp"
+    target_path = f"/src/sinks/{sanitized}.py"
+    tmp_path = f"/tmp/.{sanitized}.py.tmp"
     with open(tmp_path, "w") as f:
         f.write(code)
     # Final import sanity check.

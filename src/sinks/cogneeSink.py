@@ -6,8 +6,8 @@ from utils.sink_base import BaseSink
 
 class CogneeSink(BaseSink):
     metadata = {
-        "name": "cognee",
-            "display_name": "cognee",
+        "name": "cogneeSink",
+        "display_name": "Cognee Dataset",
         "description": (
             "Synchronizes AutoKB output files into a Cognee Memory Dataset "
             "so they can be processed into cognee's graph memory. Each Data "

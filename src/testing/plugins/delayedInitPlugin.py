@@ -9,7 +9,7 @@ from utils.constants import HEARTBEAT_TIMEOUT
 class delayedInitPlugin(BaseSubscription):
     metadata = {
         "name": "delayedInitPlugin",
-            "display_name": "delayedInitPlugin",
+        "display_name": "delayedInitPlugin",
         "icon": "default_icon.png",
         "description": "Delayed init plugin (Test 12)",
         "sub_type": "SCHEDULED",

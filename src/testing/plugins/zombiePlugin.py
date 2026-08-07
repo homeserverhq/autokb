@@ -19,7 +19,7 @@ from utils.constants import HEARTBEAT_TIMEOUT
 class zombiePlugin(BaseSubscription):
     metadata = {
         "name": "zombiePlugin",
-            "display_name": "zombiePlugin",
+        "display_name": "zombiePlugin",
         "icon": "default_icon.png",
         "description": "Zombie — ignores cancellation, force-killed (Test 19)",
         "sub_type": "SCHEDULED",

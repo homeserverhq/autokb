@@ -31,7 +31,7 @@ def _content_hash_prefix(content: str) -> str:
 class crawl4AIWebScraperPlugin(BaseSubscription):
     metadata = {
         "name": "crawl4AIWebScraperPlugin",
-            "display_name": "crawl4AIWebScraperPlugin",
+        "display_name": "Crawl4AI Web Scraper",
         "icon": "crawl4AIWebScraperPlugin.png",
         "description": (
             "Deep-crawls a website via the Crawl4AI API (BFS strategy) and "

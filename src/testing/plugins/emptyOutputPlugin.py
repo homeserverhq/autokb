@@ -6,7 +6,7 @@ from utils.plugin_base import BaseSubscription
 class emptyOutputPlugin(BaseSubscription):
     metadata = {
         "name": "emptyOutputPlugin",
-            "display_name": "emptyOutputPlugin",
+        "display_name": "emptyOutputPlugin",
         "icon": "default_icon.png",
         "description": "Empty output plugin (Test 10)",
         "sub_type": "SCHEDULED",

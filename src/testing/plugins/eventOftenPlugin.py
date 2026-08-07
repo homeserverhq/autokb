@@ -8,7 +8,7 @@ from utils.plugin_base import BaseSubscription
 class eventOftenPlugin(BaseSubscription):
     metadata = {
         "name": "eventOftenPlugin",
-            "display_name": "eventOftenPlugin",
+        "display_name": "eventOftenPlugin",
         "icon": "default_icon.png",
         "description": "EVENT_BASED — fires on enable, then every 42s",
         "sub_type": "EVENT_BASED",

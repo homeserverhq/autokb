@@ -73,7 +73,7 @@ class SinkRegistry:
         # runtime sync cannot reach, so the worker lazy-loads from the
         # testing source present in its own image.
         for d in (self._sinks_dir, "/src/testing/sinks"):
-            path = os.path.join(d, f"{sanitize_name(service_name)}Sink.py")
+            path = os.path.join(d, f"{sanitize_name(service_name)}.py")
             if os.path.isfile(path):
                 try:
                     record = self._load_file(path)
@@ -116,7 +116,7 @@ class SinkRegistry:
         stem = os.path.splitext(os.path.basename(path))[0]
         if not stem.endswith("Sink"):
             raise ValueError(f"File {path} does not end with Sink.py")
-        raw_service_name = stem[:-4]  # strip "Sink"
+        raw_service_name = stem
 
         spec = importlib.util.spec_from_file_location(f"_sink_{stem}", path)
         if spec is None or spec.loader is None:

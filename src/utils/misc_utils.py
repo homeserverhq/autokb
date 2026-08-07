@@ -518,6 +518,12 @@ def uuid7() -> str:
         return str(_u.UUID(int=(ms << 80) | (_u.uuid4().int & ((1 << 80) - 1))))
 
 
+def uuid4() -> str:
+    """Generate a fully random (non-monotonic) UUIDv4 id."""
+    import uuid as _u
+    return str(_u.uuid4())
+
+
 # ---------------------------------------------------------------------------
 # SubscriptionCancelledError
 # ---------------------------------------------------------------------------
@@ -544,5 +550,6 @@ __all__ = [
     "cron_due",
     "send_smtp_notification",
     "uuid7",
+    "uuid4",
     "SubscriptionCancelledError",
 ]

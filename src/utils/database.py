@@ -54,6 +54,7 @@ from .misc_utils import (
     get_logger,
     schema_hash,
     uuid7,
+    uuid4,
 )
 
 
@@ -224,7 +225,7 @@ class DatabaseManager:
         description: Optional[str] = None,
         password_field_names: Optional[List[str]] = None,
     ) -> Subscription:
-        sid = str(uuid7())
+        sid = str(uuid4())
         config = ensure_extra_params(config)
         encrypted = encrypt_password_fields(config, password_field_names or [], self._cipher)
         sub = Subscription(
@@ -647,7 +648,7 @@ class DatabaseManager:
                 if description:
                     existing.description = description
                 return existing
-            svc = Sink(id=str(uuid7()), name=name, description=description)
+            svc = Sink(id=str(uuid4()), name=name, description=description)
             s.add(svc)
             try:
                 s.flush()
@@ -676,7 +677,7 @@ class DatabaseManager:
                       target_extra_params: Dict[str, Any] = None) -> Target:
         encrypted = self._cipher.encrypt(api_key) if api_key else ""
         t = Target(
-            id=str(uuid7()),
+            id=str(uuid4()),
             service_id=service_id, name=name, api_url=api_url,
             api_key=encrypted,
             target_extra_params=target_extra_params or {},
@@ -820,7 +821,7 @@ class DatabaseManager:
                 s.flush()
                 return existing
             df = AKBDatafile(
-                id=str(uuid7()), subscription_id=sub_id, path=path,
+                id=str(uuid4()), subscription_id=sub_id, path=path,
                 size=size, mtime=mtime_dt, hash=datafile_hash,
             )
             s.add(df)

@@ -45,7 +45,7 @@ from utils.database import (
 from utils.sink_base import BaseSink, compute_file_hash
 from utils.sink_registry import SinkRegistry
 from utils.queue_utils import QueueManager, _encode_item, _decode_item, P_QUEUE_KEY, S_QUEUE_KEY
-from utils.misc_utils import uuid7
+from utils.misc_utils import uuid7, uuid4
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1771,7 +1771,7 @@ def _sink_create_fixtures(db):
                 last_loaded=__import__("datetime").datetime.now(
                     __import__("datetime").timezone.utc),
             ))
-        sub_id = str(uuid7())
+        sub_id = str(uuid4())
         s.add(Subscription(
             id=sub_id, plugin_id="test_plugin", name=f"test_sub_{sub_id}",
             config={}, status=STATE_ENABLED, access_level="PRIVATE",

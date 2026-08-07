@@ -694,15 +694,7 @@ async def api_create_subscription(plugin_id: str, body: Dict[str, Any] = Body(..
     rec = _plugin_or_404(plugin_id)
 
     name = body.get("name")
-    if not name or not isinstance(name, str):
-        raise HTTPException(status_code=400, detail="name is required")
-    try:
-        sanitized_name = sanitize_name(name)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid name: {exc}")
-    if sanitized_name != name:
-        # Inform the client — they should use the sanitized form
-        name = sanitized_name
+    name = _validate_subscription_name(name)
 
     # Output directory collision check
     target_dir = os.path.join("/output", rec.plugin_id, name)
@@ -1816,6 +1808,7 @@ def api_target_detail(target_id: str):
 
 
 _TARGET_NAME_MAX_LEN = 255
+_SUBSCRIPTION_NAME_MAX_LEN = 255
 
 
 def _validate_target_name(name: str) -> str:
@@ -1844,6 +1837,44 @@ def _validate_target_name(name: str) -> str:
                 f"Target name {name!r} is invalid. Use only letters, numbers, "
                 "periods, and hyphens — no spaces or symbols, no '..', and no "
                 "leading or trailing period."
+            ),
+        )
+    return name
+
+
+def _validate_subscription_name(name: str) -> str:
+    """Validate a subscription name using the canonical-form check.
+
+    Mirrors ``_validate_target_name`` but periods are not allowed —
+    subscription names accept only letters, numbers, and hyphens.
+    The provided name is never converted or coalesced; invalid names are
+    rejected outright with a clear error.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="Subscription name is required")
+    name = name.strip()
+    if len(name) > _SUBSCRIPTION_NAME_MAX_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Subscription name is too long ({len(name)} chars; max {_SUBSCRIPTION_NAME_MAX_LEN})",
+        )
+    if "." in name:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Subscription name {name!r} is invalid. Use only letters, "
+                "numbers, and hyphens — no periods, spaces, or symbols."
+            ),
+        )
+    try:
+        if sanitize_name(name) != name:
+            raise ValueError(name)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Subscription name {name!r} is invalid. Use only letters, "
+                "numbers, and hyphens — no periods, spaces, or symbols."
             ),
         )
     return name

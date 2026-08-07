@@ -784,10 +784,24 @@
       div.className = 'form-field';
       div.innerHTML = `
         <label>Name <span class="form-field-error">*</span></label>
-        <input type="text" name="sub_name" required pattern="[a-zA-Z0-9.\-]+" title="Allowed: letters, numbers, periods, and hyphens" />
-        <small class="sub-row-meta">Allowed characters: letters, numbers, periods, and hyphens. camelCase recommended.</small>
+        <input type="text" name="sub_name" required maxlength="${SUBSCRIPTION_NAME_MAX_LEN}" />
+        <small class="form-field-error" id="subscription-name-error" style="display:none"></small>
       `;
       fields.appendChild(div);
+      const nameInput = div.querySelector('input[name="sub_name"]');
+      const nameErr = div.querySelector('#subscription-name-error');
+      const updateSubscriptionNameValidation = () => {
+        const err = validateSubscriptionName(nameInput.value);
+        if (err) {
+          nameErr.textContent = err;
+          nameErr.style.display = 'block';
+          nameInput.classList.add('invalid');
+        } else {
+          nameErr.style.display = 'none';
+          nameInput.classList.remove('invalid');
+        }
+      };
+      nameInput.addEventListener('input', updateSubscriptionNameValidation);
     }
     // Cron
     const cronDiv = document.createElement('div');
@@ -996,6 +1010,17 @@
       } catch (e) { alert('Save failed: ' + e.message); }
     } else {
       // Create
+      const nameErr = validateSubscriptionName(name);
+      if (nameErr) {
+        const errEl = $('subscription-name-error');
+        if (errEl) { errEl.textContent = nameErr; errEl.style.display = 'block'; }
+        const nameInput = $('sub-form').querySelector('input[name="sub_name"]');
+        if (nameInput) {
+          nameInput.classList.add('invalid');
+          nameInput.focus();
+        }
+        return;
+      }
       try {
         const body = { name, config, cron, access_level };
         await api(`/subscriptions/${formPluginId}`, { method: 'POST', body: JSON.stringify(body) });
@@ -1479,6 +1504,21 @@
     }
     if (name.startsWith('.') || name.endsWith('.')) {
       return 'Target name must not start or end with a period.';
+    }
+    return null;
+  }
+
+  const SUBSCRIPTION_NAME_MAX_LEN = 255;
+  const SUBSCRIPTION_NAME_RE = /^[a-zA-Z0-9\-]+$/;
+
+  function validateSubscriptionName(name) {
+    name = (name || '').trim();
+    if (!name) return 'Subscription name is required.';
+    if (name.length > SUBSCRIPTION_NAME_MAX_LEN) {
+      return `Subscription name is too long (${name.length} chars; max ${SUBSCRIPTION_NAME_MAX_LEN}).`;
+    }
+    if (!SUBSCRIPTION_NAME_RE.test(name)) {
+      return 'Use only letters, numbers, and hyphens — no periods, spaces, or symbols.';
     }
     return null;
   }

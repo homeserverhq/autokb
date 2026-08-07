@@ -59,9 +59,23 @@ BACKEND_KEY = os.environ.get("AUTOKB_BACKEND_API_KEY", "sZdx8RLMFOBBnVyINfjvlQXr
 # Unique suffix so re-runs of test_runner don't get 409s on duplicate names
 RUN_ID = os.environ.get("AUTOKB_RUN_ID") or time.strftime("%H%M%S") + "-" + str(os.getpid())
 
+# Stable marker so test-created subscriptions are identifiable across runs
+# and can be cleaned up WITHOUT touching user-created (real) subscriptions.
+TEST_SUB_PREFIX = "akbtest-"
+
+
+def _is_test_sub(sub: Dict[str, Any]) -> bool:
+    """True if a subscription was created by the test runner (safe to delete)."""
+    name = sub.get("name", "")
+    return (
+        name.startswith(TEST_SUB_PREFIX)
+        or name.startswith("e2e-")
+        or sub.get("plugin_id") == "test_plugin"
+    )
+
 
 def _unique(base: str) -> str:
-    return f"{base}-{RUN_ID}"
+    return f"{TEST_SUB_PREFIX}{base}-{RUN_ID}"
 
 # Plugins for which we want to wait for the work to finish before
 # checking the result.
@@ -2377,7 +2391,7 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
             # 2. Subscriptions: test-only rows
             test_subs = s.query(Subscription).filter(
                 (Subscription.plugin_id == "test_plugin") |
-                (Subscription.name.like(f"%-{RUN_ID}")) |
+                (Subscription.name.like(f"{TEST_SUB_PREFIX}%")) |
                 (Subscription.name.like("e2e-%"))
             ).all()
             for sub in test_subs:
@@ -2557,12 +2571,15 @@ def main() -> int:
         _log(f"TIMEOUT waiting for plugins: still missing {sorted(missing)}")
         return 3
 
-    # Clean up any leftover state from previous runs
-    _log("Cleaning up state from previous runs...")
+    # Clean up test-created subscriptions from previous runs. Only subs
+    # created by the test runner (marked with TEST_SUB_PREFIX / e2e- /
+    # test_plugin) are removed — user subscriptions are NEVER touched here.
+    _log("Cleaning up test subscriptions from previous runs...")
     try:
-        # Delete all subscriptions
         subs = api_get("/api/subscriptions")
         for sub in subs:
+            if not _is_test_sub(sub):
+                continue
             try:
                 requests.delete(
                     f"{MANAGER_URL}/api/subscriptions/{sub['id']}",
@@ -2570,8 +2587,8 @@ def main() -> int:
                 )
             except Exception:
                 pass
-        # Clear event log
-        requests.delete(f"{MANAGER_URL}/api/logging", headers=_api_headers(), timeout=10)
+        # Note: event_log rows for deleted subs cascade via FK; real subs'
+        # event history is intentionally left intact.
         time.sleep(2.0)  # Let the worker process DELETED cleanups
     except Exception as exc:
         _log(f"Cleanup warning: {exc}")

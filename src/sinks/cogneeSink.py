@@ -13,7 +13,7 @@ class CogneeSink(BaseSink):
             "so they can be processed into cognee's graph memory. Each Data "
             "Target maps to a dedicated dataset."
         ),
-        "icon": "cognee.png",
+        "icon": "cogneeSink.png",
     }
     default_api_url = "http://cognee-app:8000"
     api_key_env_var = "COGNEE_API_KEY"

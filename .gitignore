@@ -8,7 +8,6 @@ __pycache__/
 !/logs/.gitkeep
 /output/*
 !/output/.gitkeep
-/assets/*
 /db/*
 /dbexport/*
 

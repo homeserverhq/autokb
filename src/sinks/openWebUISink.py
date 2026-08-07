@@ -31,7 +31,7 @@ class OpenWebUISink(BaseSink):
             "repository, linked into the knowledge base, and replaced "
             "on update so no orphaned versions linger."
         ),
-        "icon": "openwebui.png",
+        "icon": "openWebUISink.png",
     }
     default_api_url = "http://openwebui-app:8080"
     api_key_env_var = "OPENWEBUI_API_KEY"

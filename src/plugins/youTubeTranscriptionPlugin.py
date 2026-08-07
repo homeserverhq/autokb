@@ -720,6 +720,9 @@ class youTubeTranscriptionPlugin(BaseSubscription):
                 continue
             except SubscriptionCancelledError:
                 raise
+            except requests.HTTPError as e:
+                self.log.error("video_http_error", video_id=vid_id, title=vid_title, error=f"{type(e).__name__}: {e}")
+                raise
             except Exception as e:
                 self.log.error("video_skipped_error", video_id=vid_id, title=vid_title, error=f"{type(e).__name__}: {e}")
                 skipped += 1

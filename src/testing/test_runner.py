@@ -2184,8 +2184,8 @@ def _dkb_test_recon_error(db, sub, ds):
         sub_row = db.get_subscription(sub)
         reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
         links = db.list_target_subscriptions(ds.id)
-        if links[0].status != STATE_ENABLED:
-            return False, "link should stay ENABLED after per-file error"
+        if links[0].status != STATE_ERROR:
+            return False, "link should transition to ERROR after per-file error"
     with db.get_session() as s:
         leaked_path = f"/output/test_plugin/test_sub/error_test.md"
         df = s.query(AKBDatafile).filter(AKBDatafile.path == leaked_path).first()

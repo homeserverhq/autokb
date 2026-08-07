@@ -191,7 +191,15 @@ def reconcile_subscription_targets(
             )
 
     # --- Pass II: update akb_datafile stats for the subscription ---
-    _pass2_akb_datafiles(sub, db, output_dir, fs_files, log)
+    try:
+        _pass2_akb_datafiles(sub, db, output_dir, fs_files, log)
+    except Exception as exc:
+        log.error("sink_pass2_failed", sub_id=sub_id, error=str(exc))
+        try:
+            db.update_status(sub_id, STATE_ERROR, last_error=f"Sink pass 2 failed: {exc}",
+                             guard="error_safe")
+        except Exception:
+            pass
 
     log.info(
         "sink_recon_complete",
@@ -242,7 +250,8 @@ def _reconcile_pass1(
                 svc.base_add_datafile(sub_id, fpath)
                 add_count += 1
             except Exception as exc:
-                log.warning("sink_add_failed", path=fpath, error=str(exc))
+                log.error("sink_add_failed", path=fpath, error=str(exc))
+                raise
             continue
 
         processed_datafile_ids.add(df.id)
@@ -254,14 +263,15 @@ def _reconcile_pass1(
                     svc.base_update_datafile(df.id, df.hash)
                     update_count += 1
                 except Exception as exc:
-                    log.warning("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    raise
             continue
 
         try:
             real_hash = compute_file_hash(fpath)
         except Exception as exc:
-            log.warning("sink_hash_failed", path=fpath, error=str(exc))
-            continue
+            log.error("sink_hash_failed", path=fpath, error=str(exc))
+            raise
 
         if real_hash == df.hash:
             if ds_df and ds_df.hash != df.hash:
@@ -269,13 +279,15 @@ def _reconcile_pass1(
                     svc.base_update_datafile(df.id, df.hash)
                     update_count += 1
                 except Exception as exc:
-                    log.warning("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    raise
         else:
             try:
                 svc.base_update_datafile(df.id, real_hash)
                 update_count += 1
             except Exception as exc:
-                log.warning("sink_update_failed", datafile_id=df.id, hash=real_hash, error=str(exc))
+                log.error("sink_update_failed", datafile_id=df.id, hash=real_hash, error=str(exc))
+                raise
 
     for ds_df in ds_df_rows:
         if ds_df.datafile_id not in processed_datafile_ids:
@@ -283,7 +295,8 @@ def _reconcile_pass1(
                 svc.base_remove_datafile(ds_df.datafile_id)
                 remove_count += 1
             except Exception as exc:
-                log.warning("sink_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
+                log.error("sink_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
+                raise
 
     return add_count, update_count, remove_count
 
@@ -310,9 +323,8 @@ def _pass2_akb_datafiles(sub, db, output_dir, fs_files, log) -> None:
             try:
                 real_hash = compute_file_hash(df.path)
             except Exception as exc:
-                log.warning("sink_pass2_hash_failed", path=df.path, error=str(exc))
-                db.update_datafile_last_checked(df.id)
-                continue
+                log.error("sink_pass2_hash_failed", path=df.path, error=str(exc))
+                raise
             db.update_datafile_stats(df.id, st.st_size, st.st_mtime, real_hash)
 
 

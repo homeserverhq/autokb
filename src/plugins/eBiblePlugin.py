@@ -278,11 +278,19 @@ Scripture: {scripture_text}
                         )
                 
                 except requests.RequestException as e:
-                    print(f"Error fetching {version}/{book_id}/{chapter_num}: {e}")
-                    continue
+                    self.log.error(
+                        "bible_fetch_failed",
+                        version=version, book=book_id, chapter=chapter_num,
+                        error=f"{type(e).__name__}: {e}",
+                    )
+                    raise
                 except (json.JSONDecodeError, KeyError) as e:
-                    print(f"Error parsing {version}/{book_id}/{chapter_num}: {e}")
-                    continue
+                    self.log.error(
+                        "bible_parse_failed",
+                        version=version, book=book_id, chapter=chapter_num,
+                        error=f"{type(e).__name__}: {e}",
+                    )
+                    raise
         
         # Write summary file
         version_lower = version.lower()

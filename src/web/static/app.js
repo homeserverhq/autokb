@@ -1433,11 +1433,13 @@
     urlDiv.innerHTML = `<label>API URL <span class="form-field-error">*</span></label><input type="text" name="api_url" value="${escapeHtml(ds ? ds.api_url : defaultApiUrl)}" required />`;
     fields.appendChild(urlDiv);
     // API Key (server-side env default resolves at recon when left blank)
+    // Never set the HTML "required" attribute — mirrors the plugin's schema
+    // renderer, which marks required password fields with a "*" label only.
     const hasKeyDefault = !!(svc && svc.has_api_key_default);
     const keyRequired = !isEdit && !hasKeyDefault;
     const keyPlaceholder = isEdit ? 'leave blank to keep existing' : (hasKeyDefault ? 'leave blank to use server default' : '');
     const keyDiv = document.createElement('div'); keyDiv.className = 'form-field';
-    keyDiv.innerHTML = `<label>API Key ${keyRequired ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" ${keyRequired ? 'required' : ''} placeholder="${keyPlaceholder}" />
+    keyDiv.innerHTML = `<label>API Key ${keyRequired ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" placeholder="${keyPlaceholder}" />
     <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : (hasKeyDefault ? 'Leave blank to use the server-configured default key.' : '')}</small>`;
     fields.appendChild(keyDiv);
     // ds_extra_params

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoKB</title>
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=47" />
+  <link rel="stylesheet" href="/static/styles.css?v=49" />
 </head>
 <body>
   <!-- Login page -->
@@ -232,8 +232,10 @@
             <div id="devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
             <div class="devlab-form">
               <label>Source Name</label>
-              <input type="text" id="devlab-name" placeholder="myPlugin" maxlength="32" />
-              <label>Source Code</label>
+               <input type="text" id="devlab-name" placeholder="myPlugin" maxlength="32" />
+               <label>Display Name <span class="form-field-error">*</span></label>
+               <input type="text" id="devlab-display-name" placeholder="My Plugin" maxlength="64" />
+               <label>Source Code</label>
               <textarea id="devlab-code" rows="20" placeholder="Paste your plugin code here..."></textarea>
               <label>Icon (optional, .png, max 512x512)</label>
               <input type="file" id="devlab-icon" accept="image/png" />
@@ -260,8 +262,10 @@
             <div id="dest-devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
             <div class="devlab-form">
               <label>Destination Name</label>
-              <input type="text" id="dest-devlab-name" placeholder="mySink" maxlength="32" />
-              <label>Destination Code</label>
+               <input type="text" id="dest-devlab-name" placeholder="mySink" maxlength="32" />
+               <label>Display Name <span class="form-field-error">*</span></label>
+               <input type="text" id="dest-devlab-display-name" placeholder="My Connector" maxlength="64" />
+               <label>Destination Code</label>
               <textarea id="dest-devlab-code" rows="20" placeholder="Paste your sink code here..."></textarea>
               <label>Icon (optional, .png, max 512x512)</label>
               <input type="file" id="dest-devlab-icon" accept="image/png" />
@@ -343,6 +347,6 @@
   </div>
 
   <script src="/static/marked.min.js"></script>
-  <script src="/static/app.js?v=48"></script>
+  <script src="/static/app.js?v=49"></script>
 </body>
 </html>

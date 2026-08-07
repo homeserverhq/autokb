@@ -18,6 +18,7 @@ CHUNK = b"X" * (1024 * 1024)  # 1MB
 class largeOutputPlugin(BaseSubscription):
     metadata = {
         "name": "largeOutputPlugin",
+            "display_name": "largeOutputPlugin",
         "icon": "default_icon.png",
         "description": "Large output plugin (Test 11)",
         "sub_type": "SCHEDULED",

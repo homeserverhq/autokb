@@ -283,7 +283,7 @@
         card.innerHTML = `
           <img src="/assets/${escapeHtml(p.icon)}" onerror="this.src='/assets/default_icon.png'" alt="" />
           <div>
-            <div class="plugin-name">${escapeHtml(p.name)}</div>
+            <div class="plugin-name">${escapeHtml(p.display_name || p.name)}</div>
             <span class="badge badge-${escapeHtml(p.sub_type)}">${p.sub_type === 'EVENT_BASED' ? 'EVENT-BASED' : escapeHtml(p.sub_type)}</span>
           </div>
         `;
@@ -494,7 +494,7 @@
     try {
       const plugin = await api(`/plugins/${pluginId}`);
       currentPlugin = plugin;
-      $('plugin-title').textContent = plugin.name;
+      $('plugin-title').textContent = plugin.display_name || plugin.name;
       const iconEl = $('plugin-icon');
       iconEl.src = `/assets/${escapeHtml(plugin.icon)}`;
       iconEl.onerror = () => { iconEl.src = '/assets/default_icon.png'; };
@@ -1044,7 +1044,7 @@
       const label = EXIT_LABELS[r.exit_code] || 'Unknown';
       row.innerHTML = `
         <span class="col-view"><button class="btn btn-primary" data-event-id="${escapeHtml(r.id)}">View</button></span>
-        <span class="col-plugin">${escapeHtml(r.plugin_id || '')}</span>
+        <span class="col-plugin">${escapeHtml(r.plugin_display_name || r.plugin_id || '')}</span>
         <span class="col-name">${escapeHtml(r.subscription_name || r.subscription_id)}</span>
         <span class="col-time">${escapeHtml(new Date(r.executed_at).toLocaleString())}</span>
         <span class="col-status"><span class="badge badge-${r.exit_code}">${escapeHtml(label)}</span></span>
@@ -1093,7 +1093,7 @@
     body.innerHTML = `
       <div class="detail-row">
         <span class="detail-label">Plugin</span>
-        <span class="detail-value">${escapeHtml(ev.plugin_id || '')}</span>
+        <span class="detail-value">${escapeHtml(ev.plugin_display_name || ev.plugin_id || '')}</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Subscription</span>
@@ -1193,7 +1193,7 @@
     const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
     row.innerHTML = `
       <span class="all-subs-col-name">${escapeHtml(sub.name)}</span>
-      <span class="all-subs-col-plugin">${escapeHtml(sub.plugin_id)}</span>
+      <span class="all-subs-col-plugin">${escapeHtml(sub.plugin_display_name || sub.plugin_id)}</span>
       <span class="all-subs-col-status"><span class="badge badge-${status}">${escapeHtml(status)}${status === 'IN_PROGRESS' && Number.isFinite(sub.progress) ? ` (${Math.round(sub.progress)}%)` : ''}</span></span>
       <span class="all-subs-col-access"><span class="badge badge-${access}">${escapeHtml(access)}</span></span>
       <span class="all-subs-col-activity">${count}</span>
@@ -1250,7 +1250,7 @@
         card.innerHTML = `
           <img src="/assets/${escapeHtml(s.icon)}" onerror="this.src='/assets/default_icon.png'" alt="" />
           <div>
-            <div class="plugin-name">${escapeHtml(s.name)}</div>
+            <div class="plugin-name">${escapeHtml(s.display_name || s.name)}</div>
           </div>
         `;
         card.addEventListener('click', () => { location.hash = `#/destinations-detail/${s.service_id}`; });
@@ -1267,7 +1267,7 @@
       currentSink = svc || null;
       $('destination-description').textContent = (svc && svc.description) || '';
       if (svc) {
-        $('destination-title').textContent = svc.name;
+        $('destination-title').textContent = svc.display_name || svc.name;
         const iconEl = $('destination-icon');
         iconEl.src = `/assets/${escapeHtml(svc.icon)}`;
         iconEl.onerror = () => { iconEl.src = '/assets/default_icon.png'; };
@@ -1397,7 +1397,7 @@
     const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
     row.innerHTML = `
       <span class="all-subs-col-name">${escapeHtml(t.name)}</span>
-      <span class="all-subs-col-plugin">${escapeHtml(t.service_name || '')}</span>
+      <span class="all-subs-col-plugin">${escapeHtml(t.service_display_name || t.service_name || '')}</span>
       <span class="all-subs-col-status"><span class="badge badge-${status}">${escapeHtml(status)}</span></span>
       <span class="all-subs-col-updated">${escapeHtml(relativeTime(t.last_updated))}</span>
       <span class="all-subs-col-edit"><button class="btn btn-primary" data-ds="${escapeHtml(t.target_id)}" data-svc="${escapeHtml(t.service_id)}" ${isTerminal ? 'disabled' : ''}>Edit</button></span>
@@ -1450,7 +1450,8 @@
     targetFormTargetId = ds ? ds.target_id : null;
     const services = await api('/sinks');
     const svc = services.find(s => s.service_id === serviceId);
-    $('target-form-title').textContent = ds ? `Edit Target (${svc ? svc.name : ''})` : `Create Data Target (${svc ? svc.name : ''})`;
+    const svcName = svc ? (svc.display_name || svc.name) : '';
+    $('target-form-title').textContent = ds ? `Edit Target (${svcName})` : `Create Data Target (${svcName})`;
     await buildTargetForm(ds, svc);
     $('target-form-modal').style.display = 'flex';
   }
@@ -1627,6 +1628,7 @@
       const r = await api(`/dev_lab/load/${encodeURIComponent(pluginId)}`);
       if (r.ok && r.code != null) {
         codeInput.value = r.code;
+        $('devlab-display-name').value = r.display_name || '';
       } else {
         codeInput.value = '';
         $('devlab-result').className = 'devlab-result error';
@@ -1647,6 +1649,7 @@
     const nameInput = $('devlab-name');
     nameInput.readOnly = false;
     nameInput.value = '';
+    $('devlab-display-name').value = '';
     $('devlab-code').value = '';
     $('devlab-icon').value = '';
     $('devlab-result').className = 'devlab-result';
@@ -1673,6 +1676,7 @@
       const r = await api(`/sink_dev_lab/load/${encodeURIComponent(serviceName)}`);
       if (r.ok && r.code != null) {
         codeInput.value = r.code;
+        $('dest-devlab-display-name').value = r.display_name || '';
       } else {
         codeInput.value = '';
         $('dest-devlab-result').className = 'devlab-result error';
@@ -1693,6 +1697,7 @@
     const nameInput = $('dest-devlab-name');
     nameInput.readOnly = false;
     nameInput.value = '';
+    $('dest-devlab-display-name').value = '';
     $('dest-devlab-code').value = '';
     $('dest-devlab-icon').value = '';
     $('dest-devlab-result').className = 'devlab-result';
@@ -1701,12 +1706,13 @@
 
   $('dest-devlab-test-btn').addEventListener('click', async () => {
     const name = $('dest-devlab-name').value;
+    const display_name = $('dest-devlab-display-name').value;
     const code = $('dest-devlab-code').value;
     const result = $('dest-devlab-result');
     result.className = 'devlab-result';
     result.textContent = 'Testing...';
     try {
-      const r = await api('/sink_dev_lab/validate', { method: 'POST', body: JSON.stringify({ name, code }) });
+      const r = await api('/sink_dev_lab/validate', { method: 'POST', body: JSON.stringify({ name, display_name, code }) });
       if (r.ok) {
         result.classList.add('success');
         result.textContent = '✓ Validation passed';
@@ -1722,6 +1728,7 @@
 
   $('dest-devlab-save-btn').addEventListener('click', async () => {
     const name = $('dest-devlab-name').value;
+    const display_name = $('dest-devlab-display-name').value;
     const code = $('dest-devlab-code').value;
     const iconFile = $('dest-devlab-icon').files[0];
     const result = $('dest-devlab-result');
@@ -1737,7 +1744,7 @@
       });
     }
     try {
-      const r = await api('/sink_dev_lab/save', { method: 'POST', body: JSON.stringify({ name, code, icon_base64: icon_b64 }) });
+      const r = await api('/sink_dev_lab/save', { method: 'POST', body: JSON.stringify({ name, display_name, code, icon_base64: icon_b64 }) });
       result.classList.add('success');
       if (r.mode === 'edit') {
         result.textContent = '✓ Destination updated. The new code will be picked up by the file watcher within seconds.';
@@ -1752,12 +1759,13 @@
 
   $('devlab-test-btn').addEventListener('click', async () => {
     const name = $('devlab-name').value;
+    const display_name = $('devlab-display-name').value;
     const code = $('devlab-code').value;
     const result = $('devlab-result');
     result.className = 'devlab-result';
     result.textContent = 'Testing...';
     try {
-      const r = await api('/dev_lab/validate', { method: 'POST', body: JSON.stringify({ name, code }) });
+      const r = await api('/dev_lab/validate', { method: 'POST', body: JSON.stringify({ name, display_name, code }) });
       if (r.ok) {
         result.classList.add('success');
         result.textContent = '✓ Validation passed';
@@ -1773,6 +1781,7 @@
 
   $('devlab-save-btn').addEventListener('click', async () => {
     const name = $('devlab-name').value;
+    const display_name = $('devlab-display-name').value;
     const code = $('devlab-code').value;
     const iconFile = $('devlab-icon').files[0];
     const result = $('devlab-result');
@@ -1788,7 +1797,7 @@
       });
     }
     try {
-      const r = await api('/dev_lab/save', { method: 'POST', body: JSON.stringify({ name, code, icon_base64: icon_b64 }) });
+      const r = await api('/dev_lab/save', { method: 'POST', body: JSON.stringify({ name, display_name, code, icon_base64: icon_b64 }) });
       result.classList.add('success');
       if (r.mode === 'edit') {
         result.textContent = '✓ Plugin updated. The new code will be picked up on the next run (worker loads plugins fresh per job).';

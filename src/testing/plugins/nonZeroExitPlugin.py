@@ -8,6 +8,7 @@ from utils.plugin_base import BaseSubscription
 class nonZeroExitPlugin(BaseSubscription):
     metadata = {
         "name": "nonZeroExitPlugin",
+            "display_name": "nonZeroExitPlugin",
         "icon": "default_icon.png",
         "description": "Bare sys.exit(1) plugin (Test 18)",
         "sub_type": "SCHEDULED",

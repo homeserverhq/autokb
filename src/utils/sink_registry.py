@@ -23,6 +23,7 @@ class SinkServiceRecord:
         self.cls = cls
         self.metadata = metadata
         self.file_path = file_path
+        self.display_name = metadata.get("display_name") or service_name
         self.icon = metadata.get("icon", "default_icon.png")
 
 

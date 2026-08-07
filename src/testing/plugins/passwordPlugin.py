@@ -6,6 +6,7 @@ from utils.plugin_base import BaseSubscription
 class passwordPlugin(BaseSubscription):
     metadata = {
         "name": "passwordPlugin",
+            "display_name": "passwordPlugin",
         "icon": "default_icon.png",
         "description": "Password field encryption plugin (Test 9)",
         "sub_type": "SCHEDULED",

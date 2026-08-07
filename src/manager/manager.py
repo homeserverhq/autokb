@@ -66,6 +66,7 @@ from utils.constants import (
 # Maximum length of a plugin name in characters. Enforced at the Dev Lab
 # endpoints (validate + save) to keep plugin grid cards from overflowing.
 MAX_PLUGIN_NAME_LEN = 32
+MAX_DISPLAY_NAME_LEN = 64
 from utils.database import DatabaseManager
 from utils.misc_utils import (
     PasswordCipher,
@@ -138,6 +139,13 @@ def _sub_or_404(sub_id: str):
     if not sub:
         raise HTTPException(status_code=404, detail="Subscription not found")
     return sub
+
+
+def _plugin_display_name(plugin_id: str) -> str:
+    """Resolve a plugin's friendly display name, falling back to its id."""
+    reg: ManagerPluginRegistry = STATE["registry"]
+    rec = reg.get(plugin_id) if reg else None
+    return rec.display_name if rec else plugin_id
 
 
 def _serialise_subscription(sub, password_fields: List[str]) -> Dict[str, Any]:
@@ -363,12 +371,14 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
     """Serialize a target with its subscriptions and derived status."""
     svc_row = db.get_sink(t.service_id)
     service_name = svc_row.name if svc_row else ""
+    service_display_name = service_name
     svc_icon = ""
     sink_reg: SinkRegistry = STATE.get("sink_registry")
     if sink_reg:
         rec = sink_reg.get(service_name)
         if rec:
             svc_icon = rec.icon
+            service_display_name = rec.display_name
     status = "ENABLED"
     last_updated = None
     for s in subs:
@@ -386,6 +396,7 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         "target_id": t.id,
         "service_id": t.service_id,
         "service_name": service_name,
+        "service_display_name": service_display_name,
         "service_icon": svc_icon,
         "name": t.name,
         "api_url": t.api_url,
@@ -603,6 +614,7 @@ def api_plugin_details(plugin_id: str):
     return {
         "plugin_id": rec.plugin_id,
         "name": rec.name,
+        "display_name": rec.display_name,
         "icon": rec.icon,
         "description": rec.description,
         "sub_type": rec.sub_type,
@@ -669,7 +681,9 @@ def api_list_subscriptions(plugin_id: Optional[str] = Query(default=None)):
     for sub in subs:
         rec = reg.get(sub.plugin_id)
         password_fields = rec.password_fields if rec else []
-        out.append(_serialise_subscription(sub, password_fields))
+        d = _serialise_subscription(sub, password_fields)
+        d["plugin_display_name"] = rec.display_name if rec else sub.plugin_id
+        out.append(d)
     return out
 
 
@@ -916,12 +930,14 @@ def api_logging():
     # has client-side virtualization on the future-work backlog), so a
     # smaller cap would be a UI problem long before it is a wire problem.
     rows = db.list_event_log(limit=100000)
+    reg: ManagerPluginRegistry = STATE["registry"]
     return [
         {
             "id": e.id,
             "subscription_id": e.subscription_id,
             "subscription_name": name,
             "plugin_id": plugin_id,
+            "plugin_display_name": _plugin_display_name(plugin_id),
             "executed_at": e.executed_at.isoformat(),
             "exit_code": e.exit_code,
             "exit_string": e.exit_string,
@@ -951,6 +967,7 @@ def api_dev_lab_validate(body: Dict[str, Any] = Body(...)):
             status_code=400,
             detail=f"Plugin name too long: {len(plugin_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
         )
+    _require_display_name(body)
     return _validate_plugin_code(code, plugin_name)
 
 
@@ -974,7 +991,7 @@ def api_dev_lab_load(plugin_id: str):
             status_code=404,
             detail=f"Plugin source file not found: {rec.file_path}",
         )
-    return {"ok": True, "name": rec.plugin_id, "code": code}
+    return {"ok": True, "name": rec.plugin_id, "display_name": rec.display_name, "code": code}
 
 
 @app.post("/api/dev_lab/save")
@@ -989,12 +1006,14 @@ def api_dev_lab_save(body: Dict[str, Any] = Body(...)):
             status_code=400,
             detail=f"Plugin name too long: {len(plugin_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
         )
+    display_name = _require_display_name(body)
     result = _validate_plugin_code(code, plugin_name)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Validation failed"))
     sanitized = result["plugin_id"]
     if icon_b64:
         code = _set_metadata_icon_in_source(code, f"{sanitized}.png")
+    code = _set_metadata_display_name_in_source(code, display_name, "BaseSubscription")
     target_path = f"/src/plugins/{sanitized}.py"
     tmp_path = f"/tmp/.{sanitized}.py.tmp"
     with open(tmp_path, "w") as f:
@@ -1179,6 +1198,108 @@ def _set_metadata_icon_in_source(code: str, icon_filename: str,
         last_part = lines[end_line][end_col:]
         lines[start_line] = first_part + last_part
         del lines[start_line + 1:end_line + 1]
+    return "".join(lines)
+
+
+def _require_display_name(body: Dict[str, Any]) -> str:
+    dn = (body.get("display_name") or "").strip()
+    if not dn:
+        raise HTTPException(status_code=400, detail="Display name is required")
+    if len(dn) > MAX_DISPLAY_NAME_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Display name too long: {len(dn)} chars (max {MAX_DISPLAY_NAME_LEN})",
+        )
+    if any(ord(c) < 32 for c in dn):
+        raise HTTPException(status_code=400, detail="Display name cannot contain control characters")
+    return dn
+
+
+def _set_metadata_display_name_in_source(code: str, display_name: str,
+                                          base_class_marker: str = "BaseSubscription") -> str:
+    """Set or add a ``display_name`` key in the class-level ``metadata`` dict."""
+    import ast
+    new_value_repr = f'"{display_name}"'
+    try:
+        tree = ast.parse(code, filename="<dev_lab>")
+    except SyntaxError:
+        return code
+    target_class = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
+                if base_class_marker in bn:
+                    target_class = node
+                    break
+        if target_class is not None:
+            break
+    if target_class is None:
+        return code
+    metadata_assign = None
+    for node in target_class.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "metadata" for t in node.targets
+        ):
+            if isinstance(node.value, ast.Dict):
+                metadata_assign = node
+                break
+    if metadata_assign is None:
+        return code
+    dict_node = metadata_assign.value
+    # Try to replace an existing display_name value.
+    for i, key in enumerate(dict_node.keys):
+        if key is None:
+            continue
+        key_str = None
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            key_str = key.value
+        elif hasattr(ast, "unparse"):
+            try:
+                key_str = ast.unparse(key)
+            except Exception:
+                pass
+        if key_str == "display_name":
+            val = dict_node.values[i]
+            if isinstance(val, ast.Constant) and hasattr(val, "end_lineno") and val.end_lineno is not None:
+                start_line = val.lineno - 1
+                start_col = val.col_offset
+                end_line = val.end_lineno - 1
+                end_col = val.end_col_offset
+                lines = code.splitlines(keepends=True)
+                if start_line == end_line:
+                    line = lines[start_line]
+                    lines[start_line] = line[:start_col] + new_value_repr + line[end_col:]
+                else:
+                    first_part = lines[start_line][:start_col] + new_value_repr
+                    last_part = lines[end_line][end_col:]
+                    lines[start_line] = first_part + last_part
+                    del lines[start_line + 1:end_line + 1]
+                return "".join(lines)
+            return code
+    # Insert after the "name" entry.
+    name_end = None
+    for i, key in enumerate(dict_node.keys):
+        if key is None:
+            continue
+        key_str = None
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            key_str = key.value
+        elif hasattr(ast, "unparse"):
+            try:
+                key_str = ast.unparse(key)
+            except Exception:
+                pass
+        if key_str == "name":
+            val = dict_node.values[i]
+            if isinstance(val, ast.Constant) and hasattr(val, "end_lineno") and val.end_lineno is not None:
+                name_end = (val.end_lineno - 1, val.end_col_offset)
+            break
+    if name_end is None:
+        return code
+    line_no, col = name_end
+    lines = code.splitlines(keepends=True)
+    lines[line_no] = lines[line_no][:col] + f', "display_name": {new_value_repr}' + lines[line_no][col:]
     return "".join(lines)
 
 
@@ -1424,9 +1545,11 @@ async def _sse_generator_with_queue(client_queue: asyncio.Queue):
     for sub in db.list_subscriptions(include_deleted=False):
         rec = reg.get(sub.plugin_id)
         password_fields = rec.password_fields if rec else []
+        d = _serialise_subscription(sub, password_fields)
+        d["plugin_display_name"] = rec.display_name if rec else sub.plugin_id
         await client_queue.put({
             "type": "subscription_update",
-            "data": _serialise_subscription(sub, password_fields),
+            "data": d,
         })
     # Also include a sentinel so the client can detect the snapshot is
     # complete (useful for the dashboard plugin-counts).
@@ -1462,6 +1585,7 @@ def api_sink_dev_lab_validate(body: Dict[str, Any] = Body(...)):
             status_code=400,
             detail=f"Sink service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
         )
+    _require_display_name(body)
     return _validate_sink_code(code, service_name)
 
 
@@ -1481,7 +1605,7 @@ def api_sink_dev_lab_load(service_name: str):
             status_code=404,
             detail=f"Sink service source file not found: {rec.file_path}",
         )
-    return {"ok": True, "name": rec.service_name, "code": code}
+    return {"ok": True, "name": rec.service_name, "display_name": rec.display_name, "code": code}
 
 
 @app.post("/api/sink_dev_lab/save")
@@ -1496,12 +1620,14 @@ def api_sink_dev_lab_save(body: Dict[str, Any] = Body(...)):
             status_code=400,
             detail=f"Sink service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
         )
+    display_name = _require_display_name(body)
     result = _validate_sink_code(code, service_name)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Validation failed"))
     sanitized = result["service_name"]
     if icon_b64:
         code = _set_metadata_icon_in_source(code, f"{sanitized}.png", base_class_marker="BaseSink")
+    code = _set_metadata_display_name_in_source(code, display_name, "BaseSink")
     target_path = f"/src/sinks/{sanitized}Sink.py"
     tmp_path = f"/tmp/.{sanitized}Sink.py.tmp"
     with open(tmp_path, "w") as f:
@@ -1575,11 +1701,13 @@ def api_list_sinks():
     for svc in services:
         targets = db.list_targets(service_id=svc.id)
         icon = ""
+        display_name = svc.name or ""
         defaults = {"api_url": "", "has_api_key_default": False}
         if sink_reg:
             rec = sink_reg.get(svc.name)
             if rec:
                 icon = rec.icon
+                display_name = rec.display_name
                 try:
                     defaults = rec.cls.get_defaults()
                 except Exception:
@@ -1587,6 +1715,7 @@ def api_list_sinks():
         result.append({
             "service_id": svc.id,
             "name": svc.name,
+            "display_name": display_name,
             "description": svc.description or "",
             "icon": icon,
             "default_api_url": defaults.get("api_url", ""),

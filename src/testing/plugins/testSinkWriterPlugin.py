@@ -13,6 +13,7 @@ from utils.plugin_base import BaseSubscription
 class TestSinkWriterPlugin(BaseSubscription):
     metadata = {
         "name": "testSinkWriterPlugin",
+            "display_name": "testSinkWriterPlugin",
         "icon": "default_icon.png",
         "description": "Writes test files for Sink e2e tests.",
         "sub_type": "SCHEDULED",

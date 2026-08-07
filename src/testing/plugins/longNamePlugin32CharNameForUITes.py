@@ -11,6 +11,7 @@ from utils.plugin_base import BaseSubscription
 class longNamePlugin32CharNameForUITes(BaseSubscription):
     metadata = {
         "name": "longNamePlugin32CharNameForUITes",
+        "display_name": "longNamePlugin32CharNameForUITes",
         "icon": "default_icon.png",
         "description": "32-char name plugin (UI tile layout test)",
         "sub_type": "SCHEDULED",

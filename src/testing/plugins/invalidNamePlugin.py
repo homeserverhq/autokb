@@ -20,7 +20,8 @@ from utils.plugin_base import BaseSubscription
 
 class _BadNamePlugin(BaseSubscription):
     metadata = {
-        "name": "bad..namePlugin",  # consecutive periods → sanitize to "bad.namePlugin"
+        "name": "bad..namePlugin",              "display_name": "bad..namePlugin",
+# consecutive periods → sanitize to "bad.namePlugin"
         "icon": "default_icon.png",
         "description": "Invalid name plugin (Test 14) — should be rejected at load",
         "sub_type": "SCHEDULED",

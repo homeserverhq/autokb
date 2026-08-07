@@ -628,7 +628,7 @@ def _save_plugin_code(plugin_name: str, code: str) -> Tuple[bool, str]:
     r = requests.post(
         f"{MANAGER_URL}/api/dev_lab/save",
         headers={**_api_headers(), "Content-Type": "application/json"},
-        data=json.dumps({"name": plugin_name, "code": code}),
+        data=json.dumps({"name": plugin_name, "code": code, "display_name": plugin_name}),
         timeout=30,
     )
     if r.status_code not in (200, 204):
@@ -1166,23 +1166,24 @@ class editMatchPlugin(BaseSubscription):
 '''
 
 
-def _wait_for_plugin_reload_after_save(plugin_id: str, expected_code: str, timeout: float = 20.0) -> bool:
-    """Poll the dev_lab/load endpoint until the served code matches ``expected_code``.
+def _wait_for_plugin_reload_after_save(plugin_id: str, expected_desc_substring: str, timeout: float = 20.0) -> bool:
+    """Poll the plugin API until the description contains ``expected_desc_substring``.
 
-    Reading back through the API is more reliable than timing-based
-    heuristics because the file watcher's debounce depends on filesystem
-    mtime events that may not fire on every docker volume layer. We
-    just keep reloading until the on-disk contents match.
+    The watcher reloads the plugin from disk and re-parses its metadata;
+    once the description field (which is part of metadata) matches, the new
+    code is active. Checking metadata rather than exact source code avoids
+    false negatives caused by backend code transformations (e.g. injection
+    of ``display_name``).
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             r = requests.get(
-                f"{MANAGER_URL}/api/dev_lab/load/{plugin_id}",
+                f"{MANAGER_URL}/api/plugins/{plugin_id}",
                 headers=_api_headers(),
                 timeout=10,
             )
-            if r.status_code == 200 and r.json().get("code") == expected_code:
+            if r.status_code == 200 and expected_desc_substring in (r.json().get("description") or ""):
                 return True
         except Exception:
             pass
@@ -1226,7 +1227,7 @@ def test_edit_plugin_match() -> Tuple[bool, str]:
         r = requests.post(
             f"{MANAGER_URL}/api/dev_lab/save",
             headers={**_api_headers(), "Content-Type": "application/json"},
-            data=json.dumps({"name": plugin, "code": EDIT_MATCH_V2_CODE}),
+            data=json.dumps({"name": plugin, "code": EDIT_MATCH_V2_CODE, "display_name": plugin}),
             timeout=30,
         )
         if r.status_code != 200:
@@ -1236,7 +1237,7 @@ def test_edit_plugin_match() -> Tuple[bool, str]:
             return False, f"stage 2: expected mode=edit, got {body.get('mode')!r}"
 
         # Wait for the file watcher to reload V2.
-        if not _wait_for_plugin_reload_after_save(plugin, EDIT_MATCH_V2_CODE, timeout=20):
+        if not _wait_for_plugin_reload_after_save(plugin, "V2", timeout=20):
             return False, "stage 2: file watcher did not pick up V2 within 20s"
 
         # Stage 3: trigger the same sub again — output should now be VERSION_2.
@@ -1307,7 +1308,7 @@ def test_edit_plugin_mismatch() -> Tuple[bool, str]:
         r = requests.post(
             f"{MANAGER_URL}/api/dev_lab/save",
             headers={**_api_headers(), "Content-Type": "application/json"},
-            data=json.dumps({"name": plugin, "code": EDIT_MISMATCH_V3_CODE}),
+            data=json.dumps({"name": plugin, "code": EDIT_MISMATCH_V3_CODE, "display_name": plugin}),
             timeout=30,
         )
         if r.status_code != 400:
@@ -1716,7 +1717,7 @@ _MOCK_REMOTE_UPDATED = "remote-updated-456"
 
 class _MockSink(BaseSink):
     """Concrete Sink service for testing — records all calls."""
-    metadata = {"name": "MockSink", "description": "Test Sink service", "icon": "mock.png"}
+    metadata = {"name": "MockSink", "display_name": "MockSink", "description": "Test Sink service", "icon": "mock.png"}
 
     def __init__(self, target_row, db):
         super().__init__(target_row, db)

@@ -118,6 +118,7 @@ class ManagerPluginRegistry(PluginRegistry):
             out.append({
                 "plugin_id": rec.plugin_id,
                 "name": rec.name,
+                "display_name": rec.display_name,
                 "icon": rec.icon,
                 "description": rec.description,
                 "sub_type": rec.sub_type,

@@ -418,6 +418,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
 
     metadata = {
         "name": "youTubeTranscriptionPlugin",
+            "display_name": "youTubeTranscriptionPlugin",
         "icon": "youTubeTranscriptionPlugin.png",
         "description": (
             "Downloads transcripts for all videos in a YouTube channel and "

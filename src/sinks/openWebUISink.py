@@ -23,6 +23,7 @@ from utils.sink_base import BaseSink
 class OpenWebUISink(BaseSink):
     metadata = {
         "name": "openWebUI",
+            "display_name": "openWebUI",
         "description": (
             "Synchronizes AutoKB output files into an Open WebUI Knowledge "
             "Base. Each Data Target creates its own knowledge base "

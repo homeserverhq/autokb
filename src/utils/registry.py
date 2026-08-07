@@ -41,6 +41,7 @@ class PluginRecord:
     default_access_level: str
     cls: Type[BaseSubscription]
     file_path: str
+    display_name: str = ""
     schema: Dict[str, Any] = field(default_factory=dict)
     augmented_schema: Dict[str, Any] = field(default_factory=dict)
     schema_hash_value: str = ""
@@ -234,6 +235,7 @@ class PluginRegistry:
         return PluginRecord(
             plugin_id=plugin_id,
             name=meta["name"],
+            display_name=meta.get("display_name") or meta["name"],
             icon=meta.get("icon", "default_icon.png"),
             description=meta.get("description", ""),
             sub_type=sub_type,

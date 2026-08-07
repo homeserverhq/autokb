@@ -4,8 +4,7 @@ __pycache__/
 *.pyd
 
 # Runtime data
-/logs/*
-!/logs/.gitkeep
+logs/
 /output/*
 !/output/.gitkeep
 /db/*

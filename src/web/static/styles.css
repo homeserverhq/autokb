@@ -333,6 +333,7 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
 .form-field select option { background: #0A0A0A; color: #FFFFFF; padding: 4px 8px; font-weight: normal; }
 .form-field select option:hover { background: #2A2A2A; }
 .form-field .enum-search { margin-bottom: 6px; width: 100%; box-sizing: border-box; }
+.form-field input.invalid { border-color: #FF5252; }
 .form-field-error { color: #FF5252; font-size: 12px; }
 .form-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 

@@ -107,7 +107,12 @@
     });
     if (!r.ok) {
       const text = await r.text();
-      throw new Error(`${r.status} ${text}`);
+      let detail = text;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.detail) detail = parsed.detail;
+      } catch (e) { /* not JSON — keep raw body */ }
+      throw new Error(detail);
     }
     if (r.status === 204) return null;
     return r.json();
@@ -1457,14 +1462,51 @@
     $('target-form-modal').style.display = 'flex';
   }
 
+  const TARGET_NAME_MAX_LEN = 255;
+  const TARGET_NAME_RE = /^[a-zA-Z0-9.\-]+$/;
+
+  function validateTargetName(name) {
+    name = (name || '').trim();
+    if (!name) return 'Target name is required.';
+    if (name.length > TARGET_NAME_MAX_LEN) {
+      return `Target name is too long (${name.length} chars; max ${TARGET_NAME_MAX_LEN}).`;
+    }
+    if (!TARGET_NAME_RE.test(name)) {
+      return 'Use only letters, numbers, periods, and hyphens — no spaces or symbols.';
+    }
+    if (name.includes('..')) {
+      return "Target name must not contain '..'.";
+    }
+    if (name.startsWith('.') || name.endsWith('.')) {
+      return 'Target name must not start or end with a period.';
+    }
+    return null;
+  }
+
   async function buildTargetForm(ds, svc) {
     const fields = $('target-form-fields');
     fields.innerHTML = '';
     const isEdit = !!ds;
     // Name
     const nameDiv = document.createElement('div'); nameDiv.className = 'form-field';
-    nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label><input type="text" name="target_name" value="${escapeHtml(ds ? ds.name : '')}" required />`;
+    nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label>` +
+      `<input type="text" name="target_name" value="${escapeHtml(ds ? ds.name : '')}" required maxlength="${TARGET_NAME_MAX_LEN}" />` +
+      `<small class="form-field-error" id="target-name-error" style="display:none"></small>`;
     fields.appendChild(nameDiv);
+    const nameInput = nameDiv.querySelector('input[name="target_name"]');
+    const nameErr = nameDiv.querySelector('#target-name-error');
+    const updateTargetNameValidation = () => {
+      const err = validateTargetName(nameInput.value);
+      if (err) {
+        nameErr.textContent = err;
+        nameErr.style.display = 'block';
+        nameInput.classList.add('invalid');
+      } else {
+        nameErr.style.display = 'none';
+        nameInput.classList.remove('invalid');
+      }
+    };
+    nameInput.addEventListener('input', updateTargetNameValidation);
     // API URL (pre-fill the service default on create, mirroring the source schema)
     const defaultApiUrl = (svc && svc.default_api_url) ? svc.default_api_url : '';
     const urlDiv = document.createElement('div'); urlDiv.className = 'form-field';
@@ -1525,6 +1567,17 @@
     ev.preventDefault();
     const fd = new FormData($('target-form'));
     const name = fd.get('target_name');
+    const nameInput = $('target-form').querySelector('input[name="target_name"]');
+    const nameErr = validateTargetName(name);
+    if (nameErr) {
+      const errEl = $('target-name-error');
+      if (errEl) { errEl.textContent = nameErr; errEl.style.display = 'block'; }
+      if (nameInput) {
+        nameInput.classList.add('invalid');
+        nameInput.focus();
+      }
+      return;
+    }
     const apiUrl = fd.get('api_url');
     const apiKey = fd.get('api_key');
     let extra = fd.get('target_extra_params');

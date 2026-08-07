@@ -1815,6 +1815,40 @@ def api_target_detail(target_id: str):
     return data
 
 
+_TARGET_NAME_MAX_LEN = 255
+
+
+def _validate_target_name(name: str) -> str:
+    """Validate a Data Target name using the canonical-form check.
+
+    The name is accepted only if it is already in canonical form
+    (``sanitize_name(name) == name``) — i.e. sanitization changes nothing.
+    The provided name is never converted or coalesced; invalid names are
+    rejected outright with a clear error.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=400, detail="Target name is required")
+    name = name.strip()
+    if len(name) > _TARGET_NAME_MAX_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target name is too long ({len(name)} chars; max {_TARGET_NAME_MAX_LEN})",
+        )
+    try:
+        if sanitize_name(name) != name:
+            raise ValueError(name)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Target name {name!r} is invalid. Use only letters, numbers, "
+                "periods, and hyphens — no spaces or symbols, no '..', and no "
+                "leading or trailing period."
+            ),
+        )
+    return name
+
+
 @app.post("/api/sinks/{service_id}/targets")
 def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     db: DatabaseManager = STATE["db"]
@@ -1823,8 +1857,7 @@ def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     if svc is None:
         raise HTTPException(status_code=404, detail="Sink not found")
     name = body.get("name", "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="name is required")
+    _validate_target_name(name)
     api_url = body.get("api_url", "").strip()
     if not api_url:
         raise HTTPException(status_code=400, detail="api_url is required")
@@ -1857,6 +1890,8 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
     if t is None:
         raise HTTPException(status_code=404, detail="Target not found")
     name = body.get("name")
+    if name is not None:
+        name = _validate_target_name(name)
     api_url = body.get("api_url")
     api_key = body.get("api_key")
     t_extra = body.get("target_extra_params")

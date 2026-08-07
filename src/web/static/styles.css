@@ -99,6 +99,9 @@ body {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
   gap: 16px;
 }
+/* Developer Lab landing — give the tiles breathing room below the title */
+#devlab-landing h2 { line-height: 1; }
+#devlab-landing .plugin-grid { margin-top: 24px; }
 .plugin-card {
   background: #1A1A1A; border: 1px solid #2A2A2A; border-radius: 12px;
   padding: 16px; cursor: pointer; transition: border-color 0.2s;

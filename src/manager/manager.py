@@ -379,17 +379,18 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         if rec:
             svc_icon = rec.icon
             service_display_name = rec.display_name
-    status = "ENABLED"
+    if not subs:
+        status = "ENABLED"
+    elif any(s.status == "ERROR" for s in subs):
+        status = "ERROR"
+    elif any(s.status in ("ENABLED", "ENQUEUED", "IN_PROGRESS") for s in subs):
+        status = "ENABLED"
+    elif any(s.status == "DELETED" for s in subs):
+        status = "DELETED"
+    else:
+        status = "DISABLED"
     last_updated = None
     for s in subs:
-        if s.status == "ERROR":
-            status = "ERROR"
-        elif s.status in ("ENABLED", "ENQUEUED", "IN_PROGRESS") and status != "ERROR":
-            status = "ENABLED"
-        elif s.status == "DISABLED" and status not in ("ERROR", "ENABLED"):
-            status = "DISABLED"
-        elif s.status == "DELETED" and status not in ("ERROR", "ENABLED", "DISABLED"):
-            status = "DELETED"
         if s.last_updated and (last_updated is None or s.last_updated > last_updated):
             last_updated = s.last_updated
     return {

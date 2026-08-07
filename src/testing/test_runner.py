@@ -1711,6 +1711,7 @@ def _dkb_queue():
 
 _MOCK_REMOTE_ID = "remote-file-123"
 _MOCK_DATASTORE_ID = "remote-ds-abc"
+_MOCK_REMOTE_UPDATED = "remote-updated-456"
 
 
 class _MockDKBService(BaseDKBService):
@@ -1725,8 +1726,9 @@ class _MockDKBService(BaseDKBService):
         self.calls.append(("add_datafile", path, self.remote_datastore_id))
         return _MOCK_REMOTE_ID
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> None:
+    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
         self.calls.append(("update_datafile", remote_datafile_id, path))
+        return _MOCK_REMOTE_UPDATED
 
     def remove_datafile(self, remote_datafile_id: str) -> None:
         self.calls.append(("remove_datafile", remote_datafile_id))
@@ -2048,6 +2050,8 @@ def _dkb_test_base_update_datafile(db, sub, ds):
     ds_df = db.get_datastore_datafile(ds.id, df.id)
     if ds_df.hash != new_hash:
         return False, "hash not updated"
+    if ds_df.remote_datafile_id != _MOCK_REMOTE_UPDATED:
+        return False, "remote id not updated"
     with db.get_session() as s:
         s.query(DatastoreDatafile).filter(
             DatastoreDatafile.datastore_id == ds.id,

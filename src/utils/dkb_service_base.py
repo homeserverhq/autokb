@@ -65,8 +65,13 @@ class BaseDKBService(ABC):
         ...
 
     @abstractmethod
-    def update_datafile(self, remote_datafile_id: str, path: str) -> None:
-        """Re-upload (update) an existing file on the remote datastore."""
+    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+        """Re-upload (update) an existing file on the remote datastore.
+
+        Returns the NEW remote_datafile_id assigned after the re-upload.
+        It may equal the old id if the remote instance dedupes by content.
+        Callers must persist the returned id.
+        """
         ...
 
     @abstractmethod
@@ -118,14 +123,16 @@ class BaseDKBService(ABC):
         self.db.insert_datastore_datafile(self.datastore_id, df.id, remote_id, datafile_hash)
 
     def base_update_datafile(self, datafile_id: str, new_hash: str) -> None:
-        """Update a file on the remote datastore and sync the hash."""
+        """Update a file on the remote datastore and sync the hash + remote id."""
         ds_df = self.db.get_datastore_datafile(self.datastore_id, datafile_id)
         if not ds_df:
             return
         df = self.db.get_datafile(datafile_id)
         if not df:
             return
-        self.update_datafile(ds_df.remote_datafile_id, df.path)
+        new_remote_id = self.update_datafile(ds_df.remote_datafile_id, df.path)
+        if new_remote_id:
+            self.db.update_datastore_datafile_remote_id(self.datastore_id, datafile_id, new_remote_id)
         self.db.update_datastore_datafile_hash(self.datastore_id, datafile_id, new_hash)
 
     def base_remove_datafile(self, datafile_id: str) -> None:

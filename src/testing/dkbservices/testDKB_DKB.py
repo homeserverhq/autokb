@@ -34,8 +34,10 @@ class TestDKBDKB(BaseDKBService):
         _record("add_datafile", path, rid)
         return rid
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> None:
-        _record("update_datafile", remote_datafile_id, path)
+    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+        new_rid = self._file_name(path)
+        _record("update_datafile", remote_datafile_id, path, new_rid)
+        return new_rid
 
     def remove_datafile(self, remote_datafile_id: str) -> None:
         _record("remove_datafile", remote_datafile_id)

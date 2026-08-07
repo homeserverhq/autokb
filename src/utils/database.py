@@ -897,6 +897,13 @@ class DatabaseManager:
                 DatastoreDatafile.datafile_id == datafile_id,
             ).update({"hash": new_hash})
 
+    def update_datastore_datafile_remote_id(self, datastore_id: str, datafile_id: str, new_remote_id: str) -> None:
+        with self.get_session() as s:
+            s.query(DatastoreDatafile).filter(
+                DatastoreDatafile.datastore_id == datastore_id,
+                DatastoreDatafile.datafile_id == datafile_id,
+            ).update({"remote_datafile_id": new_remote_id})
+
     def delete_datastore_datafile(self, datastore_id: str, datafile_id: str) -> None:
         with self.get_session() as s:
             s.query(DatastoreDatafile).filter(

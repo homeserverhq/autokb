@@ -173,6 +173,7 @@
         } else {
           resetSinkDevlabToCreateMode();
         }
+        loadSinkGuide();
       } else if (sub === 'source') {
         showDevlabPanel('source');
         if (params.edit) {
@@ -1601,6 +1602,47 @@
     } catch (e) {
       const ta = document.createElement('textarea');
       ta.value = _cachedGuideMd;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+  });
+
+  // ---- Sink Development Guide ----
+  let _cachedSinkGuideMd = null;
+
+  async function loadSinkGuide() {
+    const contentDiv = $('dest-devlab-guide-content');
+    if (contentDiv.dataset.loaded) return;
+    try {
+      const resp = await fetch('/assets/sink-development.md?v=1');
+      if (!resp.ok) throw new Error('Not found');
+      _cachedSinkGuideMd = await resp.text();
+      contentDiv.innerHTML = marked.parse(_cachedSinkGuideMd);
+      contentDiv.dataset.loaded = 'true';
+    } catch (e) {
+      contentDiv.innerHTML = '<p class="muted">Sink development guide not available.</p>';
+    }
+  }
+
+  $('dest-devlab-guide-copy').addEventListener('click', async () => {
+    if (!_cachedSinkGuideMd) {
+      try {
+        const resp = await fetch('/assets/sink-development.md?v=1');
+        _cachedSinkGuideMd = await resp.text();
+      } catch (e) { return; }
+    }
+    const btn = $('dest-devlab-guide-copy');
+    try {
+      await navigator.clipboard.writeText(_cachedSinkGuideMd);
+    } catch (e) {
+      const ta = document.createElement('textarea');
+      ta.value = _cachedSinkGuideMd;
       ta.style.position = 'fixed'; ta.style.opacity = '0';
       document.body.appendChild(ta);
       ta.select();

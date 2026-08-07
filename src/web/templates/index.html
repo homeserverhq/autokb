@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoKB</title>
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=49" />
+  <link rel="stylesheet" href="/static/styles.css?v=50" />
 </head>
 <body>
   <!-- Login page -->
@@ -258,7 +258,7 @@
               <button class="btn btn-secondary" id="dest-devlab-back">&larr; Back</button>
               <h2>Destination Developer</h2>
             </div>
-            <p class="sub-row-meta">Paste a Destination connector class that subclasses <code>BaseSink</code>. See the existing services in Data Destinations for reference.</p>
+            <p class="sub-row-meta">See the Sink Development Guide below. Use it as a skill for your AI agent to build a Destination connector (sink).</p>
             <div id="dest-devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
             <div class="devlab-form">
               <label>Destination Name</label>
@@ -274,6 +274,13 @@
                 <button class="btn btn-primary" id="dest-devlab-save-btn">Save</button>
               </div>
               <div id="dest-devlab-result" class="devlab-result"></div>
+            </div>
+            <hr />
+            <div class="devlab-guide">
+              <div class="devlab-guide-header">
+                <button class="btn btn-secondary" id="dest-devlab-guide-copy">Copy</button>
+              </div>
+              <div id="dest-devlab-guide-content" class="devlab-guide-content"></div>
             </div>
           </div>
         </section>
@@ -347,6 +354,6 @@
   </div>
 
   <script src="/static/marked.min.js"></script>
-  <script src="/static/app.js?v=49"></script>
+  <script src="/static/app.js?v=50"></script>
 </body>
 </html>

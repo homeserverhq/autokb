@@ -494,6 +494,35 @@ if os.path.isdir(output_dir):
 
 When a single source item (e.g. a YouTube video transcript, a Bible chapter, a long email) is too large to fit in one output file, you **chunk** it into multiple files. The system has no opinion on chunk size, but all existing plugins target **~490 tokens per chunk** (roughly 350 words).
 
+### Make Chunking Optional
+
+**If your plugin chunks, you MUST expose a `chunking_enabled` boolean field in your schema, defaulting to `True`, so each user can turn chunking off.**
+
+Chunking is a convenience for downstream import pipelines, but not every consumer wants it. Some prefer a single whole document per source item — for example, a downstream RAG or embedding pipeline that does its own splitting, or a user who wants the raw email body or full transcript kept intact. Forcing chunking with no way to disable it makes the plugin unusable for those cases.
+
+Add the field to `get_schema()`:
+
+```python
+"chunking_enabled": {
+    "type": "boolean",
+    "default": True,
+    "description": "Chunk by token budget (~490 tokens per file). Disable to write the full item as a single document.",
+},
+```
+
+Then honor it in `getData()` by gating the chunking branch:
+
+```python
+chunking_enabled = config.get("chunking_enabled", True)
+
+if chunking_enabled and total_tokens > MAX_CHUNK_TOKENS:
+    # ... split into multiple chunk files ...
+else:
+    # ... write the full item as a single file ...
+```
+
+When chunking is disabled, write **one file per source item** containing the entire content, with the same stable, deterministic filename the chunked output would use — so reconciliation keeps working regardless of the setting.
+
 All three strategies below produce files named with a chunk index, such as:
 - `{video_id}-000.txt`, `{video_id}-001.txt`, ...
 - `{book}-{chapter}-{v1}-{v2}.txt`
@@ -923,6 +952,11 @@ class rssFeedPlugin(BaseSubscription):
                     "minimum": 0,
                     "description": "Max articles to process per run (0 = all)",
                 },
+                "chunking_enabled": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Chunk by token budget (~490 tokens per file). Disable to write the full article as a single document.",
+                },
             },
             "required": ["feed_url"],
         }
@@ -935,6 +969,7 @@ class rssFeedPlugin(BaseSubscription):
 
         feed_url = config["feed_url"]
         max_articles = config.get("max_articles", 0)
+        chunking_enabled = config.get("chunking_enabled", True)
 
         # 1. Fetch and parse feed
         progress_callback(5, message="Fetching feed...")
@@ -971,18 +1006,10 @@ class rssFeedPlugin(BaseSubscription):
             markdown += "---\n\n"
             markdown += content
 
-            # Chunk if needed
+            # Chunk if needed (respects chunking_enabled so users can
+            # opt for a single whole document per article)
             total_tokens = len(enc.encode(markdown))
-            if total_tokens <= self.MAX_CHUNK_TOKENS:
-                tmp = f"/tmp/{article_id}.md"
-                with open(tmp, "w") as f:
-                    f.write(markdown)
-                api_index[article_id] = {
-                    "tmp_path": tmp,
-                    "content_hash": self._file_hash(tmp),
-                    "chunks": [tmp],
-                }
-            else:
+            if chunking_enabled and total_tokens > self.MAX_CHUNK_TOKENS:
                 chunks = splitter.split_text(markdown)
                 chunk_paths = []
                 for i, chunk_text in enumerate(chunks):
@@ -995,6 +1022,16 @@ class rssFeedPlugin(BaseSubscription):
                     "tmp_path": chunk_paths[0],
                     "content_hash": self._file_hash(chunk_paths[0]),
                     "chunks": chunk_paths,
+                }
+            else:
+                # Chunking disabled (or article already fits): single file
+                tmp = f"/tmp/{article_id}.md"
+                with open(tmp, "w") as f:
+                    f.write(markdown)
+                api_index[article_id] = {
+                    "tmp_path": tmp,
+                    "content_hash": self._file_hash(tmp),
+                    "chunks": [tmp],
                 }
 
         # 3. Reconciliation: 3-way hash diff
@@ -1109,7 +1146,7 @@ class rssFeedPlugin(BaseSubscription):
         return ""
 ```
 
-This plugin demonstrates every major concept: schema with configurable fields, data fetching via HTTP, file output in markdown, 3-way hash reconciliation with stray file cleanup, chunking with `RecursiveCharacterTextSplitter`, structured progress tracking, and per-item error resilience.
+This plugin demonstrates every major concept: schema with configurable fields (including optional `chunking_enabled`), data fetching via HTTP, file output in markdown, 3-way hash reconciliation with stray file cleanup, optional chunking with `RecursiveCharacterTextSplitter`, structured progress tracking, and per-item error resilience.
 
 ---
 
@@ -1142,6 +1179,7 @@ Before considering your plugin complete, verify:
 - [ ] Output files use a stable, deterministic naming scheme
 - [ ] Output directory contains only content files — no metadata, tracking, or state files
 - [ ] Reconciliation handles: new files, changed files, deleted files, stray files
+- [ ] If the plugin chunks, `get_schema()` exposes a `chunking_enabled` boolean (default `True`) and `getData()` honors it
 - [ ] Token counting uses `tiktoken.get_encoding("cl100k_base")` (pre-cached)
 - [ ] Any new dependencies are documented and conveyed to the Docker image maintainer
 - [ ] Icon file (if not using `default_icon.png`) is placed in `/assets/` or uploaded via Developer Lab

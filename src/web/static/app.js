@@ -1400,8 +1400,11 @@
 
   async function confirmDkbDelete(ds) {
     if (!confirm(`Delete datastore '${ds.name}'?\n\nRemote files will be removed. This cannot be undone.`)) return;
-    try { await api(`/dkb_datastores/${ds.datastore_id}`, { method: 'DELETE' }); }
-    catch (e) { alert('Delete failed: ' + e.message); }
+    try {
+      await api(`/dkb_datastores/${ds.datastore_id}`, { method: 'DELETE' });
+      if (currentView === 'dkb-datastores' && currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
+      if (currentView === 'all-datastores') loadAllDatastores();
+    } catch (e) { alert('Delete failed: ' + e.message); }
   }
 
   // ---- DKB Form ----
@@ -1679,6 +1682,7 @@
         handleDatastoreUpdate(data.data);
       } else if (data.type === 'datastore_deleted') {
         if (currentView === 'all-datastores') loadAllDatastores();
+        if (currentView === 'dkb-datastores' && currentDkbServiceId) loadDkbDatastores(currentDkbServiceId);
       }
       // 'snapshot_complete' is informational; no action needed.
     };

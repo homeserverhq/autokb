@@ -1549,6 +1549,10 @@ def api_dkb_delete_datastore(datastore_id: str):
     db.delete_datastore_datafiles_for_datastore(datastore_id)
     db.delete_datastore_subscriptions_for_datastore(datastore_id)
     db.delete_datastore_row(datastore_id)
+    _schedule_sse_broadcast({
+        "type": "datastore_deleted",
+        "data": {"datastore_id": datastore_id, "service_id": ds.service_id},
+    })
     return {"deleted": True}
 
 

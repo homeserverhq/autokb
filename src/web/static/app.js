@@ -117,6 +117,7 @@
   let currentView = 'dashboard';
   let currentPluginId = null;
   let currentDkbServiceId = null;
+  let currentDkbService = null;
   let subscriptionsCache = {};
   let sseSource = null;
 
@@ -1235,6 +1236,7 @@
     try {
       const services = await api('/dkb_services');
       const svc = services.find(s => s.service_id === serviceId);
+      currentDkbService = svc || null;
       if (svc) {
         $('dkb-service-title').textContent = svc.name;
         const iconEl = $('dkb-service-icon');
@@ -1245,8 +1247,32 @@
       renderDkbDatastores(datastores);
       $('dkb-create-datastore-btn').onclick = () => openDkbForm(serviceId, null);
       $('dkb-edit-service-btn').onclick = () => { /* stub */ };
-      $('dkb-delete-service-btn').onclick = () => { /* stub */ };
+      $('dkb-delete-service-btn').onclick = () => confirmDeleteDkbService();
+      updateDeleteDkbServiceBtnState(datastores);
     } catch (e) { console.error(e); }
+  }
+
+  function updateDeleteDkbServiceBtnState(datastores) {
+    const btn = $('dkb-delete-service-btn');
+    if (!btn) return;
+    const list = datastores || [];
+    const empty = list.length === 0;
+    btn.disabled = !empty;
+    btn.title = empty
+      ? 'Delete this DKB service and its file from disk'
+      : 'Cannot delete a DKB service with attached datastores. Delete them first.';
+  }
+
+  async function confirmDeleteDkbService() {
+    if (!currentDkbService) return;
+    const name = currentDkbService.name;
+    if (!confirm(`Are you sure you want to delete the DKB service '${name}'?\n\nThe service file will be removed from disk. This action cannot be undone.`)) return;
+    try {
+      await api(`/dkb_services/${currentDkbService.service_id}`, { method: 'DELETE' });
+      currentDkbService = null;
+      location.hash = '#/remote-dkbs';
+      await loadDkbServices();
+    } catch (e) { alert('Delete DKB service failed: ' + e.message); }
   }
 
   function renderDkbDatastores(datastores) {

@@ -684,6 +684,31 @@ def _sync_test_plugins() -> None:
     _log(f"Synced {synced} test plugins from {src_dir} → {dst_dir}")
 
 
+def _sync_test_dkbs() -> None:
+    """Copy every DKB service file from the testing source directory into
+    /src/dkbservices/. Mirrors ``_sync_test_plugins`` — the Manager's file
+    watcher hot-swaps it in (reload + upsert the ``dkb_service`` row) and the
+    Worker lazy-loads it via ``get_or_load`` during recon.
+    """
+    src_dir = os.path.join(os.path.dirname(__file__), "dkbservices")
+    dst_dir = "/src/dkbservices"
+    if not os.path.isdir(src_dir):
+        _log(f"Warning: test DKB source directory {src_dir} does not exist; skipping sync")
+        return
+    synced = 0
+    for fname in sorted(os.listdir(src_dir)):
+        if not fname.endswith(".py") or fname.startswith("__"):
+            continue
+        src_path = os.path.join(src_dir, fname)
+        dst_path = os.path.join(dst_dir, fname)
+        try:
+            shutil.copy(src_path, dst_path)
+            synced += 1
+        except OSError as exc:
+            _log(f"Warning: failed to sync {fname}: {exc}")
+    _log(f"Synced {synced} test DKB services from {src_dir} → {dst_dir}")
+
+
 def _wait_for_plugin_loaded(plugin_id: str, timeout: float = 20.0) -> bool:
     """Poll the /api/plugins endpoint until plugin_id is listed as loaded."""
     deadline = time.time() + timeout
@@ -2275,6 +2300,32 @@ def _cleanup_test_plugins() -> None:
     except Exception as exc:  # noqa: BLE001
         _log(f"warning: plugin deregistration sweep failed: {exc}")
 
+    # Deregister test DKB services via API (mirrors the plugin path).
+    # testDKB has zero datastores after the e2e tests, so the delete is
+    # allowed and removes the file + the dkb_service row.
+    try:
+        svcs = api_get("/api/dkb_services")
+        for svc in svcs:
+            if svc.get("name") == "testDKB":
+                try:
+                    requests.delete(
+                        f"{MANAGER_URL}/api/dkb_services/{svc['service_id']}",
+                        headers=_api_headers(), timeout=10,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"warning: failed to deregister DKB service testDKB: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"warning: DKB service deregistration sweep failed: {exc}")
+
+    # Fallback: remove the test DKB file directly if it is still present
+    dkb_path = "/src/dkbservices/testDKB_DKB.py"
+    try:
+        if os.path.isfile(dkb_path):
+            os.remove(dkb_path)
+            _log(f"Removed leftover {dkb_path}")
+    except Exception as exc:  # noqa: BLE001
+        _log(f"warning: failed to remove {dkb_path}: {exc}")
+
 
 def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
     """Scan DB + filesystem for leftover test artifacts. Any found = FAIL + clean.
@@ -2285,7 +2336,7 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
     try:
         with db2.get_session() as s:
             # 1. DKB tables (existing checks)
-            svc_names = ("TestService", "MyService", "Svc")
+            svc_names = ("TestService", "MyService", "Svc", "testDKB")
             ds_names = ("TestDS", "MyDS", "MyDS-Updated", "DS")
             leaked_svcs = s.query(DKBService).filter(
                 DKBService.name.in_(svc_names)).all()
@@ -2293,7 +2344,8 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
                 leaked.append(f"DKBService(id={svc.id[:8]}, name={svc.name!r})")
             svc_ids = [svc.id for svc in leaked_svcs]
             leaked_dss = s.query(DKBDatastore).filter(
-                DKBDatastore.name.in_(ds_names)).all()
+                DKBDatastore.name.in_(ds_names) |
+                (DKBDatastore.service_id.in_(svc_ids))).all()
             for ds in leaked_dss:
                 leaked.append(f"DKBDatastore(id={ds.id[:8]}, name={ds.name!r})")
             ds_ids = [ds.id for ds in leaked_dss]
@@ -2384,6 +2436,16 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
                     leaked.append(f"/src/plugins/{fname}")
                     os.remove(fpath)
 
+    # 7. Filesystem: /src/dkbservices test DKB files (should be gone after cleanup)
+    dkbs_dir = "/src/dkbservices"
+    if os.path.isdir(dkbs_dir):
+        for fname in sorted(os.listdir(dkbs_dir)):
+            if fname == "testDKB_DKB.py":
+                fpath = os.path.join(dkbs_dir, fname)
+                if os.path.isfile(fpath):
+                    leaked.append(f"/src/dkbservices/{fname}")
+                    os.remove(fpath)
+
     if leaked:
         _log(f"\n[LEAK] Found {len(leaked)} leftover test artifact(s):")
         for l in leaked:
@@ -2445,6 +2507,28 @@ def main() -> int:
     # Sync test plugins from src/testing/plugins/ to /src/plugins/
     # before verifying the registry or cleaning up state.
     _sync_test_plugins()
+
+    # Sync test DKB services (e.g. testDKB) from src/testing/dkbservices/
+    # to /src/dkbservices/. The Manager's file watcher hot-swaps them in.
+    _sync_test_dkbs()
+
+    # Wait for the Manager to hot-swap testDKB in and upsert its row.
+    _log("Waiting for testDKB to appear in /api/dkb_services...")
+    dkb_deadline = time.time() + 60
+    test_dkb_ready = False
+    while time.time() < dkb_deadline:
+        try:
+            svcs = api_get("/api/dkb_services")
+            if any(s.get("name") == "testDKB" for s in svcs):
+                test_dkb_ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(2.0)
+    if not test_dkb_ready:
+        _log("TIMEOUT waiting for testDKB service to hot-swap in")
+        return 3
+    _log("testDKB service hot-swapped in OK")
 
     # Wait for the file watcher to detect the synced plugins and reload
     # the registry. Without this, the registry may still only contain

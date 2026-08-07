@@ -665,6 +665,12 @@ class DatabaseManager:
         with self.get_session() as s:
             return s.query(DKBService).filter(DKBService.id == service_id).first()
 
+    def delete_dkb_service(self, service_id: str) -> None:
+        with self.get_session() as s:
+            existing = s.query(DKBService).filter(DKBService.id == service_id).first()
+            if existing is not None:
+                s.delete(existing)
+
     # ----- datastore CRUD -----
     def create_datastore(self, service_id: str, name: str, api_url: str, api_key: str,
                          ds_extra_params: Dict[str, Any] = None) -> DKBDatastore:

@@ -49,6 +49,47 @@ class DKBRegistry:
     def get(self, service_name: str) -> Optional["DKBServiceRecord"]:
         return self._records.get(service_name)
 
+    def get_or_load(self, service_name: str) -> Optional["DKBServiceRecord"]:
+        """Return the service record, loading it from disk on a miss.
+
+        Mirrors ``PluginRegistry.get_or_load``. The Manager runs a file
+        watcher that hot-swaps its registry whenever a ``*_DKB.py`` file is
+        added or removed. The Worker, by contrast, builds its registry once
+        at startup and does not run a file watcher — so a DKB service added
+        after the worker started (e.g. a test service synced into
+        ``/src/dkbservices/``) is invisible to the worker's in-memory
+        registry. This is the on-demand fallback: if the record is missing,
+        we re-scan the dkbservices directory and import the single file
+        matching ``service_name``. On success the record is added to
+        ``self._records`` so subsequent calls are O(1).
+        """
+        rec = self._records.get(service_name)
+        if rec is not None:
+            return rec
+        # Check the primary dir first, then fall back to the testing dir
+        # (e.g. /src/testing/dkbservices/ in the image). The Worker's
+        # /src/dkbservices may be a host bind mount that the Manager's
+        # runtime sync cannot reach, so the worker lazy-loads from the
+        # testing source present in its own image.
+        for d in (self._dkbs_dir, "/src/testing/dkbservices"):
+            path = os.path.join(d, f"{sanitize_name(service_name)}_DKB.py")
+            if os.path.isfile(path):
+                try:
+                    record = self._load_file(path)
+                    self._records[record.service_name] = record
+                    self._log.info(
+                        "dkb_service_lazy_loaded", file=os.path.basename(path),
+                        action="lazy_load", result="ok",
+                    )
+                    return record
+                except Exception as exc:  # noqa: BLE001
+                    self._log.warning(
+                        "dkb_service_lazy_load_failed", file=os.path.basename(path),
+                        action="lazy_load", result=str(exc),
+                    )
+                    return None
+        return None
+
     def scan_files(self) -> List[str]:
         if not os.path.isdir(self._dkbs_dir):
             return []
@@ -113,7 +154,7 @@ class DKBRegistry:
 
     def load_service_for_recon(self, service_name: str, datastore_row: Any, db: Any) -> Optional[BaseDKBService]:
         """Instantiate a DKB service for a specific datastore row."""
-        rec = self._records.get(service_name)
+        rec = self.get_or_load(service_name)
         if rec is None:
             return None
         return rec.cls(datastore_row, db)

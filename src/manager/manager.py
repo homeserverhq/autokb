@@ -464,42 +464,62 @@ async def _watchdog_loop() -> None:
 # File watcher — debounced hot-swap
 # ---------------------------------------------------------------------------
 async def _file_watcher() -> None:
-    plugins_dir = "/src/plugins"
+    """Debounced hot-swap watcher for plugins and DKB services.
+
+    Identical logic for both directories: track file mtimes, detect
+    add/modify/remove, debounce, then reload. Plugins rebuild the
+    ManagerPluginRegistry; DKB services rebuild the DKBRegistry and
+    upsert ``dkb_service`` rows for any newly added services.
+    """
+    targets = [("/src/plugins", "registry"), ("/src/dkbservices", "dkb_registry")]
     last_mtimes: Dict[str, float] = {}
     debounce_until: float = 0.0
     pending_change: Optional[str] = None
     while True:
         try:
             await asyncio.sleep(1.0)
-            try:
-                entries = os.listdir(plugins_dir)
-            except FileNotFoundError:
-                continue
             changed = False
-            for fname in entries:
-                if not fname.endswith(".py") or fname.startswith("."):
-                    continue
-                path = os.path.join(plugins_dir, fname)
+            for dir_path, state_key in targets:
                 try:
-                    mtime = os.path.getmtime(path)
+                    entries = os.listdir(dir_path)
                 except FileNotFoundError:
                     continue
-                prev = last_mtimes.get(fname)
-                if prev is None or mtime > prev:
-                    last_mtimes[fname] = mtime
-                    changed = True
-                    pending_change = fname
-            for fname in list(last_mtimes.keys()):
-                if fname not in entries:
-                    last_mtimes.pop(fname, None)
-                    changed = True
-                    pending_change = fname
+                for fname in entries:
+                    if not fname.endswith(".py") or fname.startswith("."):
+                        continue
+                    path = os.path.join(dir_path, fname)
+                    key = f"{dir_path}/{fname}"
+                    try:
+                        mtime = os.path.getmtime(path)
+                    except FileNotFoundError:
+                        continue
+                    prev = last_mtimes.get(key)
+                    if prev is None or mtime > prev:
+                        last_mtimes[key] = mtime
+                        changed = True
+                        pending_change = fname
+                for key in list(last_mtimes.keys()):
+                    if key.startswith(f"{dir_path}/") and os.path.basename(key) not in entries:
+                        last_mtimes.pop(key, None)
+                        changed = True
+                        pending_change = os.path.basename(key)
             if changed:
                 debounce_until = time.time() + DEBOUNCE_SECONDS
             if pending_change and time.time() >= debounce_until:
                 LOG.debug("file_change_detected", action="file_watcher", result=pending_change)
-                reg: ManagerPluginRegistry = STATE["registry"]
-                reg.reload()
+                for dir_path, state_key in targets:
+                    reg = STATE[state_key]
+                    if state_key == "dkb_registry":
+                        reg.reload_all()
+                        for rec in reg.list_records():
+                            try:
+                                STATE["db"].upsert_dkb_service(
+                                    rec.service_name, rec.metadata.get("description", ""))
+                            except Exception as exc:  # noqa: BLE001
+                                LOG.warning("dkb_service_upsert_failed",
+                                            action="file_watcher", service=rec.service_name, error=str(exc))
+                    else:
+                        reg.reload()
                 pending_change = None
                 debounce_until = 0.0
         except asyncio.CancelledError:
@@ -1338,6 +1358,44 @@ def api_dkb_services():
             "datastore_count": len(datastores),
         })
     return result
+
+
+@app.delete("/api/dkb_services/{service_id}")
+def api_delete_dkb_service(service_id: str):
+    """Delete a DKB service. Mirrors ``api_delete_plugin``: only allowed
+    when the service has zero attached datastores. Removes the file, the
+    in-memory record, and the DB row."""
+    db: DatabaseManager = STATE["db"]
+    dkb_reg: DKBRegistry = STATE.get("dkb_registry")
+    svc = db.get_dkb_service(service_id)
+    if svc is None:
+        raise HTTPException(status_code=404, detail="DKB service not found")
+    datastores = db.list_datastores(service_id=service_id)
+    if datastores:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete DKB service with {len(datastores)} attached datastore(s)",
+        )
+    # Delete the file, the in-memory record, and the DB row
+    if dkb_reg is not None:
+        rec = dkb_reg.get(svc.name)
+        if rec is not None:
+            try:
+                os.remove(rec.file_path)
+            except FileNotFoundError:
+                pass
+    try:
+        db.delete_dkb_service(service_id)
+    except Exception:
+        pass
+    if dkb_reg is not None:
+        dkb_reg.records.pop(svc.name, None)
+    # Remove output directory
+    import shutil
+    out_dir = f"/output/{svc.name}"
+    if os.path.isdir(out_dir):
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return {"ok": True}
 
 
 @app.get("/api/dkb_services/{service_id}/datastores")

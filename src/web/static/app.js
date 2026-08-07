@@ -770,6 +770,12 @@
     $('form-modal').style.display = 'flex';
   }
 
+  function humanizeKey(key) {
+    return key.split('_').filter(Boolean)
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ');
+  }
+
   async function buildForm(plugin, sub) {
     const fields = $('form-fields');
     fields.innerHTML = '';
@@ -933,7 +939,7 @@
         input = `<input type="${inputType}" name="${key}" value="${escapeHtml(resolvedValue ?? '')}" ${isPassword ? 'autocomplete="new-password"' : ''} />`;
       }
       div.innerHTML = `
-        <label>${key}${isRequired ? ' *' : ''} ${isPassword ? '<small>(password)</small>' : ''}</label>
+        <label>${humanizeKey(key)}${isRequired ? ' *' : ''} ${isPassword ? '<small>(password)</small>' : ''}</label>
         ${input}
       `;
       fields.appendChild(div);
@@ -946,7 +952,7 @@
       const div = document.createElement('div');
       div.className = 'form-field';
       div.innerHTML = `
-        <label>${key}</label>
+        <label>${humanizeKey(key)}</label>
         <input type="text" name="${key}" value="${escapeHtml(sub?.config?.[key] || '')}" />
       `;
       extraDiv.appendChild(div);

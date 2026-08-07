@@ -25,7 +25,7 @@ class imapFolderWatchPlugin(BaseSubscription):
         "name": "imapFolderWatchPlugin",
         "display_name": "IMAP Folder Watch",
         "icon": "imapFolderWatchPlugin.png",
-        "description": "Watches an email IMAP folder via IDLE; chunks new mail as markdown. When monitoring subfolders, a shorter cron interval (e.g. every 5 minutes) is recommended.",
+        "description": "Watches an email IMAP folder via IDLE; optionally chunks new mail as markdown. When monitoring subfolders, a shorter cron interval (e.g. every 5 minutes) is recommended.",
         "sub_type": "EVENT_BASED",
         "monitor_timeout": 1500,
     }
@@ -40,6 +40,7 @@ class imapFolderWatchPlugin(BaseSubscription):
         self._password = ""
         self._folder = "INBOX"
         self._monitor_subfolders = True
+        self._chunking_enabled = True
         self._sep = "/"
 
     def get_schema(self):
@@ -57,6 +58,11 @@ class imapFolderWatchPlugin(BaseSubscription):
                     "default": True,
                     "description": "Monitor SubFolders?",
                 },
+                "chunking_enabled": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Chunk emails by token budget (~490 tokens per file). Disable to write the full email as a single document.",
+                },
             },
             "required": ["host", "user", "password", "folder"],
         }
@@ -69,6 +75,7 @@ class imapFolderWatchPlugin(BaseSubscription):
         self._password = config["password"]
         self._folder = config.get("folder", "INBOX")
         self._monitor_subfolders = bool(config.get("monitor_subfolders", True))
+        self._chunking_enabled = bool(config.get("chunking_enabled", True))
 
     async def monitor(self, config, cancel_token):
         self._apply_config(config)
@@ -281,6 +288,25 @@ class imapFolderWatchPlugin(BaseSubscription):
 
         folder_line = folder.replace(self._sep, ".")
         safe_folder = re.sub(r"[^a-zA-Z0-9]", "-", folder)
+
+        if not self._chunking_enabled:
+            header = (
+                f"Folder: {folder_line}\n"
+                f"Subject: {subject}\n"
+                f"Date: {date_iso}\n"
+                f"From: {from_addr}\n"
+                f"Chunk: 1 of 1\n"
+                f"Body: "
+            )
+            tmp = f"/tmp/{safe_folder}.{uid}.1.txt"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(header)
+                if body_text:
+                    f.write(body_text)
+                f.write("\n")
+            self.move_to_destination(tmp)
+            return
+
         enc = tiktoken.get_encoding("cl100k_base")
         header_prefix = (
             f"Folder: {folder_line}\n"

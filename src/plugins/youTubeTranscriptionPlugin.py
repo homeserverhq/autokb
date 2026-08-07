@@ -422,7 +422,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
         "icon": "youTubeTranscriptionPlugin.png",
         "description": (
             "Downloads transcripts for all videos in a YouTube channel and "
-            "applies chunking with natural break points. Set cron to daily "
+            "optionally applies chunking with natural break points. Set cron to daily "
             "(0 0 * * *) to pick up new uploads. Due to very active measures by YouTube, this plugin may experience rate-limiting, and transcriptions might be skipped."
         ),
         "sub_type": "SCHEDULED",
@@ -462,6 +462,11 @@ class youTubeTranscriptionPlugin(BaseSubscription):
                     "description": (
                         "Max recent videos to process (0 = all videos)."
                     ),
+                },
+                "chunking_enabled": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Chunk transcripts by token budget (~490 tokens per file). Disable to write each video's full transcript as a single document.",
                 },
             },
             "required": ["channel_id"],
@@ -574,7 +579,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
             self.log.debug("transcript_fetched", video_id=video_id, source="ytdlp_fallback", snippets=len(snippets))
             return snippets
 
-    def chunk_video(self, video_id, meta, enc, language="en", progress_callback=None, heartbeat_pct=0):
+    def chunk_video(self, video_id, meta, enc, language="en", progress_callback=None, heartbeat_pct=0, chunking_enabled=True):
         """Full chunking pipeline for a single video.
 
         1. Fetch transcript
@@ -582,11 +587,39 @@ class youTubeTranscriptionPlugin(BaseSubscription):
         3. Token-based split with langchain
         4. Invariant enforcement
 
+        When ``chunking_enabled`` is False, the entire transcript is written
+        as a single document (no size-based splitting).
+
         Returns list of chunk dicts with 'filename', 'content', 'tokens'.
         """
         snippets = self.fetch_transcript(video_id, language=language, progress_callback=progress_callback, heartbeat_pct=heartbeat_pct)
         if not snippets:
             return []
+
+        if not chunking_enabled:
+            texts = []
+            total_end = 0.0
+            for snippet in snippets:
+                start = snippet.start if hasattr(snippet, "start") else snippet["start"]
+                duration = snippet.duration if hasattr(snippet, "duration") else snippet["duration"]
+                text = snippet.text if hasattr(snippet, "text") else snippet["text"]
+                texts.append(text)
+                total_end = max(total_end, start + duration)
+            full_text = " ".join(texts).strip()
+            single_chunk = {
+                "text": full_text,
+                "start": 0,
+                "end": total_end,
+                "tokens": len(enc.encode(full_text)),
+            }
+            content = build_chunk_content(video_id, meta, single_chunk)
+            return [
+                {
+                    "filename": f"{video_id}-000.txt",
+                    "content": content,
+                    "tokens": len(enc.encode(full_text)) + compute_metadata_overhead(video_id, meta, single_chunk, enc),
+                }
+            ]
 
         segments = split_by_duration(snippets, max_duration=MAX_DURATION_SECONDS)
         self.log.debug("split_done", video_id=video_id, segments=len(segments))
@@ -637,6 +670,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
         language = config.get("language", "en").strip() or "en"
         api_key = config.get("api_key", "").strip() or None
         max_videos = int(config.get("max_videos", 0))
+        chunking_enabled = bool(config.get("chunking_enabled", True))
 
         if not channel_input:
             raise ValueError("channel_id is required")
@@ -709,7 +743,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
 
             try:
                 t_video = time.time()
-                chunks = self.chunk_video(vid_id, meta, enc, language=language, progress_callback=progress_callback, heartbeat_pct=current_progress)
+                chunks = self.chunk_video(vid_id, meta, enc, language=language, progress_callback=progress_callback, heartbeat_pct=current_progress, chunking_enabled=chunking_enabled)
             except (NoTranscriptFound, TranscriptsDisabled) as e:
                 self.log.warning("video_skipped_no_transcript", video_id=vid_id, title=vid_title, error=f"{type(e).__name__}: {e}")
                 skipped += 1

@@ -1111,14 +1111,15 @@ def _find_plugin_class_in_module(module: Any) -> Optional[Type[Any]]:
     return found
 
 
-def _set_metadata_icon_in_source(code: str, icon_filename: str) -> str:
-    """Update the metadata["icon"] value in plugin source code.
+def _set_metadata_icon_in_source(code: str, icon_filename: str,
+                                 base_class_marker: str = "BaseSubscription") -> str:
+    """Update the metadata["icon"] value in plugin/DKB source code.
 
     Returns the modified source string. The rewrite is a precise text
     splice over the value's source range, so surrounding whitespace,
-    comments, and unrelated code are preserved. If the BaseSubscription
-    subclass, the metadata dict, the "icon" key, or a writable value
-    position cannot be located, the source is returned unchanged.
+    comments, and unrelated code are preserved. If the subclass, the
+    metadata dict, the "icon" key, or a writable value position cannot be
+    located, the source is returned unchanged.
     """
     import ast
     new_value_repr = f'"{icon_filename}"'
@@ -1131,7 +1132,7 @@ def _set_metadata_icon_in_source(code: str, icon_filename: str) -> str:
         if isinstance(node, ast.ClassDef):
             for base in node.bases:
                 bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
-                if "BaseSubscription" in bn:
+                if base_class_marker in bn:
                     target_class = node
                     break
         if target_class is not None:
@@ -1247,6 +1248,122 @@ def _validate_plugin_code(code: str, plugin_name: str) -> Dict[str, Any]:
     return {"ok": True, "plugin_id": sanitized}
 
 
+_DKB_ABSTRACT_METHODS = [
+    "add_datafile",
+    "update_datafile",
+    "remove_datafile",
+    "add_datastore",
+    "remove_datastore",
+    "clear_datastore",
+]
+
+
+def _find_dkb_class_in_module(module: Any) -> Optional[Type[Any]]:
+    """Return the single BaseDKBService subclass defined in ``module``."""
+    from utils.dkb_service_base import BaseDKBService
+    import inspect as _inspect
+    found = None
+    for _, obj in _inspect.getmembers(module, _inspect.isclass):
+        if obj is BaseDKBService:
+            continue
+        if issubclass(obj, BaseDKBService) and obj.__module__ == module.__name__:
+            found = obj
+            break
+    return found
+
+
+def _validate_dkb_code(code: str, service_name: str) -> Dict[str, Any]:
+    """Run a static validation pass against DKB service code.
+
+    Mirrors ``_validate_plugin_code`` but for ``BaseDKBService`` subclasses:
+    the class must define the ``metadata`` dict (with a ``name`` key) and
+    implement all six abstract remote-operation methods. The service name
+    must already be sanitized (it becomes the ``*_DKB.py`` file stem).
+    """
+    try:
+        sanitized = sanitize_name(service_name)
+    except ValueError as exc:
+        return {"ok": False, "error": f"Invalid DKB service name: {exc}"}
+    if sanitized != service_name:
+        return {"ok": False, "error": f"DKB service name must already be sanitized; got {service_name!r}"}
+
+    import ast
+    try:
+        tree = ast.parse(code, filename=f"{service_name}_DKB.py")
+    except SyntaxError as exc:
+        return {"ok": False, "error": f"Syntax error: {exc}"}
+
+    found_class = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
+                if "BaseDKBService" in bn:
+                    found_class = node
+                    break
+        if found_class:
+            break
+    if found_class is None:
+        return {"ok": False, "error": "No class inheriting from BaseDKBService found"}
+
+    for method in _DKB_ABSTRACT_METHODS:
+        has_method = any(
+            isinstance(n, ast.FunctionDef) and n.name == method for n in ast.walk(found_class)
+        )
+        if not has_method:
+            return {"ok": False, "error": f"Missing {method}() method"}
+
+    has_metadata = any(
+        isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "metadata" for t in n.targets
+        )
+        for n in found_class.body
+    )
+    if not has_metadata:
+        return {"ok": False, "error": "Missing class-level 'metadata' attribute"}
+
+    # The registry requires sanitize_name(metadata["name"]) == file stem,
+    # so the code's metadata name must sanitize to the provided name.
+    meta_name = None
+    for node in found_class.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "metadata" for t in node.targets
+        ):
+            if isinstance(node.value, ast.Dict):
+                for i, key in enumerate(node.value.keys):
+                    if key is None:
+                        continue
+                    key_str = None
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                        key_str = key.value
+                    elif hasattr(ast, "unparse"):
+                        try:
+                            key_str = ast.unparse(key)
+                        except Exception:
+                            pass
+                    if key_str == "name":
+                        val = node.value.values[i]
+                        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                            meta_name = val.value
+                        break
+            break
+    if not meta_name:
+        return {"ok": False, "error": "Missing metadata['name'] string in DKB service class"}
+    try:
+        if sanitize_name(meta_name) != sanitized:
+            return {
+                "ok": False,
+                "error": (
+                    f"metadata['name'] ({meta_name!r}) must sanitize to the service name "
+                    f"{sanitized!r}"
+                ),
+            }
+    except ValueError:
+        return {"ok": False, "error": f"metadata['name'] {meta_name!r} is not a valid name"}
+
+    return {"ok": True, "service_name": sanitized}
+
+
 # ---------------------------------------------------------------------------
 # Plugin management
 # ---------------------------------------------------------------------------
@@ -1331,6 +1448,121 @@ async def _sse_generator_with_queue(client_queue: asyncio.Queue):
             last_keepalive = time.time()
     except asyncio.CancelledError:
         return
+
+
+# ---------------------------------------------------------------------------
+# DKB Dev Lab endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/dkb_dev_lab/validate")
+def api_dkb_dev_lab_validate(body: Dict[str, Any] = Body(...)):
+    code = body.get("code", "")
+    service_name = body.get("name", "")
+    if not service_name:
+        raise HTTPException(status_code=400, detail="DKB service name is required")
+    if len(service_name) > MAX_PLUGIN_NAME_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"DKB service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
+        )
+    return _validate_dkb_code(code, service_name)
+
+
+@app.get("/api/dkb_dev_lab/load/{service_name}")
+def api_dkb_dev_lab_load(service_name: str):
+    """Return the on-disk source code of an existing DKB service for the
+    Edit DKB flow. Mirrors ``api_dev_lab_load`` for plugins."""
+    dkb_reg: DKBRegistry = STATE.get("dkb_registry")
+    rec = dkb_reg.get(service_name) if dkb_reg is not None else None
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"DKB service {service_name!r} not found")
+    try:
+        with open(rec.file_path, "r", encoding="utf-8") as f:
+            code = f.read()
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"DKB service source file not found: {rec.file_path}",
+        )
+    return {"ok": True, "name": rec.service_name, "code": code}
+
+
+@app.post("/api/dkb_dev_lab/save")
+def api_dkb_dev_lab_save(body: Dict[str, Any] = Body(...)):
+    code = body.get("code", "")
+    service_name = body.get("name", "")
+    icon_b64 = body.get("icon_base64")
+    if not service_name:
+        raise HTTPException(status_code=400, detail="DKB service name is required")
+    if len(service_name) > MAX_PLUGIN_NAME_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"DKB service name too long: {len(service_name)} chars (max {MAX_PLUGIN_NAME_LEN})",
+        )
+    result = _validate_dkb_code(code, service_name)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Validation failed"))
+    sanitized = result["service_name"]
+    if icon_b64:
+        code = _set_metadata_icon_in_source(code, f"{sanitized}.png", base_class_marker="BaseDKBService")
+    target_path = f"/src/dkbservices/{sanitized}_DKB.py"
+    tmp_path = f"/tmp/.{sanitized}_DKB.py.tmp"
+    with open(tmp_path, "w") as f:
+        f.write(code)
+    # Final import sanity check.
+    try:
+        import importlib.util
+        import sys as _sys
+        if "/src" not in _sys.path:
+            _sys.path.insert(0, "/src")
+        from importlib.machinery import SourceFileLoader
+        loader = SourceFileLoader(f"_dkb_dev_{sanitized}", tmp_path)
+        spec = importlib.util.spec_from_loader(f"_dkb_dev_{sanitized}", loader)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"Could not build spec for {tmp_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        new_cls = _find_dkb_class_in_module(module)
+        if new_cls is None:
+            raise ValueError("No BaseDKBService subclass found in saved code")
+        if getattr(new_cls, "__abstractmethods__", None):
+            raise ValueError(f"DKB service class {new_cls.__name__} is abstract; implement all abstract methods")
+    except Exception as exc:  # noqa: BLE001
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+        import traceback as _tb
+        raise HTTPException(
+            status_code=400,
+            detail=f"Validation failed: {type(exc).__name__}: {exc} | {_tb.format_exc()[-500:]}",
+        )
+
+    mode = "edit" if os.path.isfile(target_path) else "create"
+
+    # Atomic move — os.replace fails with EXDEV if /tmp and the target dir
+    # are on different filesystems, so fall back to a copy+remove.
+    import shutil
+    try:
+        os.replace(tmp_path, target_path)
+    except OSError:
+        shutil.copyfile(tmp_path, target_path)
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+
+    # Save icon if provided
+    if icon_b64:
+        import base64
+        try:
+            icon_bytes = base64.b64decode(icon_b64)
+            icon_path = f"/assets/{sanitized}.png"
+            with open(icon_path, "wb") as f:
+                f.write(icon_bytes)
+        except Exception:
+            pass
+    return {"ok": True, "path": target_path, "mode": mode, "service_name": sanitized}
 
 
 # ---------------------------------------------------------------------------

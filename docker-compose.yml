@@ -30,6 +30,7 @@ services:
       - v-autokb-output:/output
       - v-autokb-assets:/assets
       - v-autokb-plugins:/src/plugins
+      - v-autokb-dkbservices:/src/dkbservices
       - v-autokb-logs:/logs
 
   autokb-worker:

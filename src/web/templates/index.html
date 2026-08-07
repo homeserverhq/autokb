@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoKB</title>
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=43" />
+  <link rel="stylesheet" href="/static/styles.css?v=44" />
 </head>
 <body>
   <!-- Login page -->
@@ -181,28 +181,73 @@
           <div class="event-detail" id="event-detail-body"></div>
         </section>
         <section id="view-devlab" class="view" style="display: none;">
-          <h2>Developer Lab</h2>
-          <p class="sub-row-meta">See the Plugin Development Guide below. Use it as a skill for your AI agent to build a plugin.</p>
-          <div id="devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
-          <div class="devlab-form">
-            <label>Plugin Name</label>
-            <input type="text" id="devlab-name" placeholder="myPlugin" maxlength="32" />
-            <label>Plugin Code</label>
-            <textarea id="devlab-code" rows="20" placeholder="Paste your plugin code here..."></textarea>
-            <label>Icon (optional, .png, max 512x512)</label>
-            <input type="file" id="devlab-icon" accept="image/png" />
-            <div class="devlab-buttons">
-              <button class="btn btn-primary" id="devlab-test-btn">Test</button>
-              <button class="btn btn-primary" id="devlab-save-btn">Save</button>
+          <div id="devlab-landing">
+            <h2>Developer Lab</h2>
+            <div class="plugin-grid">
+              <div class="plugin-card" id="devlab-tile-plugin">
+                <img src="/assets/plugin_developer.png" onerror="this.src='/assets/default_icon.png'" alt="" />
+                <div>
+                  <div class="plugin-name">Plugin Developer</div>
+                  <small>Build and manage drop-in plugins for Data Sources.</small>
+                </div>
+              </div>
+              <div class="plugin-card" id="devlab-tile-dkb">
+                <img src="/assets/remote_dkb_developer.png" onerror="this.src='/assets/default_icon.png'" alt="" />
+                <div>
+                  <div class="plugin-name">Remote DKB Developer</div>
+                  <small>Build and manage Remote DKB service drop-ins.</small>
+                </div>
+              </div>
             </div>
-            <div id="devlab-result" class="devlab-result"></div>
           </div>
-          <hr />
-          <div class="devlab-guide">
-            <div class="devlab-guide-header">
-              <button class="btn btn-secondary" id="devlab-guide-copy">Copy</button>
+          <div id="devlab-plugin-panel" style="display: none;">
+            <div class="sub-header">
+              <button class="btn btn-secondary" id="devlab-back">&larr; Back</button>
+              <h2>Plugin Developer</h2>
             </div>
-            <div id="devlab-guide-content" class="devlab-guide-content"></div>
+            <p class="sub-row-meta">See the Plugin Development Guide below. Use it as a skill for your AI agent to build a plugin.</p>
+            <div id="devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
+            <div class="devlab-form">
+              <label>Plugin Name</label>
+              <input type="text" id="devlab-name" placeholder="myPlugin" maxlength="32" />
+              <label>Plugin Code</label>
+              <textarea id="devlab-code" rows="20" placeholder="Paste your plugin code here..."></textarea>
+              <label>Icon (optional, .png, max 512x512)</label>
+              <input type="file" id="devlab-icon" accept="image/png" />
+              <div class="devlab-buttons">
+                <button class="btn btn-primary" id="devlab-test-btn">Test</button>
+                <button class="btn btn-primary" id="devlab-save-btn">Save</button>
+              </div>
+              <div id="devlab-result" class="devlab-result"></div>
+            </div>
+            <hr />
+            <div class="devlab-guide">
+              <div class="devlab-guide-header">
+                <button class="btn btn-secondary" id="devlab-guide-copy">Copy</button>
+              </div>
+              <div id="devlab-guide-content" class="devlab-guide-content"></div>
+            </div>
+          </div>
+          <div id="devlab-dkb-panel" style="display: none;">
+            <div class="sub-header">
+              <button class="btn btn-secondary" id="dkb-devlab-back">&larr; Back</button>
+              <h2>Remote DKB Developer</h2>
+            </div>
+            <p class="sub-row-meta">Paste a Remote DKB service class that subclasses <code>BaseDKBService</code>. See the existing services in Remote DKBs for reference.</p>
+            <div id="dkb-devlab-edit-banner" class="devlab-edit-banner" style="display: none;"></div>
+            <div class="devlab-form">
+              <label>DKB Service Name</label>
+              <input type="text" id="dkb-devlab-name" placeholder="myDKB" maxlength="32" />
+              <label>DKB Service Code</label>
+              <textarea id="dkb-devlab-code" rows="20" placeholder="Paste your DKB service code here..."></textarea>
+              <label>Icon (optional, .png, max 512x512)</label>
+              <input type="file" id="dkb-devlab-icon" accept="image/png" />
+              <div class="devlab-buttons">
+                <button class="btn btn-primary" id="dkb-devlab-test-btn">Test</button>
+                <button class="btn btn-primary" id="dkb-devlab-save-btn">Save</button>
+              </div>
+              <div id="dkb-devlab-result" class="devlab-result"></div>
+            </div>
           </div>
         </section>
         <section id="view-remote-dkbs" class="view" style="display: none;">
@@ -218,7 +263,7 @@
             </div>
             <div class="header-actions">
               <button class="btn btn-primary" id="dkb-create-datastore-btn">+ Create New Datastore</button>
-              <button class="btn btn-warning" id="dkb-edit-service-btn" disabled>Edit DKB</button>
+              <button class="btn btn-warning" id="dkb-edit-service-btn">Edit DKB</button>
               <button class="btn btn-destructive" id="dkb-delete-service-btn" disabled>Delete DKB</button>
             </div>
           </div>
@@ -272,6 +317,6 @@
   </div>
 
   <script src="/static/marked.min.js"></script>
-  <script src="/static/app.js?v=43"></script>
+  <script src="/static/app.js?v=44"></script>
 </body>
 </html>

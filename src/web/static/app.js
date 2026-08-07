@@ -120,6 +120,7 @@
   let currentDkbService = null;
   let subscriptionsCache = {};
   let sseSource = null;
+  let devlabEditPluginId = null;
 
   function navigate(view, params = {}) {
     currentView = view;
@@ -160,15 +161,29 @@
     } else if (view === 'devlab') {
       showOnly('view-devlab');
       document.querySelectorAll('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.view === 'devlab'));
-      // Edit Plugin mode: #/devlab?edit={plugin_id} pre-populates the lab
-      // with the existing plugin's source code and locks the name field.
-      // See DesignSpecification §7.9.
-      if (params.edit) {
-        loadDevlabForEdit(params.edit);
+      // Developer Lab landing (#/devlab) shows two tiles: Plugin Developer
+      // (#/devlab/plugin) and Remote DKB Developer (#/devlab/dkb). Legacy
+      // #/devlab?edit={plugin_id} (from the Edit Plugin button) maps to the
+      // plugin lab in edit mode. See DesignSpecification §7.9.
+      const sub = params.sub || (params.edit ? 'plugin' : null);
+      if (sub === 'dkb') {
+        showDevlabPanel('dkb');
+        if (params.edit) {
+          loadDkbDevlabForEdit(params.edit);
+        } else {
+          resetDkbDevlabToCreateMode();
+        }
+      } else if (sub === 'plugin') {
+        showDevlabPanel('plugin');
+        if (params.edit) {
+          loadDevlabForEdit(params.edit);
+        } else {
+          resetDevlabToCreateMode();
+        }
+        loadPluginGuide();
       } else {
-        resetDevlabToCreateMode();
+        showDevlabLanding();
       }
-      loadPluginGuide();
     }
     // Dashboard has its own 30s health timer; clear it on any navigation
     // away from the dashboard so the timer doesn't fire while the user is
@@ -224,13 +239,27 @@
     } else if (view === 'remote-dkbs' || view === 'all-datastores') {
       // no params needed
     }
-    if (view === 'devlab' && restWithQuery[0]) {
-      // Strip leading '?' if present, then split key=value pairs
-      let qs = restWithQuery[0];
-      if (qs.startsWith('?')) qs = qs.slice(1);
-      for (const pair of qs.split('&')) {
-        const [k, v] = pair.split('=');
-        if (k && v) params[k] = decodeURIComponent(v);
+    if (view === 'devlab') {
+      // Sub-routes: #/devlab/plugin and #/devlab/dkb (optionally with a
+      // glued ?edit= query). Legacy #/devlab?edit={plugin_id} (from the
+      // Edit Plugin button) still parses as a plugin-lab edit.
+      let sub = null;
+      let qs = viewQuery;
+      if (rest[0]) {
+        const m = rest[0].match(/^(plugin|dkb)(\?.*)?$/);
+        if (m) {
+          sub = m[1];
+          qs = m[2] || rest[1] || null;
+        }
+      }
+      if (sub) params.sub = sub;
+      if (qs) {
+        let str = qs;
+        if (str.startsWith('?')) str = str.slice(1);
+        for (const pair of str.split('&')) {
+          const [k, v] = pair.split('=');
+          if (k && v) params[k] = decodeURIComponent(v);
+        }
       }
     }
     navigate(view, params);
@@ -1246,7 +1275,11 @@
       const datastores = await api(`/dkb_services/${serviceId}/datastores`);
       renderDkbDatastores(datastores);
       $('dkb-create-datastore-btn').onclick = () => openDkbForm(serviceId, null);
-      $('dkb-edit-service-btn').onclick = () => { /* stub */ };
+      $('dkb-edit-service-btn').onclick = () => {
+        if (currentDkbService && currentDkbService.name) {
+          location.hash = `#/devlab/dkb?edit=${encodeURIComponent(currentDkbService.name)}`;
+        }
+      };
       $('dkb-delete-service-btn').onclick = () => confirmDeleteDkbService();
       updateDeleteDkbServiceBtnState(datastores);
     } catch (e) { console.error(e); }
@@ -1522,6 +1555,23 @@
 
   // ---- Dev Lab ----
 
+  function showDevlabLanding() {
+    $('devlab-landing').style.display = 'block';
+    $('devlab-plugin-panel').style.display = 'none';
+    $('devlab-dkb-panel').style.display = 'none';
+  }
+
+  function showDevlabPanel(which) {
+    $('devlab-landing').style.display = 'none';
+    $('devlab-plugin-panel').style.display = (which === 'plugin') ? 'block' : 'none';
+    $('devlab-dkb-panel').style.display = (which === 'dkb') ? 'block' : 'none';
+  }
+
+  $('devlab-tile-plugin').addEventListener('click', () => { location.hash = '#/devlab/plugin'; });
+  $('devlab-tile-dkb').addEventListener('click', () => { location.hash = '#/devlab/dkb'; });
+  $('devlab-back').addEventListener('click', () => { location.hash = '#/devlab'; });
+  $('dkb-devlab-back').addEventListener('click', () => { location.hash = '#/devlab'; });
+
   // ---- Plugin Development Guide ----
   let _cachedGuideMd = null;
 
@@ -1604,6 +1654,103 @@
     $('devlab-result').className = 'devlab-result';
     $('devlab-result').textContent = '';
   }
+
+  // ---- Remote DKB Developer Lab ----
+
+  let dkbDevlabEditName = null;
+
+  async function loadDkbDevlabForEdit(serviceName) {
+    dkbDevlabEditName = serviceName;
+    const banner = $('dkb-devlab-edit-banner');
+    const nameInput = $('dkb-devlab-name');
+    const codeInput = $('dkb-devlab-code');
+    const iconInput = $('dkb-devlab-icon');
+    nameInput.value = serviceName;
+    nameInput.readOnly = true;
+    codeInput.value = 'Loading…';
+    iconInput.value = '';
+    banner.style.display = 'block';
+    banner.innerHTML = `<strong>Editing existing DKB service: ${escapeHtml(serviceName)}</strong> &mdash; the service name is locked; update the code and metadata below.`;
+    try {
+      const r = await api(`/dkb_dev_lab/load/${encodeURIComponent(serviceName)}`);
+      if (r.ok && r.code != null) {
+        codeInput.value = r.code;
+      } else {
+        codeInput.value = '';
+        $('dkb-devlab-result').className = 'devlab-result error';
+        $('dkb-devlab-result').textContent = '✗ Could not load DKB service source.';
+      }
+    } catch (e) {
+      codeInput.value = '';
+      $('dkb-devlab-result').className = 'devlab-result error';
+      $('dkb-devlab-result').textContent = '✗ ' + e.message;
+    }
+  }
+
+  function resetDkbDevlabToCreateMode() {
+    dkbDevlabEditName = null;
+    const banner = $('dkb-devlab-edit-banner');
+    banner.style.display = 'none';
+    banner.innerHTML = '';
+    const nameInput = $('dkb-devlab-name');
+    nameInput.readOnly = false;
+    nameInput.value = '';
+    $('dkb-devlab-code').value = '';
+    $('dkb-devlab-icon').value = '';
+    $('dkb-devlab-result').className = 'devlab-result';
+    $('dkb-devlab-result').textContent = '';
+  }
+
+  $('dkb-devlab-test-btn').addEventListener('click', async () => {
+    const name = $('dkb-devlab-name').value;
+    const code = $('dkb-devlab-code').value;
+    const result = $('dkb-devlab-result');
+    result.className = 'devlab-result';
+    result.textContent = 'Testing...';
+    try {
+      const r = await api('/dkb_dev_lab/validate', { method: 'POST', body: JSON.stringify({ name, code }) });
+      if (r.ok) {
+        result.classList.add('success');
+        result.textContent = '✓ Validation passed';
+      } else {
+        result.classList.add('error');
+        result.textContent = '✗ ' + r.error;
+      }
+    } catch (e) {
+      result.classList.add('error');
+      result.textContent = '✗ ' + e.message;
+    }
+  });
+
+  $('dkb-devlab-save-btn').addEventListener('click', async () => {
+    const name = $('dkb-devlab-name').value;
+    const code = $('dkb-devlab-code').value;
+    const iconFile = $('dkb-devlab-icon').files[0];
+    const result = $('dkb-devlab-result');
+    result.className = 'devlab-result';
+    result.textContent = 'Saving...';
+    let icon_b64 = null;
+    if (iconFile) {
+      icon_b64 = await new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = () => res(reader.result.split(',')[1]);
+        reader.onerror = rej;
+        reader.readAsDataURL(iconFile);
+      });
+    }
+    try {
+      const r = await api('/dkb_dev_lab/save', { method: 'POST', body: JSON.stringify({ name, code, icon_base64: icon_b64 }) });
+      result.classList.add('success');
+      if (r.mode === 'edit') {
+        result.textContent = '✓ DKB service updated. The new code will be picked up by the file watcher within seconds.';
+      } else {
+        result.textContent = '✓ Saved. DKB service will appear in Remote DKBs within seconds.';
+      }
+    } catch (e) {
+      result.classList.add('error');
+      result.textContent = '✗ ' + e.message;
+    }
+  });
 
   $('devlab-test-btn').addEventListener('click', async () => {
     const name = $('devlab-name').value;

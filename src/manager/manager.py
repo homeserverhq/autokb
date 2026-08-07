@@ -1346,15 +1346,22 @@ def api_dkb_services():
     for svc in services:
         datastores = db.list_datastores(service_id=svc.id)
         icon = ""
+        defaults = {"api_url": "", "has_api_key_default": False}
         if dkb_reg:
             rec = dkb_reg.get(svc.name)
             if rec:
                 icon = rec.icon
+                try:
+                    defaults = rec.cls.get_defaults()
+                except Exception:
+                    pass
         result.append({
             "service_id": svc.id,
             "name": svc.name,
             "description": svc.description or "",
             "icon": icon,
+            "default_api_url": defaults.get("api_url", ""),
+            "has_api_key_default": defaults.get("has_api_key_default", False),
             "datastore_count": len(datastores),
         })
     return result

@@ -1415,11 +1415,11 @@
     const services = await api('/dkb_services');
     const svc = services.find(s => s.service_id === serviceId);
     $('dkb-form-title').textContent = ds ? `Edit Datastore (${svc ? svc.name : ''})` : `Create Datastore (${svc ? svc.name : ''})`;
-    await buildDkbForm(ds);
+    await buildDkbForm(ds, svc);
     $('dkb-form-modal').style.display = 'flex';
   }
 
-  async function buildDkbForm(ds) {
+  async function buildDkbForm(ds, svc) {
     const fields = $('dkb-form-fields');
     fields.innerHTML = '';
     const isEdit = !!ds;
@@ -1427,14 +1427,18 @@
     const nameDiv = document.createElement('div'); nameDiv.className = 'form-field';
     nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label><input type="text" name="ds_name" value="${escapeHtml(ds ? ds.name : '')}" required />`;
     fields.appendChild(nameDiv);
-    // API URL
+    // API URL (pre-fill the service default on create, mirroring the plugin schema)
+    const defaultApiUrl = (svc && svc.default_api_url) ? svc.default_api_url : '';
     const urlDiv = document.createElement('div'); urlDiv.className = 'form-field';
-    urlDiv.innerHTML = `<label>API URL <span class="form-field-error">*</span></label><input type="text" name="api_url" value="${escapeHtml(ds ? ds.api_url : '')}" required />`;
+    urlDiv.innerHTML = `<label>API URL <span class="form-field-error">*</span></label><input type="text" name="api_url" value="${escapeHtml(ds ? ds.api_url : defaultApiUrl)}" required />`;
     fields.appendChild(urlDiv);
-    // API Key
+    // API Key (server-side env default resolves at recon when left blank)
+    const hasKeyDefault = !!(svc && svc.has_api_key_default);
+    const keyRequired = !isEdit && !hasKeyDefault;
+    const keyPlaceholder = isEdit ? 'leave blank to keep existing' : (hasKeyDefault ? 'leave blank to use server default' : '');
     const keyDiv = document.createElement('div'); keyDiv.className = 'form-field';
-    keyDiv.innerHTML = `<label>API Key ${!isEdit ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" ${!isEdit ? 'required' : ''} placeholder="${isEdit ? 'leave blank to keep existing' : ''}" />
-    <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : ''}</small>`;
+    keyDiv.innerHTML = `<label>API Key ${keyRequired ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" ${keyRequired ? 'required' : ''} placeholder="${keyPlaceholder}" />
+    <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : (hasKeyDefault ? 'Leave blank to use the server-configured default key.' : '')}</small>`;
     fields.appendChild(keyDiv);
     // ds_extra_params
     const extraDiv = document.createElement('div'); extraDiv.className = 'form-field';

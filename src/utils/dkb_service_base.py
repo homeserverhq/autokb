@@ -41,6 +41,12 @@ class BaseDKBService(ABC):
 
     metadata: Dict[str, str] = {}  # overridden by subclass
 
+    # Optional per-service defaulting. Subclasses may override:
+    #   * default_api_url — fallback base URL when the datastore row has none
+    #   * api_key_env_var — env var that supplies the API key default
+    default_api_url: str = ""
+    api_key_env_var: Optional[str] = None
+
     def __init__(self, datastore_row: Any, db: Any):
         """*datastore_row* is an ORM row with attributes:
         ``id, service_id, name, api_url, api_key, remote_datastore_id, ds_extra_params``
@@ -53,6 +59,19 @@ class BaseDKBService(ABC):
         self.remote_datastore_id = datastore_row.remote_datastore_id
         self.ds_extra_params = datastore_row.ds_extra_params or {}
         self.db = db
+
+    @classmethod
+    def get_defaults(cls) -> Dict[str, Any]:
+        """Class-level defaults surfaced to the web UI (create-datastore form).
+
+        ``has_api_key_default`` is a boolean so the actual secret never leaves
+        the backend; it resolves at recon time in ``__init__``.
+        """
+        env_key = getattr(cls, "api_key_env_var", None)
+        return {
+            "api_url": getattr(cls, "default_api_url", "") or "",
+            "has_api_key_default": bool(env_key and os.environ.get(env_key)),
+        }
 
     # ---- abstract methods (remote operations only) ----
 

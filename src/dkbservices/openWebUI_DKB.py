@@ -26,10 +26,14 @@ class OpenWebUIDKB(BaseDKBService):
         "description": "Open WebUI Knowledge Base",
         "icon": "openwebui.png",
     }
+    default_api_url = "http://openwebui-app:8080"
+    api_key_env_var = "OPENWEBUI_API_KEY"
 
     def __init__(self, datastore_row, db):
         super().__init__(datastore_row, db)
-        self._api_root = self.api_url.rstrip("/") + "/api/v1"
+        self.api_url = (self.api_url or self.default_api_url).rstrip("/")
+        self.api_key = self.api_key or (os.environ.get(self.api_key_env_var, "") if self.api_key_env_var else "")
+        self._api_root = self.api_url + "/api/v1"
         self._timeout = 60
         self._process_timeout = 300
         self._process_interval = 1

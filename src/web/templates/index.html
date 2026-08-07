@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoKB</title>
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=45" />
+  <link rel="stylesheet" href="/static/styles.css?v=47" />
 </head>
 <body>
   <!-- Login page -->
@@ -34,12 +34,11 @@
     </header>
     <div class="app-body">
       <nav class="sidebar">
-        <div class="nav-group">UPSTREAM &middot; DATA IN</div>
-        <a href="#/data-sources" class="nav-link active" data-view="data-sources">Data Sources</a>
+        <a href="#/dashboard" class="nav-link active" data-view="dashboard">Dashboard</a>
+        <a href="#/data-sources" class="nav-link" data-view="data-sources">Data Sources</a>
         <a href="#/all-subscriptions" class="nav-link" data-view="all-subscriptions">Subscriptions</a>
-        <div class="nav-group">DOWNSTREAM &middot; DATA OUT</div>
         <a href="#/data-destinations" class="nav-link" data-view="data-destinations">Data Destinations</a>
-        <a href="#/data-targets" class="nav-link" data-view="data-targets">Data Targets</a>
+        <a href="#/data-targets" class="nav-link" data-view="data-targets">Targets</a>
         <a href="#/activity" class="nav-link" data-view="activity">Recent Activity</a>
         <a href="#/devlab" class="nav-link" data-view="devlab">Developer Lab</a>
       </nav>
@@ -54,7 +53,8 @@
                 side, it connects to diverse data sources via drop-in Source connectors; each Source pulls data,
                 transforms it, and writes chunks (markdown, JSON, or text) to a per-subscription output directory.
                 On the <strong>downstream</strong> side, Destination connectors (sinks) receive those files and
-                sync them to remote knowledge bases / datasets (Data Targets).
+                sync them to remote knowledge bases / datasets (Data Targets). Link a subscription to a Data
+                Target and the Destination syncs that Source's output to the remote system automatically.
               </p>
 
               <h3>How to use an existing Source</h3>
@@ -74,6 +74,27 @@
                     upload a <code>.png</code> icon (max 512&times;512).</li>
                 <li>Click <strong>Test</strong> to check for errors, then <strong>Save</strong> to
                     deploy. Your Source appears in Data Sources within seconds.</li>
+              </ol>
+
+              <h3>How to use an existing Destination</h3>
+              <ol>
+                <li>Open <strong>Data Destinations</strong> in the sidebar. Each tile is a registered Destination connector.</li>
+                <li>Click a Destination tile to see its Data Targets, then click <strong>+ Create New Data Target</strong>.</li>
+                <li>Fill in the required fields (Name, API URL, API Key) and optionally Extra Params (JSON).</li>
+                <li>Use the <strong>Linked Subscriptions</strong> transfer list to pick which subscriptions' output
+                    should sync to this target.</li>
+                <li>The target appears in the list. Use <strong>Update</strong> to trigger a sync,
+                    <strong>Edit</strong> to change settings, or <strong>Disable</strong>/<strong>Delete</strong> to stop it.</li>
+              </ol>
+
+              <h3>How to create your own Destination</h3>
+              <ol>
+                <li>Open <strong>Developer Lab</strong> in the sidebar and pick <strong>Destination Developer</strong>.</li>
+                <li>Paste a Destination connector class that subclasses <code>BaseSink</code> — see the existing
+                    services in <strong>Data Destinations</strong> for reference.</li>
+                <li>Give it a name and optionally upload a <code>.png</code> icon (max 512&times;512).</li>
+                <li>Click <strong>Test</strong> to check for errors, then <strong>Save</strong> to deploy.
+                    Your Destination appears in Data Destinations within seconds.</li>
               </ol>
             </article>
             <aside id="dashboard-stats" class="dashboard-stats">
@@ -269,6 +290,9 @@
               <button class="btn btn-destructive" id="delete-destination-btn" disabled>Delete Destination</button>
             </div>
           </div>
+          <h3>Description</h3>
+          <div id="destination-description" class="plugin-description"></div>
+          <h3>Data Targets</h3>
           <div id="target-list" class="subscription-list"></div>
         </section>
         <section id="view-data-targets" class="view" style="display: none;">
@@ -319,6 +343,6 @@
   </div>
 
   <script src="/static/marked.min.js"></script>
-  <script src="/static/app.js?v=45"></script>
+  <script src="/static/app.js?v=48"></script>
 </body>
 </html>

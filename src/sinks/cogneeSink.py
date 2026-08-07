@@ -7,7 +7,11 @@ from utils.sink_base import BaseSink
 class CogneeSink(BaseSink):
     metadata = {
         "name": "cognee",
-        "description": "Cognee Memory Dataset",
+        "description": (
+            "Synchronizes AutoKB output files into a Cognee Memory Dataset "
+            "so they can be processed into cognee's graph memory. Each Data "
+            "Target maps to a dedicated dataset."
+        ),
         "icon": "cognee.png",
     }
     default_api_url = "http://cognee-app:8000"

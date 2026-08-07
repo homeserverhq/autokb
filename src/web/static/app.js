@@ -1251,10 +1251,9 @@
           <img src="/assets/${escapeHtml(s.icon)}" onerror="this.src='/assets/default_icon.png'" alt="" />
           <div>
             <div class="plugin-name">${escapeHtml(s.name)}</div>
-            <small>${escapeHtml(s.description || '')}</small>
           </div>
         `;
-        card.addEventListener('click', () => { location.hash = `#/data-destinations/${s.service_id}`; });
+        card.addEventListener('click', () => { location.hash = `#/destinations-detail/${s.service_id}`; });
         grid.appendChild(card);
       }
     } catch (e) { console.error(e); }
@@ -1266,6 +1265,7 @@
       const services = await api('/sinks');
       const svc = services.find(s => s.service_id === serviceId);
       currentSink = svc || null;
+      $('destination-description').textContent = (svc && svc.description) || '';
       if (svc) {
         $('destination-title').textContent = svc.name;
         const iconEl = $('destination-icon');

@@ -23,7 +23,13 @@ from utils.sink_base import BaseSink
 class OpenWebUISink(BaseSink):
     metadata = {
         "name": "openWebUI",
-        "description": "Open WebUI Knowledge Base",
+        "description": (
+            "Synchronizes AutoKB output files into an Open WebUI Knowledge "
+            "Base. Each Data Target creates its own knowledge base "
+            "(AutoKB_{target}); data files are uploaded to the file "
+            "repository, linked into the knowledge base, and replaced "
+            "on update so no orphaned versions linger."
+        ),
         "icon": "openwebui.png",
     }
     default_api_url = "http://openwebui-app:8080"

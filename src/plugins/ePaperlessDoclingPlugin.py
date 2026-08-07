@@ -25,6 +25,10 @@ _CHUNKING_MAX_TOKENS = 490
 _HEARTBEAT_INTERVAL = 20
 
 
+class DoclingAuthError(RuntimeError):
+    """Fatal Docling authentication/authorization failure."""
+
+
 class ePaperlessDoclingPlugin(BaseSubscription):
     metadata = {
         "name": "ePaperlessDoclingPlugin",
@@ -130,8 +134,8 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                 self.log.info("owner_resolved", username=owner_username, id=owner_id)
             except Exception as exc:
                 self.log.error("owner_resolve_failed", username=owner_username, error=str(exc))
-                progress_callback(100, message="Failed to resolve owner username")
-                return
+                progress_callback(100, message=f"Failed to resolve owner: {exc}")
+                raise
 
         # 2. Query Paperless for documents in the storage path
         progress_callback(5, message="Querying Paperless...")
@@ -141,8 +145,8 @@ class ePaperlessDoclingPlugin(BaseSubscription):
             )
         except Exception as exc:
             self.log.error("paperless_query_failed", error=str(exc))
-            progress_callback(100, message="Paperless query failed")
-            return
+            progress_callback(100, message=f"Paperless query failed: {exc}")
+            raise
 
         if not documents:
             progress_callback(100, message="No documents found")
@@ -236,6 +240,11 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                     for fname in os.listdir(output_dir):
                         if re.match(rf"^{doc_id}\.", fname):
                             os.remove(os.path.join(output_dir, fname))
+            except (requests.HTTPError, DoclingAuthError) as exc:
+                # Docling (or any HTTP) failure is fatal — surface as an error
+                # instead of silently counting the document as skipped.
+                self.log.error("doc_http_error", doc_id=doc_id, error=str(exc))
+                raise
             except Exception as exc:
                 self.log.warning("doc_skipped", doc_id=doc_id, error=str(exc))
                 failed += 1
@@ -356,6 +365,10 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                 f"{base_url}/v1/chunk/hybrid/file/async",
                 headers=dl_headers, files=files, data=data, timeout=30,
             )
+            if resp.status_code in (401, 403):
+                raise DoclingAuthError(
+                    f"Docling auth failed (HTTP {resp.status_code}): {resp.text[:300]}"
+                )
             resp.raise_for_status()
             task_id = resp.json()["task_id"]
 
@@ -389,6 +402,10 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                 f"{base_url}/v1/convert/file/async",
                 headers=dl_headers, files=files, data=data, timeout=30,
             )
+            if resp.status_code in (401, 403):
+                raise DoclingAuthError(
+                    f"Docling auth failed (HTTP {resp.status_code}): {resp.text[:300]}"
+                )
             resp.raise_for_status()
             task_id = resp.json()["task_id"]
 

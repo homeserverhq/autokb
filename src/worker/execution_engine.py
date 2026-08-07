@@ -462,6 +462,10 @@ def _child_main(file_path: str, config: Dict[str, Any], sub_id: str, sub_name: s
     except SystemExit:
         raise
     except BaseException as exc:  # noqa: BLE001
+        try:
+            db.update_last_message(sub_id, str(exc))
+        except Exception:
+            pass
         _emit_exception_to_file(err_path, exc)
         try:
             log.error("child_exception", sub_id=sub_id, name=sub_name, action="execute", result=str(exc),

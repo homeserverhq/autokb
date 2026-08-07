@@ -20,6 +20,10 @@ _DOCLING_OPTIONS = {
 _HEARTBEAT_INTERVAL = 20
 
 
+class DoclingAuthError(RuntimeError):
+    """Fatal Docling authentication/authorization failure."""
+
+
 def _url_hash(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:16]
 
@@ -223,6 +227,11 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
                     with open(tmp, "w", encoding="utf-8") as f:
                         f.write(f"Original URL: {entry['url']}\n\n{chunk['text']}")
                     self.move_to_destination(tmp)
+            except (requests.HTTPError, DoclingAuthError) as exc:
+                # Docling (or any HTTP) failure is fatal — surface as an error
+                # instead of silently counting the page as skipped.
+                self.log.error("webscraper_http_error", url=entry["url"], error=str(exc))
+                raise
             except Exception as exc:
                 self.log.warning("webscraper_page_skipped", url=entry["url"], error=str(exc))
                 failed += 1
@@ -293,6 +302,10 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
             f"{base_url}/v1/chunk/hybrid/file/async",
             headers=dl_headers, files=files, data=data, timeout=30,
         )
+        if resp.status_code in (401, 403):
+            raise DoclingAuthError(
+                f"Docling auth failed (HTTP {resp.status_code}): {resp.text[:300]}"
+            )
         resp.raise_for_status()
         task_id = resp.json()["task_id"]
 

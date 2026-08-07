@@ -10,7 +10,7 @@ class CogneeSink(BaseSink):
         "display_name": "Cognee Dataset",
         "description": (
             "Synchronizes AutoKB output files into a Cognee Memory Dataset "
-            "so they can be processed into cognee's graph memory. Each Data "
+            "so they can be processed into Cognee's graph memory. Each Data "
             "Target maps to a dedicated dataset."
         ),
         "icon": "cogneeSink.png",

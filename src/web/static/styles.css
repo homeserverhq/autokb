@@ -49,6 +49,10 @@ body {
 }
 .nav-link:hover { color: #FFFFFF; }
 .nav-link.active { color: #FFFFFF; border-left-color: #3D5AFE; background: #0A0A0A; }
+.header-right { display: flex; align-items: center; gap: 28px; }
+.header-github { display: flex; align-items: center; line-height: 1; }
+.header-github img { height: 28px; width: 28px; opacity: 0.9; }
+.header-github:hover img { opacity: 1; }
 .main-area { flex: 1; padding: 24px; overflow-y: auto; }
 .view > h2 { margin-bottom: 16px; line-height: 1; }
 .sub-header {
@@ -384,6 +388,8 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
 .dashboard-readme h3:first-child { margin-top: 0; }
 .dashboard-readme p { margin: 0 0 12px; color: #FFFFFF; }
 .dashboard-readme p.muted { color: #9E9E9E; font-size: 13px; }
+.dashboard-readme a { color: #4DA6FF; text-decoration: none; }
+.dashboard-readme a:hover { color: #7DC0FF; text-decoration: underline; }
 .dashboard-readme ol {
   margin: 0 0 12px;
   padding-left: 22px;

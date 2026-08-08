@@ -31,27 +31,33 @@ class TestSink(BaseSink):
         return os.path.basename(path)
 
     def add_datafile(self, path: str) -> str:
+        self._check_cancel()
         rid = self._file_name(path)
         _record("add_datafile", path, rid)
         return rid
 
     def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+        self._check_cancel()
         new_rid = self._file_name(path)
         _record("update_datafile", remote_datafile_id, path, new_rid)
         return new_rid
 
     def remove_datafile(self, remote_datafile_id: str) -> None:
+        self._check_cancel()
         _record("remove_datafile", remote_datafile_id)
 
     def add_target(self) -> str:
+        self._check_cancel()
         rid = "test-remote-target-id"
         _record("add_target", rid)
         return rid
 
     def remove_target(self) -> None:
+        self._check_cancel()
         _record("remove_target")
 
     def clear_target(self) -> None:
+        self._check_cancel()
         _record("clear_target")
 
 

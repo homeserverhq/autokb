@@ -35,6 +35,7 @@ import requests
 from utils.constants import (
     OPERATION_FULL, OPERATION_SINK_ONLY,
     STATE_ENABLED, STATE_ENQUEUED, STATE_ERROR, STATE_DISABLED,
+    STATE_DELETED,
 )
 from utils.database import (
     AKBDatafile, Sink, Target,
@@ -45,7 +46,7 @@ from utils.database import (
 from utils.sink_base import BaseSink, compute_file_hash
 from utils.sink_registry import SinkRegistry
 from utils.queue_utils import QueueManager, _encode_item, _decode_item, P_QUEUE_KEY, S_QUEUE_KEY
-from utils.misc_utils import uuid7, uuid4
+from utils.misc_utils import uuid7, uuid4, SinkCancelledError
 
 import logging as _logging
 
@@ -2280,14 +2281,15 @@ def _dkb_test_queue_roundtrip():
 # ---- 3. DKB registry test ----
 
 def _dkb_test_registry_load():
-    reg = SinkRegistry(sinks_dir="/src/sinks", component="test_dkb_runner_reg")
+    # Self-contained: load only from the testing sinks dir so the test never
+    # depends on (or leaks) the real shipped sinks (openWebUISink, cogneeSink).
+    reg = SinkRegistry(sinks_dir="/src/testing/sinks", component="test_dkb_runner_reg")
     reg.reload_all()
-    records = reg.list_records()
-    names = [r.service_name for r in records]
-    if "openWebUISink" not in names:
-        return False, "openWebUISink not in registry"
-    if "cogneeSink" not in names:
-        return False, "cogneeSink not in registry"
+    names = [r.service_name for r in reg.list_records()]
+    if "testSink" not in names:
+        return False, "testSink not loaded from testing sinks dir"
+    if "openWebUISink" in names or "cogneeSink" in names:
+        return False, "non-testing sink leaked into registry"
     return True, "OK"
 
 
@@ -2579,6 +2581,175 @@ def _dkb_test_recon_known_hash_no_rehash(db, sub, ds):
     return True, "OK"
 
 
+def _mk_cancel_test_svc(db, ds):
+    """Build a real _MockSink bound to ds with remote_target_id set, ready to
+    have a mid-recon status-flip side effect installed on base_add_datafile."""
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote"
+    return svc
+
+
+def _wrap_add_datafile_flip(svc, flip_fn, db, ds, sub):
+    """Wrap svc.base_add_datafile to flip the link/sub status after the first call."""
+    orig_add = svc.base_add_datafile
+    count = [0]
+
+    def flip_add(sub_id_, path_, known_hash_=None):
+        count[0] += 1
+        flip_fn(db, ds.id, sub)
+        if known_hash_ is not None:
+            return orig_add(sub_id_, path_, known_hash_=known_hash_)
+        return orig_add(sub_id_, path_)
+
+    svc.base_add_datafile = flip_add
+    return count
+
+
+def _dkb_test_recon_cancel_link_removed(db, sub, ds):
+    """Mid-recon link removal: recon halts after the first upload and the
+    already-uploaded file is cleaned up (remote remove + rows + link row)."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    sub_row = db.get_subscription(sub)
+    for i in range(3):
+        _write_output_file_test(sub_row.name, f"f{i}.md", f"content {i}\n")
+    svc = _mk_cancel_test_svc(db, ds)
+
+    def flip(db_, target_id_, sub_id_):
+        db_.set_target_subscription_status(target_id_, sub_id_, STATE_DELETED)
+
+    count = _wrap_add_datafile_flip(svc, flip, db, ds, sub)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        mock_get.return_value = svc
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if count[0] != 1:
+        return False, f"expected 1 upload before halt, got {count[0]}"
+    if db.get_target_subscription(ds.id, sub) is not None:
+        return False, "link row not deleted after mid-recon removal"
+    if db.list_datafiles_for_target_subscription(ds.id, sub):
+        return False, "target_datafile rows remain after mid-recon removal"
+    if not any(c[0] == "remove_datafile" for c in svc.calls):
+        return False, "remove_datafile not called during inline cleanup"
+    return True, "OK"
+
+
+def _dkb_test_recon_cancel_link_disabled(db, sub, ds):
+    """Mid-recon link disable: recon halts, uploaded rows are kept, link stays
+    DISABLED, and nothing is removed from the remote."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    sub_row = db.get_subscription(sub)
+    for i in range(3):
+        _write_output_file_test(sub_row.name, f"d{i}.md", f"content {i}\n")
+    svc = _mk_cancel_test_svc(db, ds)
+
+    def flip(db_, target_id_, sub_id_):
+        db_.set_target_subscription_status(target_id_, sub_id_, STATE_DISABLED)
+
+    count = _wrap_add_datafile_flip(svc, flip, db, ds, sub)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        mock_get.return_value = svc
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if count[0] != 1:
+        return False, f"expected 1 upload before halt, got {count[0]}"
+    link = db.get_target_subscription(ds.id, sub)
+    if link is None or link.status != STATE_DISABLED:
+        return False, "link should remain DISABLED after mid-recon disable"
+    rows = db.list_datafiles_for_target_subscription(ds.id, sub)
+    if len(rows) != 1:
+        return False, f"expected 1 kept target_datafile row, got {len(rows)}"
+    if any(c[0] == "remove_datafile" for c in svc.calls):
+        return False, "remove_datafile should not be called for a disabled link"
+    # Re-enable so the next test's cleanup can delete the target/sub.
+    db.set_target_subscription_status(ds.id, sub, STATE_ENABLED)
+    return True, "OK"
+
+
+def _dkb_test_recon_cancel_sub_deleted(db, sub, ds):
+    """Mid-recon subscription deletion: recon halts immediately and leaves the
+    sub DELETED. The test then runs the worker's own cleanup path
+    (_cleanup_subscription_targets + delete_subscription_row) to verify the
+    production path handles it correctly."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    from worker.worker import _cleanup_subscription_targets
+    from utils.misc_utils import get_logger
+    sub_row = db.get_subscription(sub)
+    for i in range(3):
+        _write_output_file_test(sub_row.name, f"s{i}.md", f"content {i}\n")
+    svc = _mk_cancel_test_svc(db, ds)
+
+    def flip(db_, _target_id_, sub_id_):
+        db_.update_status(sub_id_, STATE_DELETED)
+
+    count = _wrap_add_datafile_flip(svc, flip, db, ds, sub)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        mock_get.return_value = svc
+
+        # Phase 1: recon — detects sub_gone, aborts, leaves mess
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+        if count[0] != 1:
+            return False, f"expected 1 upload before halt, got {count[0]}"
+        link = db.get_target_subscription(ds.id, sub)
+        if link is None or link.status != STATE_ENABLED:
+            return False, "link should be left untouched on sub-level cancel"
+        if any(c[0] == "remove_datafile" for c in svc.calls):
+            return False, "remove_datafile should not be called on sub-level cancel"
+
+        # Phase 2: production cleanup — same path the worker runs for a DELETED sub
+        svc.calls.clear()
+        cleanup_log = get_logger("test_dkb_cleanup")
+        _cleanup_subscription_targets(sub_row, MagicMock(), db, cleanup_log)
+        db.delete_subscription_row(sub)
+
+    after = sub
+    if db.get_target_subscription(ds.id, after) is not None:
+        return False, "target_subscription link not cleaned"
+    if db.list_datafiles_for_target_subscription(ds.id, after):
+        return False, "target_datafile rows remain after cleanup"
+    if db.get_target(ds.id) is not None:
+        return False, "orphan target not deleted after cleanup"
+    if db.get_subscription(after) is not None:
+        return False, "subscription row not deleted after cleanup"
+    if not any(c[0] == "remove_datafile" for c in svc.calls):
+        return False, "remove_datafile not called during cleanup"
+    if not any(c[0] == "remove_target" for c in svc.calls):
+        return False, "remove_target not called for orphan target"
+    return True, "OK"
+
+
+def _dkb_test_sink_cancel_check(db, sub, ds):
+    """BaseSink._check_cancel: no-op without a callback, raises SinkCancelledError
+    with the correct kind when the installed check fires."""
+    svc = _mk_cancel_test_svc(db, ds)
+    try:
+        svc._check_cancel()
+    except Exception as exc:
+        return False, f"_check_cancel raised without a callback: {exc}"
+    svc.set_cancel_check(lambda: None)
+    try:
+        svc._check_cancel()
+    except Exception as exc:
+        return False, f"_check_cancel raised when check returned None: {exc}"
+    svc.set_cancel_check(lambda: "link_disabled")
+    try:
+        svc._check_cancel()
+        return False, "_check_cancel did not raise when check fired"
+    except SinkCancelledError as exc:
+        if exc.kind != "link_disabled":
+            return False, f"unexpected kind {exc.kind!r}"
+    except Exception as exc:
+        return False, f"wrong exception type {type(exc).__name__}: {exc}"
+    svc.set_cancel_check(None)
+    try:
+        svc._check_cancel()
+    except Exception as exc:
+        return False, f"_check_cancel raised after reset: {exc}"
+    return True, "OK"
+
+
 def _dkb_test_pass2_last_checked(db, sub, ds):
     """Pass II conformance: last_checked must be identical across rows since a
     single checked_at timestamp is threaded through the pass."""
@@ -2719,6 +2890,10 @@ def _run_dkb_unit_tests():
         ("DKB Recon — removes deleted file", lambda db, sub, ds: _dkb_test_recon_remove(db, sub, ds)),
         ("DKB Recon — skips disabled DS", lambda db, sub, ds: _dkb_test_recon_skip_disabled(db, sub, ds)),
         ("DKB Recon — error on failure", lambda db, sub, ds: _dkb_test_recon_error(db, sub, ds)),
+        ("DKB Recon — cancel on link removed", lambda db, sub, ds: _dkb_test_recon_cancel_link_removed(db, sub, ds)),
+        ("DKB Recon — cancel on link disabled", lambda db, sub, ds: _dkb_test_recon_cancel_link_disabled(db, sub, ds)),
+        ("DKB Recon — cancel on sub deleted", lambda db, sub, ds: _dkb_test_recon_cancel_sub_deleted(db, sub, ds)),
+        ("DKB Service — cancel check hook", lambda db, sub, ds: _dkb_test_sink_cancel_check(db, sub, ds)),
         ("DKB Pass II — last_checked consistent", lambda db, sub, ds: _dkb_test_pass2_last_checked(db, sub, ds)),
         ("DKB Filter — datafiles by sub", lambda db, sub, ds: _dkb_test_datafiles_by_sub(db, sub, ds)),
         ("DKB Delete — strict raises on remote failure", lambda db, sub, ds: _dkb_test_delete_strict_raises(db, sub, ds)),

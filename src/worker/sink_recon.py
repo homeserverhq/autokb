@@ -23,11 +23,69 @@ from utils.constants import (
 from utils.database import DatabaseManager
 from utils.sink_registry import SinkRegistry
 from utils.sink_base import compute_file_hash
-from utils.misc_utils import get_logger
+from utils.misc_utils import SinkCancelledError, get_logger
 
 
 LOG_FILE = "/logs/worker.log"
 _MTIME_TOLERANCE = 0.001  # 1 ms
+_SINK_HEARTBEAT_INTERVAL = 15.0  # seconds between heartbeat/lock refreshes during long passes
+
+
+def _make_cancel_check(db: DatabaseManager, sub_id: str, target_id: str, queue, state: Dict[str, int]):
+    """Build the cancellation + heartbeat callback for one target's recon pass.
+
+    ``state`` is a mutable ``{"n": ...}`` counter the recon loop bumps per
+    file; the callback uses it for the heartbeat progress value.
+
+    The returned closure is installed on the sink via ``set_cancel_check``
+    and consulted by ``_check_cancel`` at every checkpoint. It re-reads the
+    target-subscription link and subscription status from the DB on every
+    call (cheap SELECTs) and returns a ``SinkCancelledError`` kind when the
+    link/sub is no longer active:
+
+      * ``"link_removed"``  — link row gone or DELETED
+      * ``"link_disabled"`` — link row DISABLED
+      * ``"sub_gone"``      — subscription gone or DELETED
+      * ``"sub_disabled"``  — subscription DISABLED
+
+    It also refreshes the sub lock + heartbeat, throttled to
+    ``_SINK_HEARTBEAT_INTERVAL``, so a long single-target upload pass stays
+    alive for the watchdog without spamming SSE updates.
+    """
+    last_refresh = {"ts": 0.0}
+
+    def _check() -> Optional[str]:
+        now = time.time()
+        if now - last_refresh["ts"] >= _SINK_HEARTBEAT_INTERVAL:
+            last_refresh["ts"] = now
+            try:
+                db.update_heartbeat_and_progress(sub_id, state.get("n", 0) % 100)
+            except Exception:
+                pass
+            if queue:
+                try:
+                    queue.refresh_lock(sub_id)
+                except Exception:
+                    pass
+        try:
+            link = db.get_target_subscription(target_id, sub_id)
+        except Exception:
+            link = None
+        if link is None or link.status == STATE_DELETED:
+            return "link_removed"
+        if link.status == STATE_DISABLED:
+            return "link_disabled"
+        try:
+            cur = db.get_subscription(sub_id)
+        except Exception:
+            cur = None
+        if cur is None or cur.status == STATE_DELETED:
+            return "sub_gone"
+        if cur.status == STATE_DISABLED:
+            return "sub_disabled"
+        return None
+
+    return _check
 
 
 def _hb(db: DatabaseManager, sub_id: str, queue, pct: int, message: str = None) -> None:
@@ -130,18 +188,14 @@ def reconcile_subscription_targets(
 
         if ds_status == STATE_DELETED:
             # Remove this subscription's target_datafile rows for the deleted link
-            ds_df_rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
-            for ds_df in ds_df_rows:
-                remove_count += 1
-                _invoke_remove(
-                    ds_link, target_id, ds_df, db, sink_registry, log, sub_name, error_ds_names
-                )
-                prog += 1
-                _hb(db, sub_id, queue, pct=prog % 100)
-            db.delete_target_subscription(target_id, sub_id)
+            remove_count += _remove_deleted_link(
+                ds_link, target_id, sub_id, db, sink_registry, log,
+                sub_name, error_ds_names, queue,
+            )
             continue
 
         # --- ENABLED / ENQUEUED: full reconcile ---
+        state = {"n": 0}
         try:
             # 1. Ensure remote_target_id exists
             ds_row = db.get_target(target_id)
@@ -150,6 +204,10 @@ def reconcile_subscription_targets(
             svc = _get_service(ds_row, db, sink_registry, log)
             if svc is None:
                 continue
+            # 1b. Install the cancellation + heartbeat callback so the sink can
+            # abort mid-pass (and keep the lock/heartbeat alive) if the user
+            # removes/disables the link or the subscription mid-recon.
+            svc.set_cancel_check(_make_cancel_check(db, sub_id, target_id, queue, state))
             if not svc.remote_target_id:
                 try:
                     svc.base_add_target()
@@ -161,7 +219,7 @@ def reconcile_subscription_targets(
                     continue
 
             pass1_count = _reconcile_pass1(
-                fs_files, ds_link, target_id, sub_id, db, svc, queue, log,
+                fs_files, ds_link, target_id, sub_id, db, svc, queue, log, state,
             )
             add_count += pass1_count[0]
             update_count += pass1_count[1]
@@ -177,6 +235,21 @@ def reconcile_subscription_targets(
             db.set_target_subscription_status(
                 target_id, sub_id, STATE_ENABLED, message=msg,
             )
+
+        except SinkCancelledError as exc:
+            # The link/sub was removed or disabled mid-recon — this is NOT an
+            # error, so never transition to ERROR or send the notification email.
+            abort_all = _handle_recon_cancel(
+                exc.kind, ds_link, target_id, sub_id, db, sink_registry, log,
+                sub_name, error_ds_names, queue,
+            )
+            if abort_all:
+                log.info(
+                    "sink_recon_aborted",
+                    sub_id=sub_id, name=sub_name, target_id=target_id, reason=exc.kind,
+                )
+                return  # sub-level cancel — stop everything, skip Pass II
+            continue
 
         except Exception as exc:
             _transition_ds_error(
@@ -224,7 +297,7 @@ def _get_service(ds_row, db, sink_registry, log):
 
 
 def _reconcile_pass1(
-    fs_files, ds_link, target_id, sub_id, db, svc, queue, log,
+    fs_files, ds_link, target_id, sub_id, db, svc, queue, log, state=None,
 ) -> tuple:
     """Pass I.1 (FS→target) and I.2 (target→FS removal)."""
     add_count = 0
@@ -235,6 +308,10 @@ def _reconcile_pass1(
     processed_datafile_ids = set()
 
     for fpath, st in fs_files.items():
+        # Abort mid-pass if the link/sub was removed or disabled while uploading.
+        svc._check_cancel()
+        if state is not None:
+            state["n"] += 1
         size = st.st_size
         mtime = st.st_mtime
 
@@ -292,6 +369,7 @@ def _reconcile_pass1(
                 raise
 
     for ds_df in ds_df_rows:
+        svc._check_cancel()
         if ds_df.datafile_id not in processed_datafile_ids:
             try:
                 svc.base_remove_datafile(ds_df.datafile_id)
@@ -301,6 +379,59 @@ def _reconcile_pass1(
                 raise
 
     return add_count, update_count, remove_count
+
+
+def _remove_deleted_link(ds_link, target_id, sub_id, db, sink_registry, log,
+                         sub_name, error_ds_names, queue=None) -> int:
+    """Remove a deleted target-subscription link: remote files + join rows + link row.
+
+    Shared by the top-of-loop ``STATE_DELETED`` branch and the mid-recon
+    cancellation handler, so already-uploaded files are cleaned up promptly
+    in both cases. Returns the number of files removed.
+    """
+    remove_count = 0
+    prog = 0
+    ds_df_rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
+    for ds_df in ds_df_rows:
+        remove_count += 1
+        _invoke_remove(
+            ds_link, target_id, ds_df, db, sink_registry, log, sub_name, error_ds_names
+        )
+        prog += 1
+        _hb(db, sub_id, queue, pct=prog % 100)
+    db.delete_target_subscription(target_id, sub_id)
+    return remove_count
+
+
+def _handle_recon_cancel(kind, ds_link, target_id, sub_id, db, sink_registry, log,
+                         sub_name, error_ds_names, queue=None) -> bool:
+    """React to a mid-recon ``SinkCancelledError``.
+
+    Returns True when the WHOLE recon must abort (sub-level cancel); False
+    when only this target is affected (link-level cancel).
+    """
+    if kind == "sub_gone" or kind == "sub_disabled":
+        log.warning("sink_recon_cancelled", target_id=target_id, sub_id=sub_id, reason=kind)
+        return True
+    if kind == "link_removed":
+        log.warning("sink_recon_cancelled", target_id=target_id, sub_id=sub_id, reason=kind)
+        # Run the deferred-delete cleanup inline so the files already uploaded
+        # during this pass are removed from the remote + DB right away.
+        cur = db.get_target_subscription(target_id, sub_id)
+        if cur is None or cur.status == STATE_DELETED:
+            try:
+                _remove_deleted_link(
+                    ds_link, target_id, sub_id, db, sink_registry, log,
+                    sub_name, error_ds_names, queue,
+                )
+            except Exception as exc:
+                log.warning("sink_recon_cancel_cleanup_failed", target_id=target_id, error=str(exc))
+        return False
+    # link_disabled — halt uploads for this target; rows already written are
+    # kept (the files really are on the remote) and the DISABLED status is
+    # left untouched. The next recon finishes the job when re-enabled.
+    log.warning("sink_recon_cancelled", target_id=target_id, sub_id=sub_id, reason=kind)
+    return False
 
 
 def _pass2_akb_datafiles(sub, db, output_dir, fs_files, log) -> None:

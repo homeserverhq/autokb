@@ -11,7 +11,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-from utils.misc_utils import sanitize_name
+from utils.misc_utils import SinkCancelledError, sanitize_name
 
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB
@@ -65,6 +65,32 @@ class BaseSink(ABC):
         )
         self._output_root = "/output"
         self.db = db
+        self._cancel_check = None
+
+    def set_cancel_check(self, check) -> None:
+        """Install a cancellation callback.
+
+        The recon engine calls this before driving the six abstract methods.
+        ``check`` is a zero-arg callable returning a ``SinkCancelledError``
+        kind string when the target-subscription link / subscription is no
+        longer active, or ``None`` while it is. Sinks never call this
+        themselves — they only consult it via ``_check_cancel``.
+        """
+        self._cancel_check = check
+
+    def _check_cancel(self) -> None:
+        """Abort the current remote operation if a cancellation is pending.
+
+        Raises :class:`SinkCancelledError` when the installed check fires.
+        No-op when no check is installed (the default). Concrete sinks must
+        call this at the top of each remote operation and inside any
+        long-running loop / polling loop (mirrors the plugin contract where
+        ``progress_callback`` raises ``SubscriptionCancelledError``).
+        """
+        if self._cancel_check is not None:
+            kind = self._cancel_check()
+            if kind:
+                raise SinkCancelledError(kind)
 
     def remote_file_name(self, path: str) -> str:
         """Deterministic remote filename for *path*.

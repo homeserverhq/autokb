@@ -65,6 +65,7 @@ class myFirstSink(BaseSink):
 
     def add_datafile(self, path: str) -> str:
         """Upload *path* to the target. Return the remote file id."""
+        self._check_cancel()  # abort promptly if the link/sub was removed mid-recon
         resp = requests.post(
             f"{self.api_url}/files",
             headers=self._headers(),
@@ -215,6 +216,8 @@ def __init__(self, target_row: Any, db: Any):
 
 You also receive `db`, the `DatabaseManager`, for any custom bookkeeping — but for a garden-variety sink you will never touch it: the base wrapper methods (Section 7) handle all persistence.
 
+**Cancellation hook** — the recon engine installs a cancel-check callback on your instance via `set_cancel_check()` before it calls any of your methods. Your job is to call `self._check_cancel()` at checkpoints (see §6.7). You never call `set_cancel_check` yourself.
+
 A typical `__init__`:
 
 ```python
@@ -275,6 +278,56 @@ Called when the **last** subscription is unlinked from the Target (or the Target
 - Remove all datafiles from the remote container **but keep the container itself**.
 - Reserved for a full re-import workflow. **It is not currently invoked** — implement it to satisfy the abstract contract, but know that today the engine never calls it. A clean implementation (delete all files in the container) is all that's required.
 
+### 6.7 Cancellation — `_check_cancel()`
+
+When the recon engine drives your sink, the user might **remove the subscription from the Data Target**, **disable the link**, or even **delete/disable the whole subscription** while a long-running upload loop is in flight. To react promptly, every sink must call `self._check_cancel()` at checkpoints.
+
+**How it works:**
+
+- The engine installs a cancel-check callback on your sink *before* calling any of your methods (via `set_cancel_check`). You never set this yourself.
+- All you do is call `self._check_cancel()` at the top of each remote operation and inside any long-running loop or polling loop.
+- When the user removes/disables the link or subscription, `_check_cancel()` raises `SinkCancelledError`. **Do NOT catch it** — let it propagate to the engine, which halts the remaining uploads and cleans up appropriately.
+- Without a callback installed (e.g. in unit tests), `_check_cancel()` is a no-op.
+
+This mirrors the plugin contract where `progress_callback` raises `SubscriptionCancelledError`.
+
+```python
+def add_datafile(self, path: str) -> str:
+    self._check_cancel()
+    # ... upload ...
+```
+
+If your remote service has a **polling loop** (e.g. waiting for a file to finish processing), call `self._check_cancel()` on **every iteration** so the upload can be aborted within seconds even while a single file is mid-processing:
+
+```python
+def _wait_for_processing(self, file_id: str) -> bool:
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        self._check_cancel()          # <--- critical
+        status = self._poll_status(file_id)
+        if status == "completed":
+            return True
+        time.sleep(1)
+    return False
+```
+
+If a cancel fires partway through an upload (the file is already on the remote but not yet linked), best-effort delete the orphaned file before re-raising to keep the remote repo clean:
+
+```python
+def _upload_file(self, path: str) -> str:
+    self._check_cancel()
+    file_id = self._do_upload(path)
+    try:
+        self._wait_for_processing(file_id)
+    except SinkCancelledError:
+        try:
+            self._delete_file(file_id)
+        except Exception:
+            pass
+        raise
+    return file_id
+```
+
 ### Summary Table
 
 | Method | Trigger | Returns | Idempotent required |
@@ -304,6 +357,7 @@ An additional concrete helper is available for building deterministic remote fil
 | Helper | What it does |
 |--------|--------------|
 | `remote_file_name(path)` | Returns a deterministic remote filename: `autokb_{target}_{basename}`, or when `include_path_in_filename` is enabled, `autokb_{target}_{rel_path_with_underscores}` so the full directory under `/output/` is embedded. See Section 9 for the flag. |
+| `_check_cancel()`  | See §6.7 — call at checkpoints in your six methods. The engine installs the cancel check; you only call this. |
 
 You should **call these wrappers yourself only in tests**. In production the recon engine calls them. The point of the design: your six methods are pure remote I/O; everything local is handled for you.
 
@@ -336,6 +390,19 @@ For each subscription, the engine:
 ### Per-File Resilience
 
 The engine wraps **each** add/update/remove call in its own `try/except`. A failure on one file logs a warning (`sink_add_failed`, `sink_update_failed`, `sink_remove_failed`) and does **not** abort the rest of the recon. Only `add_target()` failures mark the whole link `ERROR` — because without a remote container nothing else can proceed.
+
+### Mid-Run Cancellation
+
+If the user **removes the subscription from the Data Target**, **disables the link**, or **deletes/disables the whole subscription** while recon is in flight, the engine detects this via `_check_cancel()` (see §6.7) and reacts immediately:
+
+| Event | Behaviour |
+|-------|-----------|
+| **Link removed** (row deleted or `DELETED`) | Uploads are halted; files already uploaded are removed from the remote + their join rows are cleaned up; the link row is deleted. The target itself is kept (it may have other subscriptions). |
+| **Link disabled** | Uploads are halted; rows for files already uploaded are kept (they really are on the remote). The link stays `DISABLED`. The next recon finishes the job when re-enabled. |
+| **Subscription deleted** | All target uploads are halted immediately; Pass II is skipped. The worker's subscription-cleanup cycle runs next and handles removal of all linked targets' remote files + rows. |
+| **Subscription disabled** | All target uploads are halted immediately; Pass II is skipped. No cleanup — files already on the remote persist for when the sub is re-enabled. |
+
+Cancellation is NOT an error: the engine never transitions the link to `ERROR` and never sends a notification email on cancellation.
 
 ### Error Transitions
 
@@ -554,6 +621,7 @@ class RestUploadSink(BaseSink):
     # The six abstract methods
     # ------------------------------------------------------------------
     def add_datafile(self, path: str) -> str:
+        self._check_cancel()
         with open(path, "rb") as f:
             files = {"file": (self._remote_file_name(path), f, "application/octet-stream")}
             resp = requests.post(
@@ -566,6 +634,7 @@ class RestUploadSink(BaseSink):
         return resp.json()["id"]
 
     def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+        self._check_cancel()
         with open(path, "rb") as f:
             files = {"file": (self._remote_file_name(path), f, "application/octet-stream")}
             resp = requests.put(
@@ -578,6 +647,7 @@ class RestUploadSink(BaseSink):
         return resp.json()["id"]
 
     def remove_datafile(self, remote_datafile_id: str) -> None:
+        self._check_cancel()
         resp = requests.delete(
             self._url(f"targets/{self.remote_target_id}/files/{remote_datafile_id}"),
             headers=self._headers(),
@@ -588,6 +658,7 @@ class RestUploadSink(BaseSink):
         self._check(resp, "remove datafile")
 
     def add_target(self) -> str:
+        self._check_cancel()
         resp = requests.post(
             self._url("targets"),
             headers=self._headers(),
@@ -598,6 +669,7 @@ class RestUploadSink(BaseSink):
         return resp.json()["id"]
 
     def remove_target(self) -> None:
+        self._check_cancel()
         target_id = self.remote_target_id
         if not target_id:
             return
@@ -611,6 +683,7 @@ class RestUploadSink(BaseSink):
         self._check(resp, "remove target")
 
     def clear_target(self) -> None:
+        self._check_cancel()
         target_id = self.remote_target_id
         if not target_id:
             return
@@ -630,6 +703,7 @@ This sink demonstrates every concept in this guide:
 - **Class-level defaults** — `default_api_url` and `api_key_env_var` drive the create-target form.
 - **Constructor normalization** — trailing-`/` strip and env-var key fallback.
 - **All six abstract methods**, each a single HTTP call + `_check` guard.
+- **Cancellation via `_check_cancel()`** — every method calls it at the top so a mid-recon removal/disabling halts promptly (see §6.7).
 - **Idempotent deletes** — `404` treated as success in `remove_datafile` and `remove_target`.
 - **Deterministic remote filenames** — `autokb_{sanitized_target}_{basename}` so the same local file always maps to the same remote name.
 - **Pure remote I/O** — no database access; the recon engine and base wrappers handle all bookkeeping.
@@ -664,6 +738,7 @@ Before considering your sink complete, verify:
 - [ ] `__init__` falls back to `default_api_url` when `api_url` is empty and to `api_key_env_var` when `api_key` is empty
 - [ ] Remote filenames use a deterministic scheme (e.g. `autokb_{sanitized_target}_{basename}`)
 - [ ] Your methods perform **remote I/O only** — no direct database access
+- [ ] Every method calls `self._check_cancel()` at the top; long-running loops or polling loops call it on **every iteration**
 - [ ] Failures are reported by raising, never by returning empty/`None` remote ids
 - [ ] Remote calls use a timeout and a `_check`-style HTTP guard that surfaces a readable error
 - [ ] Any new dependencies are documented and conveyed to the Docker image maintainer

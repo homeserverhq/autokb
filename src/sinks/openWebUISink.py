@@ -16,7 +16,7 @@ import time
 
 import requests
 
-from utils.misc_utils import sanitize_name
+from utils.misc_utils import SinkCancelledError, sanitize_name
 from utils.sink_base import BaseSink
 
 
@@ -71,6 +71,7 @@ class OpenWebUISink(BaseSink):
         items = []
         page = 1
         while True:
+            self._check_cancel()
             resp = requests.get(
                 self._url(endpoint),
                 params={"page": page},
@@ -88,6 +89,7 @@ class OpenWebUISink(BaseSink):
 
     def _upload_file(self, path: str) -> str:
         """Upload *path* to the global file repo and wait for processing."""
+        self._check_cancel()
         fname = self._remote_file_name(path)
         with open(path, "rb") as f:
             files = {"file": (fname, f, "application/octet-stream")}
@@ -101,13 +103,23 @@ class OpenWebUISink(BaseSink):
         file_id = resp.json().get("id")
         if not file_id:
             raise RuntimeError("openWebUI upload returned no file id")
-        if not self._wait_for_processing(file_id):
-            raise RuntimeError(f"openWebUI file {file_id} did not finish processing")
+        try:
+            if not self._wait_for_processing(file_id):
+                raise RuntimeError(f"openWebUI file {file_id} did not finish processing")
+        except SinkCancelledError:
+            # Cancel fired while the file was processing — best-effort remove
+            # the uploaded-but-unlinked file so nothing is orphaned in the repo.
+            try:
+                self._delete_file(file_id)
+            except Exception:
+                pass
+            raise
         return file_id
 
     def _wait_for_processing(self, file_id: str) -> bool:
         deadline = time.time() + self._process_timeout
         while time.time() < deadline:
+            self._check_cancel()
             resp = requests.get(
                 self._url(f"files/{file_id}/process/status"),
                 headers=self._headers(),
@@ -128,6 +140,7 @@ class OpenWebUISink(BaseSink):
         return False
 
     def _link_to_kb(self, kb_id: str, file_id: str) -> None:
+        self._check_cancel()
         resp = requests.post(
             self._url(f"knowledge/{kb_id}/file/add"),
             headers=self._headers(),
@@ -137,6 +150,7 @@ class OpenWebUISink(BaseSink):
         self._check(resp, f"link file {file_id} to KB {kb_id}")
 
     def _delete_file(self, file_id: str) -> None:
+        self._check_cancel()
         resp = requests.delete(
             self._url(f"files/{file_id}"),
             headers=self._headers(),

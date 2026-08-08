@@ -533,6 +533,30 @@ class SubscriptionCancelledError(Exception):
     silently (exit code 0, no EventLog/SMTP)."""
 
 
+# ---------------------------------------------------------------------------
+# SinkCancelledError
+# ---------------------------------------------------------------------------
+class SinkCancelledError(Exception):
+    """Raised by ``BaseSink._check_cancel`` during sink recon when the target
+    subscription link (or the whole subscription) is removed/disabled while a
+    long-running upload loop is in flight.
+
+    ``kind`` tells the recon engine how to react:
+      * ``"link_removed"``  — the target_subscription row is gone / DELETED;
+        halt this target and run the deferred-delete cleanup inline.
+      * ``"link_disabled"`` — the target_subscription row is DISABLED; halt
+        this target's uploads, keep rows already written.
+      * ``"sub_gone"``      — the subscription row is gone / DELETED; abort
+        the whole recon (the worker handles full cleanup next loop).
+      * ``"sub_disabled"``  — the subscription is DISABLED; abort the whole
+        recon (no cleanup needed).
+    """
+
+    def __init__(self, kind: str = "link_removed", *args):
+        super().__init__(kind, *args)
+        self.kind = kind
+
+
 __all__ = [
     "get_logger",
     "sanitize_name",
@@ -552,4 +576,5 @@ __all__ = [
     "uuid7",
     "uuid4",
     "SubscriptionCancelledError",
+    "SinkCancelledError",
 ]

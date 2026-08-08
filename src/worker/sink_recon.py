@@ -230,7 +230,7 @@ def _reconcile_pass1(
     add_count = 0
     update_count = 0
     remove_count = 0
-    ds_df_rows = db.list_datafiles_for_target(target_id)
+    ds_df_rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
     ds_df_by_datafile = {r.datafile_id: r for r in ds_df_rows}
     processed_datafile_ids = set()
 
@@ -240,10 +240,17 @@ def _reconcile_pass1(
 
         # get (or create) akb_datafile
         df = db.get_datafile_by_path(fpath)
-        if df is None:
-            # unknown file → add
+        ds_df = ds_df_by_datafile.get(df.id) if df else None
+        if df is None or ds_df is None:
+            # Unknown file, OR known file not yet linked to this target → add.
+            # base_add_datafile is idempotent (get_or_create + dedup by
+            # get_target_datafile). Reuse the known hash when size/mtime
+            # already match so we avoid hashing the file again.
             try:
-                svc.base_add_datafile(sub_id, fpath)
+                if df is not None and _file_matches_db(fpath, df):
+                    svc.base_add_datafile(sub_id, fpath, known_hash=df.hash)
+                else:
+                    svc.base_add_datafile(sub_id, fpath)
                 add_count += 1
             except Exception as exc:
                 log.error("sink_add_failed", path=fpath, error=str(exc))
@@ -251,7 +258,6 @@ def _reconcile_pass1(
             continue
 
         processed_datafile_ids.add(df.id)
-        ds_df = ds_df_by_datafile.get(df.id)
 
         if _file_matches_db(fpath, df):
             if ds_df and ds_df.hash != df.hash:
@@ -314,14 +320,14 @@ def _pass2_akb_datafiles(sub, db, output_dir, fs_files, log) -> None:
             continue
         st = fs_files[df.path]
         if _file_matches_db(df.path, df):
-            db.update_datafile_last_checked(df.id)
+            db.update_datafile_last_checked(df.id, checked_at)
         else:
             try:
                 real_hash = compute_file_hash(df.path)
             except Exception as exc:
                 log.error("sink_pass2_hash_failed", path=df.path, error=str(exc))
                 raise
-            db.update_datafile_stats(df.id, st.st_size, st.st_mtime, real_hash)
+            db.update_datafile_stats(df.id, st.st_size, st.st_mtime, real_hash, checked_at)
 
 
 def _invoke_remove(ds_link, target_id, ds_df, db, sink_registry, log, sub_name, error_ds_names):

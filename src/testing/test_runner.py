@@ -2427,6 +2427,80 @@ def _dkb_test_recon_error(db, sub, ds):
     return True, "OK"
 
 
+def _dkb_test_recon_add_existing_df(db, sub, ds):
+    """Regression: file known in akb_datafile but not yet linked to this
+    target (e.g. target created after the sub produced files) must be added."""
+    from unittest.mock import MagicMock, patch
+    sub_row = db.get_subscription(sub)
+    test_path = _write_output_file_test(sub_row.name, "existing.md", "# Existing\ncontent")
+    h = compute_file_hash(test_path)
+    df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
+                                   os.path.getmtime(test_path), h)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        from worker.sink_recon import reconcile_subscription_targets
+        mock_svc = MagicMock()
+        mock_svc.remote_target_id = "mock-remote"
+        mock_svc.name = "TestSvc"
+        mock_svc.base_add_datafile = MagicMock()
+        mock_get.return_value = mock_svc
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+        if not mock_svc.base_add_datafile.called:
+            return False, "base_add_datafile not called for known-file add"
+    with db.get_session() as s:
+        s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_recon_known_hash_no_rehash(db, sub, ds):
+    """Hash-avoidance: when size/mtime already match akb_datafile, pass the
+    known hash to base_add_datafile and never re-hash the file."""
+    from unittest.mock import MagicMock, patch
+    sub_row = db.get_subscription(sub)
+    test_path = _write_output_file_test(sub_row.name, "unchanged.md", "# Unchanged\ncontent")
+    h = compute_file_hash(test_path)
+    df = db.get_or_create_datafile(sub, test_path, os.path.getsize(test_path),
+                                   os.path.getmtime(test_path), h)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        from worker.sink_recon import reconcile_subscription_targets
+        mock_svc = MagicMock()
+        mock_svc.remote_target_id = "mock-remote"
+        mock_svc.name = "TestSvc"
+        mock_svc.base_add_datafile = MagicMock()
+        mock_get.return_value = mock_svc
+        with patch("worker.sink_recon.compute_file_hash") as mock_hash:
+            reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+            if mock_hash.called:
+                return False, "compute_file_hash called despite matching size/mtime"
+    with db.get_session() as s:
+        s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_pass2_last_checked(db, sub, ds):
+    """Pass II conformance: last_checked must be identical across rows since a
+    single checked_at timestamp is threaded through the pass."""
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import _pass2_akb_datafiles
+    sub_row = db.get_subscription(sub)
+    p1 = _write_output_file_test(sub_row.name, "lc1.md", "one")
+    p2 = _write_output_file_test(sub_row.name, "lc2.md", "two")
+    df1 = db.get_or_create_datafile(sub, p1, os.path.getsize(p1), os.path.getmtime(p1), compute_file_hash(p1))
+    df2 = db.get_or_create_datafile(sub, p2, os.path.getsize(p2), os.path.getmtime(p2), compute_file_hash(p2))
+    fs_files = {p1: os.stat(p1), p2: os.stat(p2)}
+    _pass2_akb_datafiles(sub_row, db, os.path.dirname(p1), fs_files, MagicMock())
+    with db.get_session() as s:
+        r1 = s.query(AKBDatafile).filter(AKBDatafile.id == df1.id).first()
+        r2 = s.query(AKBDatafile).filter(AKBDatafile.id == df2.id).first()
+        if r1 is None or r2 is None:
+            return False, "rows missing after pass2"
+        if r1.last_checked != r2.last_checked:
+            return False, f"last_checked differs: {r1.last_checked} vs {r2.last_checked}"
+    with db.get_session() as s:
+        s.query(AKBDatafile).filter(AKBDatafile.id.in_([df1.id, df2.id])).delete()
+    return True, "OK"
+
+
 def _dkb_test_datafiles_by_sub(db, sub, ds):
     """list_datafiles_for_target_subscription filters by sub correctly."""
     import uuid as _uuid
@@ -2536,9 +2610,12 @@ def _run_dkb_unit_tests():
         ("DKB Service — base_remove_datafile", lambda db, sub, ds: _dkb_test_base_remove_datafile(db, sub, ds)),
         ("DKB Service — base_add_target", lambda db, sub, ds: _dkb_test_base_add_target(db, sub, ds)),
         ("DKB Recon — adds new file", lambda db, sub, ds: _dkb_test_recon_add(db, sub, ds)),
+        ("DKB Recon — adds existing known file", lambda db, sub, ds: _dkb_test_recon_add_existing_df(db, sub, ds)),
+        ("DKB Recon — known hash avoids re-hash", lambda db, sub, ds: _dkb_test_recon_known_hash_no_rehash(db, sub, ds)),
         ("DKB Recon — removes deleted file", lambda db, sub, ds: _dkb_test_recon_remove(db, sub, ds)),
         ("DKB Recon — skips disabled DS", lambda db, sub, ds: _dkb_test_recon_skip_disabled(db, sub, ds)),
         ("DKB Recon — error on failure", lambda db, sub, ds: _dkb_test_recon_error(db, sub, ds)),
+        ("DKB Pass II — last_checked consistent", lambda db, sub, ds: _dkb_test_pass2_last_checked(db, sub, ds)),
         ("DKB Filter — datafiles by sub", lambda db, sub, ds: _dkb_test_datafiles_by_sub(db, sub, ds)),
         ("DKB Delete — strict raises on remote failure", lambda db, sub, ds: _dkb_test_delete_strict_raises(db, sub, ds)),
         ("DKB Delete — strict success keeps rows for caller", lambda db, sub, ds: _dkb_test_delete_strict_success(db, sub, ds)),

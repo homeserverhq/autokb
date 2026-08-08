@@ -843,7 +843,7 @@ class DatabaseManager:
         with self.get_session() as s:
             return s.query(AKBDatafile).filter(AKBDatafile.path == path).first()
 
-    def update_datafile_stats(self, datafile_id: str, size: int, mtime: float, datafile_hash: str) -> None:
+    def update_datafile_stats(self, datafile_id: str, size: int, mtime: float, datafile_hash: str, checked_at=None) -> None:
         from datetime import timezone as tz
         with self.get_session() as s:
             df = s.query(AKBDatafile).filter(AKBDatafile.id == datafile_id).first()
@@ -851,13 +851,13 @@ class DatabaseManager:
                 df.size = size
                 df.mtime = datetime.fromtimestamp(mtime, tz=tz.utc)
                 df.hash = datafile_hash
-                df.last_checked = datetime.now(tz=tz.utc)
+                df.last_checked = checked_at if checked_at is not None else datetime.now(tz=tz.utc)
 
-    def update_datafile_last_checked(self, datafile_id: str) -> None:
+    def update_datafile_last_checked(self, datafile_id: str, checked_at=None) -> None:
         from datetime import timezone as tz
         with self.get_session() as s:
             s.query(AKBDatafile).filter(AKBDatafile.id == datafile_id).update(
-                {"last_checked": datetime.now(tz=tz.utc)}
+                {"last_checked": checked_at if checked_at is not None else datetime.now(tz=tz.utc)}
             )
 
     def set_datafiles_last_checked_batch(self, sub_id: str, checked_at) -> None:

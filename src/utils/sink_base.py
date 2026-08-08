@@ -124,11 +124,15 @@ class BaseSink(ABC):
 
     # ---- concrete wrapper methods (DB bookkeeping + abstract calls) ----
 
-    def base_add_datafile(self, sub_id: str, path: str) -> None:
-        """Add a local file to this target: DB bookkeeping + remote upload."""
+    def base_add_datafile(self, sub_id: str, path: str, known_hash: Optional[str] = None) -> None:
+        """Add a local file to this target: DB bookkeeping + remote upload.
+
+        Pass ``known_hash`` when the caller has already verified the file is
+        unchanged (size/mtime match) to avoid re-hashing the contents.
+        """
         size = os.path.getsize(path)
         mtime = os.path.getmtime(path)
-        datafile_hash = compute_file_hash(path)
+        datafile_hash = known_hash if known_hash is not None else compute_file_hash(path)
 
         # get-or-create akb_datafile
         df = self.db.get_or_create_datafile(sub_id, path, size, mtime, datafile_hash)

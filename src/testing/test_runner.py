@@ -2307,6 +2307,42 @@ def _dkb_test_compute_hash():
     return True, "OK"
 
 
+def _dkb_test_remote_filename_include_path():
+    """Verify BaseSink.remote_file_name with/without the include_path flag."""
+    import types as _types
+    from utils.sink_base import BaseSink
+
+    row_on = _types.SimpleNamespace(
+        id="x", service_id="y", name="Scrapling KB", api_url="", api_key="",
+        remote_target_id=None, target_extra_params={}, include_path_in_filename=True,
+    )
+    svc_on = _MockSink(row_on, None)
+    path = "/output/crawl4AIWebScraperPlugin/Scrapling/02b7d354dd237a3a.446e1199fbf97f3d.md"
+    got = svc_on.remote_file_name(path)
+    want = "autokb_ScraplingKB_crawl4AIWebScraperPlugin_Scrapling_02b7d354dd237a3a.446e1199fbf97f3d.md"
+    if got != want:
+        return False, f"flag-on: got {got!r}, want {want!r}"
+
+    row_off = _types.SimpleNamespace(
+        id="x", service_id="y", name="Scrapling KB", api_url="", api_key="",
+        remote_target_id=None, target_extra_params={}, include_path_in_filename=False,
+    )
+    svc_off = _MockSink(row_off, None)
+    got2 = svc_off.remote_file_name(path)
+    want2 = "autokb_ScraplingKB_02b7d354dd237a3a.446e1199fbf97f3d.md"
+    if got2 != want2:
+        return False, f"flag-off: got {got2!r}, want {want2!r}"
+
+    # Path outside /output → basename fallback
+    outside = "/etc/passwd"
+    got3 = svc_on.remote_file_name(outside)
+    want3 = "autokb_ScraplingKB_passwd"
+    if got3 != want3:
+        return False, f"outside-output: got {got3!r}, want {want3!r}"
+
+    return True, "OK"
+
+
 def _dkb_test_base_add_datafile(db, sub, ds):
     ds_row = db.get_target(ds.id)
     ds_row.api_key = db.decrypt_target_api_key(ds_row)
@@ -2672,6 +2708,7 @@ def _run_dkb_unit_tests():
         ("DKB Queue — roundtrip", None),
         ("DKB Registry — load", None),
         ("DKB Service — compute hash", None),
+        ("DKB Service — remote filename with path", None),
         ("DKB Service — base_add_datafile", lambda db, sub, ds: _dkb_test_base_add_datafile(db, sub, ds)),
         ("DKB Service — base_update_datafile", lambda db, sub, ds: _dkb_test_base_update_datafile(db, sub, ds)),
         ("DKB Service — base_remove_datafile", lambda db, sub, ds: _dkb_test_base_remove_datafile(db, sub, ds)),
@@ -2704,6 +2741,7 @@ def _run_dkb_unit_tests():
                     ok, msg = _dkb_test_queue_encoding() if "encoding" in name else \
                               _dkb_test_queue_roundtrip() if "roundtrip" in name else \
                               _dkb_test_registry_load() if "Registry" in name else \
+                              _dkb_test_remote_filename_include_path() if "remote filename" in name else \
                               (_dkb_test_compute_hash(), "OK")
                 else:
                     # Create fresh fixtures per test

@@ -299,6 +299,12 @@ You implement the six abstract methods above. `BaseSink` then wraps them so the 
 | `base_remove_datafile(datafile_id)` | Looks up the join row, calls your `remove_datafile(remote_id)`, then deletes the join row. |
 | `base_add_target()` | Calls your `add_target()`, persists the returned remote id on the target row, and updates `self.remote_target_id`. |
 
+An additional concrete helper is available for building deterministic remote filenames:
+
+| Helper | What it does |
+|--------|--------------|
+| `remote_file_name(path)` | Returns a deterministic remote filename: `autokb_{target}_{basename}`, or when `include_path_in_filename` is enabled, `autokb_{target}_{rel_path_with_underscores}` so the full directory under `/output/` is embedded. See Section 9 for the flag. |
+
 You should **call these wrappers yourself only in tests**. In production the recon engine calls them. The point of the design: your six methods are pure remote I/O; everything local is handled for you.
 
 ### `compute_file_hash(path) -> str`
@@ -350,6 +356,16 @@ def __init__(self, target_row, db):
     self.api_key = self.api_key or (os.environ.get(self.api_key_env_var, "") if self.api_key_env_var else "")
     self.embed_model = self.target_extra_params.get("embed_model", "default-embedder")
 ```
+
+### First-Class Target Flags
+
+Beyond `target_extra_params`, every Target row carries a **first-class boolean** that the base class reads automatically:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `include_path_in_filename` | `bool` | `false` | When enabled, the **remote filename** includes the full directory structure under `/output/`. Instead of `autokb_{target}_{basename}`, the scheme becomes `autokb_{target}_{rel_dir_with_underscores}_{basename}`. See `BaseSink.remote_file_name()` below. |
+
+This field is toggled through the **checkbox** in the create/edit Target form (not via the JSON textarea). Every sink benefits from it immediately: `BaseSink.remote_file_name(path)` checks the flag before formatting the name.
 
 ### Create-Target API Fields
 

@@ -1665,6 +1665,13 @@
     const extraDiv = document.createElement('div'); extraDiv.className = 'form-field';
     extraDiv.innerHTML = `<label>Extra Params (JSON)</label><textarea name="target_extra_params" rows="4">${escapeHtml(ds ? JSON.stringify(ds.target_extra_params || {}, null, 2) : '{}')}</textarea>`;
     fields.appendChild(extraDiv);
+    // include_path_in_filename checkbox — creation only (changing after
+    // uploads have been made would orphan existing remote file names).
+    if (!ds) {
+        const pathDiv = document.createElement('div'); pathDiv.className = 'form-field';
+        pathDiv.innerHTML = `<label><input type="checkbox" name="include_path_in_filename" /> Include full directory structure in remote filename</label><small class="sub-row-meta">When enabled, the remote filename includes the plugin/subdirectory path: <code>autokb_{target}_{plugin}_{sub}_{basename}</code>.</small>`;
+        fields.appendChild(pathDiv);
+    }
     // Subscription transfer list
     const transferDiv = document.createElement('div'); transferDiv.className = 'form-field';
     transferDiv.innerHTML = `<label>Linked Subscriptions</label><div class="transfer-list"><div class="transfer-panel"><div class="transfer-header">Available</div><select id="target-available-subs" multiple></select></div><div class="transfer-buttons"><button type="button" class="btn btn-primary" id="target-transfer-right">&gt;&gt;</button><button type="button" class="btn btn-primary" id="target-transfer-left">&lt;&lt;</button></div><div class="transfer-panel"><div class="transfer-header">Linked</div><select id="target-linked-subs" multiple></select></div></div>`;
@@ -1729,6 +1736,9 @@
     try { extra = JSON.parse(extra); } catch (e) { extra = {}; }
     const linked = Array.from($('target-linked-subs').options).map(o => o.value);
     const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked };
+    if (!targetFormTargetId) {
+        body.include_path_in_filename = !!fd.get('include_path_in_filename');
+    }
     if (name) body.name = name;
     try {
       if (targetFormTargetId) {

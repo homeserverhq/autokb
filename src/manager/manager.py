@@ -418,6 +418,7 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         "has_api_key": bool(t.api_key),
         "remote_target_id": t.remote_target_id,
         "target_extra_params": t.target_extra_params or {},
+        "include_path_in_filename": bool(t.include_path_in_filename),
         "status": status,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "subscriptions": [
@@ -1912,8 +1913,12 @@ def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     sub_ids = body.get("subscription_ids", [])
     if not isinstance(sub_ids, list):
         raise HTTPException(status_code=400, detail="subscription_ids must be a list")
+    include_path = body.get("include_path_in_filename", False)
+    if not isinstance(include_path, bool):
+        raise HTTPException(status_code=400, detail="include_path_in_filename must be a boolean")
 
-    t = db.create_target(service_id, name, api_url, api_key, t_extra)
+    t = db.create_target(service_id, name, api_url, api_key, t_extra,
+                         include_path_in_filename=include_path)
     if sub_ids:
         db.link_target_subscriptions(t.id, sub_ids, status="ENQUEUED")
         for sid in sub_ids:
@@ -1939,8 +1944,13 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
             t_extra = json.loads(t_extra)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="target_extra_params must be valid JSON")
+    include_path = body.get("include_path_in_filename")
+    if include_path is not None and not isinstance(include_path, bool):
+        raise HTTPException(status_code=400, detail="include_path_in_filename must be a boolean")
 
-    db.update_target(target_id, api_url=api_url, api_key=api_key, target_extra_params=t_extra)
+    db.update_target(target_id, api_url=api_url, api_key=api_key,
+                     target_extra_params=t_extra,
+                     include_path_in_filename=include_path)
 
     # Diff subscriptions
     new_sub_ids = body.get("subscription_ids", [])

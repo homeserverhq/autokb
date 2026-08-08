@@ -65,7 +65,7 @@ class OpenWebUISink(BaseSink):
         return f"AutoKB_{self.name}"
 
     def _remote_file_name(self, path: str) -> str:
-        return f"autokb_{sanitize_name(self.name)}_{os.path.basename(path)}"
+        return self.remote_file_name(path)
 
     def _paginated_get(self, endpoint: str):
         items = []

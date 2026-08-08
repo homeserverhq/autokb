@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     Column,
     DateTime,
     ForeignKey,
@@ -126,6 +127,7 @@ class Target(Base):
     api_key = Column(Text, nullable=False)
     remote_target_id = Column(Text, nullable=True)
     target_extra_params = Column(JSON, default=dict)
+    include_path_in_filename = Column(Boolean, nullable=False, default=False, server_default="false")
 
     service = relationship("Sink", back_populates="targets")
 
@@ -674,13 +676,15 @@ class DatabaseManager:
 
     # ----- Target CRUD -----
     def create_target(self, service_id: str, name: str, api_url: str, api_key: str,
-                      target_extra_params: Dict[str, Any] = None) -> Target:
+                      target_extra_params: Dict[str, Any] = None,
+                      include_path_in_filename: bool = False) -> Target:
         encrypted = self._cipher.encrypt(api_key) if api_key else ""
         t = Target(
             id=str(uuid4()),
             service_id=service_id, name=name, api_url=api_url,
             api_key=encrypted,
             target_extra_params=target_extra_params or {},
+            include_path_in_filename=bool(include_path_in_filename),
         )
         with self.get_session() as s:
             s.add(t)
@@ -700,7 +704,8 @@ class DatabaseManager:
             return q.order_by(Target.name).all()
 
     def update_target(self, target_id: str, *, name: str = None, api_url: str = None,
-                      api_key: str = None, target_extra_params: Dict[str, Any] = None) -> Optional[Target]:
+                      api_key: str = None, target_extra_params: Dict[str, Any] = None,
+                      include_path_in_filename: bool = None) -> Optional[Target]:
         with self.get_session() as s:
             t = s.query(Target).filter(Target.id == target_id).first()
             if not t:
@@ -713,6 +718,8 @@ class DatabaseManager:
                 t.api_key = self._cipher.encrypt(api_key)
             if target_extra_params is not None:
                 t.target_extra_params = target_extra_params
+            if include_path_in_filename is not None:
+                t.include_path_in_filename = bool(include_path_in_filename)
             s.flush()
             s.refresh(t)
             return t

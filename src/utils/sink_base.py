@@ -11,6 +11,8 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
+from utils.misc_utils import sanitize_name
+
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB
 
@@ -49,7 +51,7 @@ class BaseSink(ABC):
 
     def __init__(self, target_row: Any, db: Any):
         """*target_row* is an ORM row with attributes:
-        ``id, service_id, name, api_url, api_key, remote_target_id, target_extra_params``
+        ``id, service_id, name, api_url, api_key, remote_target_id, target_extra_params, include_path_in_filename``
         """
         self.target_id = target_row.id
         self.service_id = target_row.service_id
@@ -58,7 +60,32 @@ class BaseSink(ABC):
         self.api_key = target_row.api_key  # already decrypted by caller
         self.remote_target_id = target_row.remote_target_id
         self.target_extra_params = target_row.target_extra_params or {}
+        self.include_path_in_filename = bool(
+            getattr(target_row, "include_path_in_filename", False)
+        )
+        self._output_root = "/output"
         self.db = db
+
+    def remote_file_name(self, path: str) -> str:
+        """Deterministic remote filename for *path*.
+
+        Default scheme: ``autokb_{target}_{basename}``. When the target has
+        ``include_path_in_filename`` enabled, the relative directory structure
+        under the output root is folded into the name with underscores::
+
+            autokb_{target}_{rel_dir_with_underscores}_{basename}
+
+        Example with the flag on::
+
+            /output/crawl4AIWebScraperPlugin/Scrapling/02b7.md
+            → autokb_ScraplingKB_crawl4AIWebScraperPlugin_Scrapling_02b7.md
+        """
+        base = f"autokb_{sanitize_name(self.name)}"
+        if self.include_path_in_filename:
+            rel = os.path.relpath(path, self._output_root)
+            if not rel.startswith(".."):
+                return f"{base}_{rel.replace(os.sep, '_')}"
+        return f"{base}_{os.path.basename(path)}"
 
     @classmethod
     def get_defaults(cls) -> Dict[str, Any]:

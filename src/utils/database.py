@@ -734,6 +734,13 @@ class DatabaseManager:
             ).count()
 
     # ----- target-subscription link -----
+    def get_target_subscription(self, target_id: str, subscription_id: str) -> Optional[TargetSubscription]:
+        with self.get_session() as s:
+            return s.query(TargetSubscription).filter(
+                TargetSubscription.target_id == target_id,
+                TargetSubscription.subscription_id == subscription_id,
+            ).first()
+
     def list_target_subscriptions(self, target_id: str) -> List[TargetSubscription]:
         with self.get_session() as s:
             return s.query(TargetSubscription).filter(

@@ -1163,6 +1163,7 @@
   let allSubsActivity = {};
   let sinksCache = {};
   let targetsCache = {};
+  let expandedTargets = new Set();
   let allSubsSort = { key: 'last_updated', dir: 'desc' };
 
   async function loadAllSubscriptions() {
@@ -1367,25 +1368,34 @@
     const canEnable = status === 'ERROR' || status === 'DISABLED';
     const toggleLabel = canEnable ? 'Enable' : 'Disable';
     const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
-    let subsInfo = '';
-    if (ds.subscriptions && ds.subscriptions.length) {
-      const names = ds.subscriptions.map(s => s.subscription_name || s.subscription_id).join(', ');
-      subsInfo = `<span class="sub-row-meta" style="margin-left:8px;">Subs: ${escapeHtml(names)}</span>`;
-    }
+    const isExpanded = expandedTargets.has(ds.target_id);
+    const subCount = (ds.subscriptions && ds.subscriptions.length) || 0;
     row.innerHTML = `
       <div class="sub-row-header">
         <div>
+          <span class="sub-row-chevron" data-chevron>${isExpanded ? '▾' : '▸'}</span>
           <span class="sub-row-name">${escapeHtml(ds.name)}</span>
           <span class="badge badge-${status}">${status}</span>
-          ${subsInfo}
+          <span class="sub-row-meta" style="margin-left:8px;">${subCount} sub${subCount === 1 ? '' : 's'}</span>
           <span class="sub-row-meta" style="margin-left:8px;">Updated: ${escapeHtml(relativeTime(ds.last_updated))}</span>
-          ${ds.subscriptions && ds.subscriptions[0] && ds.subscriptions[0].last_message
-            ? `<span class="sub-row-meta sub-row-message" style="margin-left:8px;">${escapeHtml(ds.subscriptions[0].last_message)}</span>`
-            : ''}
         </div>
         <div class="sub-row-actions"></div>
       </div>
+      <div class="target-children" style="display:${isExpanded ? 'block' : 'none'};"></div>
     `;
+    const chevron = row.querySelector('[data-chevron]');
+    const children = row.querySelector('.target-children');
+    if (subCount > 0) {
+      chevron.addEventListener('click', () => {
+        const open = children.style.display !== 'none';
+        children.style.display = open ? 'none' : 'block';
+        chevron.textContent = open ? '▸' : '▾';
+        if (open) expandedTargets.delete(ds.target_id);
+        else expandedTargets.add(ds.target_id);
+      });
+    } else {
+      chevron.style.visibility = 'hidden';
+    }
     const actions = row.querySelector('.sub-row-actions');
     if (canUpdate) {
       actions.appendChild(button('Update', 'btn-success', () => triggerTargetUpdate(ds.target_id)));
@@ -1399,7 +1409,47 @@
     if (!isTerminal) {
       actions.appendChild(button('Delete', 'btn-destructive', () => confirmDeleteTarget(ds)));
     }
+    buildTargetChildren(children, ds);
     return row;
+  }
+
+  function buildTargetChildren(container, ds) {
+    container.innerHTML = '';
+    const subs = ds.subscriptions || [];
+    if (!subs.length) {
+      container.innerHTML = '<p class="sub-row-meta" style="padding:8px 0 8px 24px;">No linked subscriptions.</p>';
+      return;
+    }
+    for (const s of subs) {
+      const child = document.createElement('div');
+      child.className = 'target-child-row';
+      const st = s.status || 'ENABLED';
+      const isTerminal = st === 'DELETED';
+      const canEnable = st === 'ERROR' || st === 'DISABLED';
+      const toggleLabel = canEnable ? 'Enable' : 'Disable';
+      const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
+      const meta = [s.last_updated ? `Updated: ${relativeTime(s.last_updated)}` : null,
+                    s.last_message ? escapeHtml(s.last_message) : null]
+        .filter(Boolean).join(' · ');
+      child.innerHTML = `
+        <span class="sub-row-chevron" style="visibility:hidden;">▸</span>
+        <span class="sub-row-name">${escapeHtml(s.subscription_name || s.subscription_id)}</span>
+        <span class="badge badge-${st}">${st}</span>
+        <span class="sub-row-meta" style="margin-left:8px;">${meta}</span>
+      `;
+      const actions = document.createElement('span');
+      actions.className = 'target-child-actions';
+      if (!isTerminal) {
+        actions.appendChild(button(toggleLabel, toggleClass, () => setTargetSubStatus(ds.target_id, s.subscription_id, canEnable ? 'ENABLED' : 'DISABLED')));
+      }
+      child.appendChild(actions);
+      container.appendChild(child);
+    }
+  }
+
+  async function setTargetSubStatus(tId, subId, status) {
+    try { await api(`/targets/${tId}/subscriptions/${subId}/status`, { method: 'POST', body: JSON.stringify({ status }) }); }
+    catch (e) { alert('Status change failed: ' + e.message); }
   }
 
   // ---- All Targets ----
@@ -1432,15 +1482,36 @@
     const canEnable = status === 'ERROR' || status === 'DISABLED';
     const toggleLabel = canEnable ? 'Enable' : 'Disable';
     const toggleClass = canEnable ? 'btn-primary' : 'btn-destructive';
+    const isExpanded = expandedTargets.has(t.target_id);
+    const subCount = (t.subscriptions && t.subscriptions.length) || 0;
     row.innerHTML = `
-      <span class="all-subs-col-name">${escapeHtml(t.name)}</span>
+      <span class="all-subs-col-name">
+        <span class="sub-row-chevron" data-chevron style="margin-right:6px;">${isExpanded ? '▾' : '▸'}</span>
+        ${escapeHtml(t.name)}
+      </span>
       <span class="all-subs-col-plugin">${escapeHtml(t.service_display_name || t.service_name || '')}</span>
       <span class="all-subs-col-status"><span class="badge badge-${status}">${escapeHtml(status)}</span></span>
       <span class="all-subs-col-updated">${escapeHtml(relativeTime(t.last_updated))}</span>
       <span class="all-subs-col-edit"><button class="btn btn-primary" data-ds="${escapeHtml(t.target_id)}" data-svc="${escapeHtml(t.service_id)}" ${isTerminal ? 'disabled' : ''}>Edit</button></span>
       <span class="all-subs-col-toggle"><button class="btn ${toggleClass}" data-ds="${escapeHtml(t.target_id)}" data-target="${canEnable ? 'ENABLED' : 'DISABLED'}" ${isTerminal ? 'disabled' : ''}>${toggleLabel}</button></span>
       <span class="all-subs-col-update"><button class="btn btn-success" data-ds="${escapeHtml(t.target_id)}" ${canTrigger ? '' : 'disabled'}>Update</button></span>
+      <span class="all-subs-col-children" style="display:${isExpanded ? 'block' : 'none'};"></span>
     `;
+    const chevron = row.querySelector('[data-chevron]');
+    const children = row.querySelector('.all-subs-col-children');
+    if (subCount > 0) {
+      chevron.style.cursor = 'pointer';
+      chevron.addEventListener('click', () => {
+        const open = children.style.display !== 'none';
+        children.style.display = open ? 'none' : 'block';
+        chevron.textContent = open ? '▸' : '▾';
+        if (open) expandedTargets.delete(t.target_id);
+        else expandedTargets.add(t.target_id);
+      });
+    } else {
+      chevron.style.visibility = 'hidden';
+    }
+    buildTargetChildren(children, t);
     row.querySelectorAll('button').forEach(btn => {
       btn.addEventListener('click', async () => {
         const tId = btn.dataset.ds;
@@ -1533,26 +1604,32 @@
     const fields = $('target-form-fields');
     fields.innerHTML = '';
     const isEdit = !!ds;
-    // Name
+    // Name (editable only on create; immutable after creation)
     const nameDiv = document.createElement('div'); nameDiv.className = 'form-field';
-    nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label>` +
-      `<input type="text" name="target_name" value="${escapeHtml(ds ? ds.name : '')}" required maxlength="${TARGET_NAME_MAX_LEN}" />` +
-      `<small class="form-field-error" id="target-name-error" style="display:none"></small>`;
+    if (isEdit) {
+      nameDiv.innerHTML = `<label>Name</label><div class="sub-row-meta" style="padding:8px 0;">${escapeHtml(ds.name)}</div><small class="sub-row-meta">Target name cannot be changed after creation.</small>`;
+    } else {
+      nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label>` +
+        `<input type="text" name="target_name" required maxlength="${TARGET_NAME_MAX_LEN}" />` +
+        `<small class="form-field-error" id="target-name-error" style="display:none"></small>`;
+    }
     fields.appendChild(nameDiv);
     const nameInput = nameDiv.querySelector('input[name="target_name"]');
-    const nameErr = nameDiv.querySelector('#target-name-error');
-    const updateTargetNameValidation = () => {
-      const err = validateTargetName(nameInput.value);
-      if (err) {
-        nameErr.textContent = err;
-        nameErr.style.display = 'block';
-        nameInput.classList.add('invalid');
-      } else {
-        nameErr.style.display = 'none';
-        nameInput.classList.remove('invalid');
-      }
-    };
-    nameInput.addEventListener('input', updateTargetNameValidation);
+    if (nameInput) {
+      const nameErr = nameDiv.querySelector('#target-name-error');
+      const updateTargetNameValidation = () => {
+        const err = validateTargetName(nameInput.value);
+        if (err) {
+          nameErr.textContent = err;
+          nameErr.style.display = 'block';
+          nameInput.classList.add('invalid');
+        } else {
+          nameErr.style.display = 'none';
+          nameInput.classList.remove('invalid');
+        }
+      };
+      nameInput.addEventListener('input', updateTargetNameValidation);
+    }
     // API URL (pre-fill the service default on create, mirroring the source schema)
     const defaultApiUrl = (svc && svc.default_api_url) ? svc.default_api_url : '';
     const urlDiv = document.createElement('div'); urlDiv.className = 'form-field';
@@ -1612,24 +1689,29 @@
   $('target-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const fd = new FormData($('target-form'));
-    const name = fd.get('target_name');
-    const nameInput = $('target-form').querySelector('input[name="target_name"]');
-    const nameErr = validateTargetName(name);
-    if (nameErr) {
-      const errEl = $('target-name-error');
-      if (errEl) { errEl.textContent = nameErr; errEl.style.display = 'block'; }
-      if (nameInput) {
-        nameInput.classList.add('invalid');
-        nameInput.focus();
+    const isEdit = !!targetFormTargetId;
+    let name;
+    if (!isEdit) {
+      name = fd.get('target_name');
+      const nameInput = $('target-form').querySelector('input[name="target_name"]');
+      const nameErr = validateTargetName(name);
+      if (nameErr) {
+        const errEl = $('target-name-error');
+        if (errEl) { errEl.textContent = nameErr; errEl.style.display = 'block'; }
+        if (nameInput) {
+          nameInput.classList.add('invalid');
+          nameInput.focus();
+        }
+        return;
       }
-      return;
     }
     const apiUrl = fd.get('api_url');
     const apiKey = fd.get('api_key');
     let extra = fd.get('target_extra_params');
     try { extra = JSON.parse(extra); } catch (e) { extra = {}; }
     const linked = Array.from($('target-linked-subs').options).map(o => o.value);
-    const body = { name, api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked };
+    const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked };
+    if (name) body.name = name;
     try {
       if (targetFormTargetId) {
         await api(`/targets/${targetFormTargetId}`, { method: 'PUT', body: JSON.stringify(body) });

@@ -367,6 +367,19 @@ async def _handle_notify(payload: str) -> None:
     })
 
 
+def _serialise_target_subscription(s, db) -> Dict[str, Any]:
+    """Serialize a single target-subscription link, enriched with the sub's name."""
+    sub_row = db.get_subscription(s.subscription_id)
+    return {
+        "subscription_id": s.subscription_id,
+        "subscription_name": sub_row.name if sub_row else "",
+        "plugin_id": sub_row.plugin_id if sub_row else "",
+        "status": s.status,
+        "last_updated": s.last_updated.isoformat() if s.last_updated else None,
+        "last_message": s.last_message,
+    }
+
+
 def _serialise_target(t, subs, db) -> Dict[str, Any]:
     """Serialize a target with its subscriptions and derived status."""
     svc_row = db.get_sink(t.service_id)
@@ -407,12 +420,7 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         "status": status,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "subscriptions": [
-            {
-                "subscription_id": s.subscription_id,
-                "status": s.status,
-                "last_updated": s.last_updated.isoformat() if s.last_updated else None,
-                "last_message": s.last_message,
-            }
+            _serialise_target_subscription(s, db)
             for s in subs
         ],
     }
@@ -1921,9 +1929,6 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
     t = db.get_target(target_id)
     if t is None:
         raise HTTPException(status_code=404, detail="Target not found")
-    name = body.get("name")
-    if name is not None:
-        name = _validate_target_name(name)
     api_url = body.get("api_url")
     api_key = body.get("api_key")
     t_extra = body.get("target_extra_params")
@@ -1934,7 +1939,7 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="target_extra_params must be valid JSON")
 
-    db.update_target(target_id, name=name, api_url=api_url, api_key=api_key, target_extra_params=t_extra)
+    db.update_target(target_id, api_url=api_url, api_key=api_key, target_extra_params=t_extra)
 
     # Diff subscriptions
     new_sub_ids = body.get("subscription_ids", [])
@@ -2013,6 +2018,22 @@ def api_set_target_status(target_id: str, body: Dict[str, Any] = Body(...)):
         for sid in sub_ids:
             queue.push_primary(sid, operation="SINK_ONLY")
     return {"updated": len(sub_ids)}
+
+
+@app.post("/api/targets/{target_id}/subscriptions/{subscription_id}/status")
+def api_set_target_subscription_status(target_id: str, subscription_id: str, body: Dict[str, Any] = Body(...)):
+    """Enable/disable a single target-subscription link."""
+    db: DatabaseManager = STATE["db"]
+    queue: QueueManager = STATE["queue"]
+    link = db.get_target_subscription(target_id, subscription_id)
+    if link is None:
+        raise HTTPException(status_code=404, detail="Subscription not linked to this target")
+    new_status = body.get("status", "").upper()
+    if new_status not in ("ENABLED", "DISABLED"):
+        raise HTTPException(status_code=400, detail="status must be ENABLED or DISABLED")
+    db.set_target_subscription_status(target_id, subscription_id, status=new_status)
+    queue.push_primary(subscription_id, operation="SINK_ONLY")
+    return {"updated": 1}
 
 
 # ---------------------------------------------------------------------------

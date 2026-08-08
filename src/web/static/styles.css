@@ -133,6 +133,26 @@ body {
 h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
 .plugin-description { color: #9E9E9E; font-size: 16px; line-height: 1.4; height: 67px; overflow: hidden; margin-bottom: 4px; }
 .sub-row-actions { display: flex; gap: 8px; }
+.sub-row-chevron { cursor: pointer; display: inline-block; color: #9E9E9E; font-size: 12px; }
+.target-children {
+  border-left: 2px solid #2A2A2A;
+  margin: 8px 0 0 6px;
+  padding-left: 16px;
+}
+.target-child-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; margin: 4px 0;
+  background: #1F1F1F; border: 1px solid #2A2A2A; border-radius: 8px;
+}
+.target-child-actions { margin-left: auto; }
+.all-subs-col-children {
+  flex-basis: 100%; width: 100%;
+  padding: 8px 0 0 0;
+}
+.all-subs-col-children .target-child-row {
+  margin: 4px 0;
+}
+
 .badge {
   display: inline-block; padding: 2px 8px; border-radius: 4px;
   font-size: 12px; font-weight: 600;
@@ -190,7 +210,7 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
 .all-subs-body { display: flex; flex-direction: column; gap: 4px; }
 .all-subs-row {
   background: #1A1A1A; border: 1px solid #2A2A2A; border-radius: 8px;
-  padding: 6px 12px; display: flex; align-items: center;
+  padding: 6px 12px; display: flex; align-items: center; flex-wrap: wrap;
   font-size: 13px; min-height: 36px;
 }
 .all-subs-header {

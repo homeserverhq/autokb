@@ -1540,12 +1540,30 @@
   }
 
   async function confirmDeleteTarget(ds) {
-    if (!confirm(`Delete target '${ds.name}'?\n\nRemote files will be removed. This cannot be undone.`)) return;
+    if (!confirm(`Delete target '${ds.name}'?\n\nThe remote dataset will also be removed. This cannot be undone.`)) return;
+    let deleted = false;
     try {
       await api(`/targets/${ds.target_id}`, { method: 'DELETE' });
+      deleted = true;
+    } catch (e) {
+      const force = confirm(
+        `Delete failed: ${e.message}\n\n` +
+        `The target has been retained so you can retry later.\n\n` +
+        `Delete the AutoKB records anyway? Any remote data would be left for manual cleanup.`
+      );
+      if (!force) return;
+      try {
+        await api(`/targets/${ds.target_id}?force=true`, { method: 'DELETE' });
+        deleted = true;
+      } catch (e2) {
+        alert('Force delete failed: ' + e2.message);
+        return;
+      }
+    }
+    if (deleted) {
       if (currentView === 'destinations-detail' && currentSinkId) loadTargets(currentSinkId);
       if (currentView === 'data-targets') loadAllTargets();
-    } catch (e) { alert('Delete failed: ' + e.message); }
+    }
   }
 
   // ---- DKB Form ----

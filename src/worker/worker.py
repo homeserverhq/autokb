@@ -367,7 +367,7 @@ def _cleanup_subscription_targets(sub: Subscription, sink_registry: SinkRegistry
     for t_link in t_links:
         target_id = t_link.target_id
         targets_seen.add(target_id)
-        t_df_rows = db.list_datafiles_for_target(target_id)
+        t_df_rows = db.list_datafiles_for_target_subscription(target_id, sub.id)
         for t_df in t_df_rows:
             try:
                 t_row = db.get_target(target_id)

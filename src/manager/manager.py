@@ -84,6 +84,7 @@ from utils.registry import PluginRegistry
 from utils.sink_registry import SinkRegistry
 
 from .registry import ManagerPluginRegistry
+from worker.sink_recon import _remove_orphan_target, _remove_remote_target_strict
 
 
 # ---------------------------------------------------------------------------
@@ -1968,21 +1969,32 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
 
 
 @app.delete("/api/targets/{target_id}")
-def api_delete_target(target_id: str):
+def api_delete_target(target_id: str, force: bool = False):
     db: DatabaseManager = STATE["db"]
-    queue: QueueManager = STATE["queue"]
     t = db.get_target(target_id)
     if t is None:
         raise HTTPException(status_code=404, detail="Target not found")
-    subs = db.list_target_subscriptions(target_id)
-    sub_ids = list({s.subscription_id for s in subs})
-    if sub_ids:
-        db.set_target_subscriptions_status(target_id, sub_ids, status="DELETED")
-        for sid in sub_ids:
-            queue.push_primary(sid, operation="SINK_ONLY")
-    db.delete_target_datafiles_for_target(target_id)
-    db.delete_target_subscriptions_for_target(target_id)
-    db.delete_target_row(target_id)
+    sink_reg: SinkRegistry = STATE.get("sink_registry")
+    if force:
+        # Best-effort: try remote removal, then delete local records regardless.
+        try:
+            _remove_orphan_target(target_id, db, sink_reg, LOG)
+        except Exception as exc:
+            LOG.warning("target_force_delete_remote_failed", target_id=target_id, error=str(exc))
+        db.delete_target_subscriptions_for_target(target_id)
+    else:
+        # Strict: remote dataset must be removed first, else retain everything.
+        try:
+            _remove_remote_target_strict(target_id, db, sink_reg, LOG)
+        except Exception as exc:
+            LOG.warning("target_delete_remote_failed", target_id=target_id, error=str(exc))
+            raise HTTPException(
+                status_code=502,
+                detail=f"Remote dataset deletion failed; target retained: {exc}",
+            )
+        db.delete_target_datafiles_for_target(target_id)
+        db.delete_target_subscriptions_for_target(target_id)
+        db.delete_target_row(target_id)
     _schedule_sse_broadcast({
         "type": "target_deleted",
         "data": {"target_id": target_id, "service_id": t.service_id},

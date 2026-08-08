@@ -1706,6 +1706,225 @@ def test_sink_only_recon() -> Tuple[bool, str]:
             _delete_sub(sub_id)
 
 
+def test_dkb_delete_normal() -> Tuple[bool, str]:
+    """DELETE /api/targets/{id} — normal: remote removal succeeds, local rows gone."""
+    _reset_sink_calls()
+    uid = str(time.time()).replace(".", "")[-8:]
+    sub_name = f"e2e-delnormal-{uid}"
+    t_name = f"e2e-delnormal-ds-{uid}"
+    sub_id = None
+    t_id = None
+    try:
+        sub = create_sub("testSinkWriterPlugin", sub_name, {}, cron="0 0 * * *")
+        sub_id = sub["id"]
+        svcs = api_get("/api/sinks")
+        svc_id = next(s["service_id"] for s in svcs if s.get("name") == "testSink")
+        ds = api_post(f"/api/sinks/{svc_id}/targets", {
+            "name": t_name, "api_url": "http://fake/api", "api_key": "test",
+            "target_extra_params": {}, "subscription_ids": [sub_id],
+        })
+        t_id = ds["target_id"]
+        _write_output_file(sub_name, "manual.md", "x\n")
+        trigger_sub(sub_id)
+        deadline = time.time() + 120
+        last_status = None
+        while time.time() < deadline:
+            t_det = api_get(f"/api/targets/{t_id}")
+            subs_detail = t_det.get("subscriptions", [])
+            if subs_detail:
+                last_status = subs_detail[0].get("status", "")
+                if last_status == "ENABLED":
+                    break
+            time.sleep(2)
+        if last_status != "ENABLED":
+            return False, f"DelNormal: link not ENABLED (last={last_status})"
+        t_before = api_get(f"/api/targets/{t_id}")
+        if not t_before.get("remote_target_id"):
+            return False, f"DelNormal: remote_target_id is empty (recon may not have set it)"
+        r = requests.delete(f"{MANAGER_URL}/api/targets/{t_id}", headers=_api_headers(), timeout=30)
+        if r.status_code != 200:
+            return False, f"DelNormal: DELETE returned {r.status_code}: {r.text[:200]}"
+        st3, _ = 404, None
+        try:
+            api_get(f"/api/targets/{t_id}")
+        except Exception:
+            st3 = 404
+        if st3 != 404:
+            return False, "DelNormal: target still exists after DELETE"
+        calls = _read_sink_calls()
+        if not any(c[0] == "remove_target" for c in calls):
+            return False, "DelNormal: remove_target not called"
+        return True, "Normal delete OK (remote removed, local gone)"
+    finally:
+        try:
+            if t_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/targets/{t_id}?force=true", headers=_api_headers(), timeout=10)
+        except Exception:
+            pass
+        if sub_id is not None:
+            _delete_sub(sub_id)
+
+
+def test_dkb_delete_force() -> Tuple[bool, str]:
+    """DELETE /api/targets/{id}?force=true — always deletes local rows."""
+    uid = str(time.time()).replace(".", "")[-8:]
+    t_name = f"e2e-delforce-{uid}"
+    t_id = None
+    try:
+        svcs = api_get("/api/sinks")
+        svc_id = next(s["service_id"] for s in svcs if s.get("name") == "testSink")
+        ds = api_post(f"/api/sinks/{svc_id}/targets", {
+            "name": t_name, "api_url": "http://fake/api", "api_key": "x",
+            "target_extra_params": {}, "subscription_ids": [],
+        })
+        t_id = ds["target_id"]
+        r = requests.delete(f"{MANAGER_URL}/api/targets/{t_id}?force=true", headers=_api_headers(), timeout=30)
+        if r.status_code != 200:
+            return False, f"DelForce: DELETE returned {r.status_code}: {r.text[:200]}"
+        st3 = 404
+        try:
+            api_get(f"/api/targets/{t_id}")
+        except Exception:
+            st3 = 404
+        if st3 != 404:
+            return False, "DelForce: target still exists after force delete"
+        return True, "Force delete OK (local rows gone)"
+    finally:
+        try:
+            if t_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/targets/{t_id}?force=true", headers=_api_headers(), timeout=10)
+        except Exception:
+            pass
+
+
+def test_dkb_delete_strict_failure_force() -> Tuple[bool, str]:
+    """Strict DELETE fails → 502 + target retained; force recovers."""
+    from utils.database import Sink
+    import uuid
+    db = _sink_db()
+    bogus = str(uuid.uuid4())
+    with db.get_session() as s:
+        s.add(Sink(id=bogus, name="NoSuchSinkClass"))
+    t_id = None
+    try:
+        r = requests.post(
+            f"{MANAGER_URL}/api/sinks/{bogus}/targets",
+            headers={**_api_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"name": "StrictFailTarget", "api_url": "http://fake/api",
+                             "api_key": "x", "target_extra_params": {}, "subscription_ids": []}),
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return False, f"StrictFail: create target failed {r.status_code}: {r.text[:200]}"
+        t = r.json()
+        t_id = t["target_id"]
+        r2 = requests.delete(f"{MANAGER_URL}/api/targets/{t_id}", headers=_api_headers(), timeout=30)
+        if r2.status_code != 502:
+            return False, f"StrictFail: expected 502 got {r2.status_code}"
+        detail = r2.json().get("detail", "")
+        if "target retained" not in detail:
+            return False, f"StrictFail: detail missing 'target retained': {detail[:120]}"
+        r3 = api_get(f"/api/targets/{t_id}")
+        if r3.get("target_id") != t_id:
+            return False, "StrictFail: target not retained after 502"
+        r4 = requests.delete(f"{MANAGER_URL}/api/targets/{t_id}?force=true", headers=_api_headers(), timeout=30)
+        if r4.status_code != 200:
+            return False, f"StrictFail: force delete returned {r4.status_code}"
+        try:
+            api_get(f"/api/targets/{t_id}")
+            return False, "StrictFail: target still exists after force delete"
+        except Exception:
+            pass
+        return True, "Strict fail 502 + retained, force delete recovers OK"
+    finally:
+        try:
+            if t_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/targets/{t_id}?force=true", headers=_api_headers(), timeout=10)
+        except Exception:
+            pass
+        with db.get_session() as s:
+            s.query(Sink).filter(Sink.id == bogus).delete()
+        db.dispose()
+
+
+def test_dkb_unlink_last_sub_keeps_target() -> Tuple[bool, str]:
+    """Unlinking the last sub via Edit keeps the (empty) target."""
+    _reset_sink_calls()
+    uid = str(time.time()).replace(".", "")[-8:]
+    sub_name = f"e2e-keepempty-{uid}"
+    t_name = f"e2e-keepempty-ds-{uid}"
+    sub_id = None
+    t_id = None
+    try:
+        sub = create_sub("testSinkWriterPlugin", sub_name, {}, cron="0 0 * * *")
+        sub_id = sub["id"]
+        svcs = api_get("/api/sinks")
+        svc_id = next(s["service_id"] for s in svcs if s.get("name") == "testSink")
+        ds = api_post(f"/api/sinks/{svc_id}/targets", {
+            "name": t_name, "api_url": "http://fake/api", "api_key": "test",
+            "target_extra_params": {}, "subscription_ids": [sub_id],
+        })
+        t_id = ds["target_id"]
+        _write_output_file(sub_name, "manual.md", "x\n")
+        trigger_sub(sub_id)
+        deadline = time.time() + 120
+        last_status = None
+        while time.time() < deadline:
+            t_det = api_get(f"/api/targets/{t_id}")
+            subs_detail = t_det.get("subscriptions", [])
+            if subs_detail:
+                last_status = subs_detail[0].get("status", "")
+                if last_status == "ENABLED":
+                    break
+            time.sleep(2)
+        if last_status != "ENABLED":
+            return False, f"KeepEmpty: link not ENABLED (last={last_status})"
+        r = requests.put(
+            f"{MANAGER_URL}/api/targets/{t_id}",
+            headers={**_api_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"api_url": "http://fake/api", "api_key": "",
+                             "target_extra_params": {}, "subscription_ids": []}),
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return False, f"KeepEmpty: PUT unlink returned {r.status_code}: {r.text[:200]}"
+        deadline = time.time() + 60
+        kept = False
+        subs_gone = False
+        while time.time() < deadline:
+            try:
+                t_det = api_get(f"/api/targets/{t_id}")
+                kept = True
+                sub_count = len(t_det.get("subscriptions", []))
+                if sub_count == 0:
+                    subs_gone = True
+                    break
+            except Exception:
+                kept = False
+                break
+            time.sleep(2)
+        if not kept:
+            return False, "KeepEmpty: target was deleted (should be kept)"
+        if not subs_gone:
+            return False, "KeepEmpty: target still has linked subs"
+        sub_after = api_get(f"/api/subscriptions/{sub_id}")
+        if sub_after.get("status") != "ENABLED":
+            return False, f"KeepEmpty: sub status changed to {sub_after.get('status')}"
+        calls = _read_sink_calls()
+        remove_calls = [c for c in calls if c[0] == "remove_datafile"]
+        if not remove_calls:
+            return False, "KeepEmpty: no remove_datafile calls (files not cleaned)"
+        return True, "Unlink last sub OK (target kept empty, sub enabled, files removed)"
+    finally:
+        try:
+            if t_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/targets/{t_id}?force=true", headers=_api_headers(), timeout=10)
+        except Exception:
+            pass
+        if sub_id is not None:
+            _delete_sub(sub_id)
+
+
 # ---------------------------------------------------------------------------
 # Sink unit test helpers and functions
 # ---------------------------------------------------------------------------
@@ -1786,7 +2005,7 @@ def _sink_create_fixtures(db):
 
 def _sink_api_delete(path):
     import urllib.request, urllib.error
-    req = urllib.request.Request(f"http://localhost:80{path}", method="DELETE")
+    req = urllib.request.Request(f"http://localhost:80{path}?force=true", method="DELETE")
     req.add_header("X-Api-Key", BACKEND_KEY)
     try:
         urllib.request.urlopen(req, timeout=10)
@@ -2208,6 +2427,98 @@ def _dkb_test_recon_error(db, sub, ds):
     return True, "OK"
 
 
+def _dkb_test_datafiles_by_sub(db, sub, ds):
+    """list_datafiles_for_target_subscription filters by sub correctly."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    other = str(_uuid.uuid4())
+    with db.get_session() as s:
+        s.add(Subscription(id=other, plugin_id="test_plugin",
+                           name=f"test_other_{other}", config={}, status=STATE_DISABLED,
+                           access_level="PRIVATE", sub_type="SCHEDULED", cron="0 0 31 12 *"))
+        s.flush()
+        df1_id = str(_uuid.uuid4()); df2_id = str(_uuid.uuid4())
+        s.add(AKBDatafile(id=df1_id, subscription_id=sub, path=f"/tmp/sink_test/{df1_id}.md",
+                          size=1, mtime=now, hash="h1"))
+        s.add(AKBDatafile(id=df2_id, subscription_id=other, path=f"/tmp/sink_test/{df2_id}.md",
+                          size=1, mtime=now, hash="h2"))
+        s.flush()
+        s.add(TargetDatafile(target_id=ds.id, datafile_id=df1_id, remote_datafile_id="r1", hash="h1"))
+        s.add(TargetDatafile(target_id=ds.id, datafile_id=df2_id, remote_datafile_id="r2", hash="h2"))
+    try:
+        all_rows = db.list_datafiles_for_target(ds.id)
+        if len(all_rows) != 2:
+            return False, f"expected 2 all got {len(all_rows)}"
+        rows_sub = db.list_datafiles_for_target_subscription(ds.id, sub)
+        if len(rows_sub) != 1 or rows_sub[0].datafile_id != df1_id:
+            return False, f"sub filter: expected 1 row for fixture-sub got {len(rows_sub)}"
+        rows_other = db.list_datafiles_for_target_subscription(ds.id, other)
+        if len(rows_other) != 1 or rows_other[0].datafile_id != df2_id:
+            return False, f"other filter: expected 1 row for other-sub got {len(rows_other)}"
+        return True, "OK"
+    finally:
+        with db.get_session() as s:
+            s.query(TargetDatafile).filter(TargetDatafile.target_id == ds.id).delete()
+            s.query(AKBDatafile).filter(AKBDatafile.id.in_([df1_id, df2_id])).delete()
+            s.query(Subscription).filter(Subscription.id == other).delete()
+
+
+def _dkb_test_delete_strict_raises(db, sub, ds):
+    from unittest.mock import MagicMock, patch
+    db.set_target_remote_id(ds.id, "mock-remote")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote"
+    svc.remove_target = MagicMock(side_effect=RuntimeError("network down"))
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        from worker.sink_recon import _remove_remote_target_strict
+        raised = False
+        try:
+            _remove_remote_target_strict(ds.id, db, MagicMock(), None)
+        except RuntimeError:
+            raised = True
+        if not raised:
+            return False, "strict helper should raise on remote failure"
+    if db.get_target(ds.id) is None:
+        return False, "target row must be retained after strict failure"
+    return True, "OK"
+
+
+def _dkb_test_delete_strict_success(db, sub, ds):
+    from unittest.mock import MagicMock, patch
+    db.set_target_remote_id(ds.id, "mock-remote")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote"
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        from worker.sink_recon import _remove_remote_target_strict
+        _remove_remote_target_strict(ds.id, db, MagicMock(), None)
+    if ("remove_target",) not in svc.calls:
+        return False, "remove_target not called"
+    if db.get_target(ds.id) is None:
+        return False, "strict helper must NOT delete rows (caller does)"
+    return True, "OK"
+
+
+def _dkb_test_delete_orphan_best_effort(db, sub, ds):
+    from unittest.mock import MagicMock, patch
+    db.set_target_remote_id(ds.id, "mock-remote")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "mock-remote"
+    svc.remove_target = MagicMock(side_effect=RuntimeError("down"))
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        from worker.sink_recon import _remove_orphan_target
+        _remove_orphan_target(ds.id, db, MagicMock(), MagicMock())
+    if db.get_target(ds.id) is not None:
+        return False, "orphan helper should still delete rows on remote failure"
+    return True, "OK"
+
+
 def _run_dkb_unit_tests():
     """Run all Sink unit tests inline, return (passed, total, results)."""
     tests = [
@@ -2228,6 +2539,10 @@ def _run_dkb_unit_tests():
         ("DKB Recon — removes deleted file", lambda db, sub, ds: _dkb_test_recon_remove(db, sub, ds)),
         ("DKB Recon — skips disabled DS", lambda db, sub, ds: _dkb_test_recon_skip_disabled(db, sub, ds)),
         ("DKB Recon — error on failure", lambda db, sub, ds: _dkb_test_recon_error(db, sub, ds)),
+        ("DKB Filter — datafiles by sub", lambda db, sub, ds: _dkb_test_datafiles_by_sub(db, sub, ds)),
+        ("DKB Delete — strict raises on remote failure", lambda db, sub, ds: _dkb_test_delete_strict_raises(db, sub, ds)),
+        ("DKB Delete — strict success keeps rows for caller", lambda db, sub, ds: _dkb_test_delete_strict_success(db, sub, ds)),
+        ("DKB Delete — orphan best-effort deletes rows", lambda db, sub, ds: _dkb_test_delete_orphan_best_effort(db, sub, ds)),
     ]
 
     results = []
@@ -2647,6 +2962,10 @@ def main() -> int:
         ("Plugin Test 26 — cronRandomize", test_cron_randomize),
         ("DKB Test 27 — full pipeline", test_sink_full_pipeline),
         ("DKB Test 28 — Sink-only recon", test_sink_only_recon),
+        ("DKB Test 29 — delete target normal", test_dkb_delete_normal),
+        ("DKB Test 30 — delete target force", test_dkb_delete_force),
+        ("DKB Test 31 — delete strict failure retains + force recovers", test_dkb_delete_strict_failure_force),
+        ("DKB Test 32 — unlink last sub keeps target", test_dkb_unlink_last_sub_keeps_target),
     ]
 
     results: List[Tuple[str, bool, str]] = []
@@ -2662,7 +2981,7 @@ def main() -> int:
         status = "✅" if ok else "❌"
         _log(f"  {status} {name}: {msg}")
 
-    # Summary (28 tests)
+    # Summary (32 tests)
     passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
     _log(f"\n=== TEST SUMMARY: {passed}/{total} passed ===")

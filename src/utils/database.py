@@ -882,6 +882,15 @@ class DatabaseManager:
                 TargetDatafile.target_id == target_id
             ).all()
 
+    def list_datafiles_for_target_subscription(self, target_id: str, sub_id: str) -> List[TargetDatafile]:
+        with self.get_session() as s:
+            return s.query(TargetDatafile).join(
+                AKBDatafile, AKBDatafile.id == TargetDatafile.datafile_id
+            ).filter(
+                TargetDatafile.target_id == target_id,
+                AKBDatafile.subscription_id == sub_id,
+            ).all()
+
     # ----- target_datafile -----
     def get_target_datafile(self, target_id: str, datafile_id: str) -> Optional[TargetDatafile]:
         with self.get_session() as s:

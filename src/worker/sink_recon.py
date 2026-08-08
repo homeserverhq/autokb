@@ -129,8 +129,8 @@ def reconcile_subscription_targets(
             continue
 
         if ds_status == STATE_DELETED:
-            # Remove all target_datafile rows for this deleted link
-            ds_df_rows = db.list_datafiles_for_target(target_id)
+            # Remove this subscription's target_datafile rows for the deleted link
+            ds_df_rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
             for ds_df in ds_df_rows:
                 remove_count += 1
                 _invoke_remove(
@@ -139,10 +139,6 @@ def reconcile_subscription_targets(
                 prog += 1
                 _hb(db, sub_id, queue, pct=prog % 100)
             db.delete_target_subscription(target_id, sub_id)
-            # After removal, check if this was the last subscription for the target
-            remaining = db.count_target_subscriptions_for_target(target_id)
-            if remaining == 0:
-                _remove_orphan_target(target_id, db, sink_registry, log)
             continue
 
         # --- ENABLED / ENQUEUED: full reconcile ---
@@ -378,3 +374,21 @@ def _remove_orphan_target(target_id: str, db: DatabaseManager,
             log.warning("sink_remove_target_failed", target_id=target_id, error=str(exc))
     db.delete_target_datafiles_for_target(target_id)
     db.delete_target_row(target_id)
+
+
+def _remove_remote_target_strict(target_id: str, db: DatabaseManager,
+                                 sink_registry: SinkRegistry, log) -> None:
+    """Remove the remote dataset; raises on any failure.
+
+    Does NOT delete local rows — the caller deletes them only after this
+    returns without error, so a transient remote failure leaves the target
+    intact for a later retry (or a force delete).
+    """
+    ds_row = db.get_target(target_id)
+    if ds_row is None:
+        return
+    svc = _get_service(ds_row, db, sink_registry, log)
+    if svc is None:
+        raise RuntimeError("Sink service unavailable")
+    if svc.remote_target_id:
+        svc.remove_target()

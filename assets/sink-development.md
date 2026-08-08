@@ -377,15 +377,17 @@ The recon engine (`worker/sink_recon.py`) drives every sink. It is triggered fro
 For each subscription, the engine:
 
 1. **Gathers linked Targets** (`target_subscription` rows). Subscriptions with no Targets are skipped entirely.
-2. **Collects files** on disk under `/output/{plugin}/{sub}/` (recursive).
-3. For each Target (skipping `DISABLED`/`ERROR` links):
+2. **Marks active links `IN_PROGRESS`** — every `ENABLED`/`ENQUEUED` target-subscription link is updated to `IN_PROGRESS` so the parent Target immediately reflects a pending sync via SSE. Links already `DISABLED`, `ERROR`, or `DELETED` are left untouched.
+3. **Collects files** on disk under `/output/{plugin}/{sub}/` (recursive).
+4. For each Target (skipping `DISABLED`/`ERROR` links):
    - **Remote container already exists** — `remote_target_id` was set synchronously at target create/update time (see `manager._ensure_target_remote`). Recon never creates the remote container.
+   - **Missing remote target** — if `remote_target_id` is null (e.g. an old target that predates the synchronous-creation feature), the link transitions to `ERROR` with a notification email so the user can re-provision via Update.
    - **Pass I.1 — adds**: every file on disk with no tracked join row → `base_add_datafile()`.
    - **Pass I.1 — updates**: every tracked file whose content hash on disk differs from the last synced hash → `base_update_datafile()`.
    - **Pass I.2 — removals**: every tracked join row with no matching file on disk → `base_remove_datafile()`.
-   - Sets the link status back to `ENABLED` with a summary message (`Reconciled: +N added, ~N updated, -N removed`).
-4. **Pass II** syncs `akb_datafile` stats (size/mtime/hash) from the filesystem and prunes rows for deleted files.
-5. **Orphan cleanup**: when the last subscription is unlinked from a Target, the engine calls `remove_target()` and deletes the target row.
+   - Sets the link status back to `ENABLED` (was set to `IN_PROGRESS` at step 2) with a summary message (`Reconciled: +N added, ~N updated, -N removed`).
+5. **Pass II** syncs `akb_datafile` stats (size/mtime/hash) from the filesystem and prunes rows for deleted files.
+6. **Orphan cleanup**: when the last subscription is unlinked from a Target, the engine calls `remove_target()` and deletes the target row.
 
 ### Per-File Resilience
 
@@ -407,6 +409,8 @@ Cancellation is NOT an error: the engine never transitions the link to `ERROR` a
 ### Error Transitions
 
 When a target-subscription transitions to `ERROR`, the engine sends **one** notification email (subject `[AutoKB] SINK target error: {target_name}`) and only on the transition (not on every recon). On the next successful recon the link returns to `ENABLED`.
+
+A missing `remote_target_id` at recon time (null — the remote container was never provisioned) is treated as an error: the link transitions to `ERROR` and triggers the same notification so the user can re-provision the target via the Update action.
 
 ---
 
@@ -553,7 +557,7 @@ DELETE {api_url}/targets/{target_id}/files/{remote_id}  → delete a file    →
 DELETE {api_url}/targets/{target_id}/files    → clear a container          → 204
 ```
 
-The convention is deliberately minimal — one remote container per Data Target, one HTTP call per method. Files are added when they appear, replaced when they change, and deleted when they disappear; the container is created synchronously at target create/update time (by the Manager) and destroyed when the last subscription is removed. That keeps every method to a single request plus an error guard, which is the correct shape for most targets.
+The convention is deliberately minimal — one remote container per Data Target, one HTTP call per method. Files are added when they appear, replaced when they change, and deleted when they disappear; the container is created synchronously at target create/update time (by the Manager) and destroyed when the last subscription is removed. The target-subscription link status flows from `ENQUEUED` (at create/update) → `IN_PROGRESS` (set by the recon engine at sync start) → `ENABLED` (sync complete). That keeps every method to a single request plus an error guard, which is the correct shape for most targets.
 
 ```python
 """restUploadSink — delivers AutoKB output to a simple REST file service.

@@ -488,10 +488,11 @@
     // but derived from the targets' own statuses.
     const targetList = Array.isArray(targetsCache) ? targetsCache : [];
     const tGroups = {
-      ENABLED:  { color: '#00C853', count: 0 },
-      ERROR:    { color: '#FF5252', count: 0 },
-      DISABLED: { color: '#9E9E9E', count: 0 },
-      DELETED:  { color: '#616161', count: 0 },
+      ENABLED:    { color: '#00C853', count: 0 },
+      IN_PROGRESS: { color: '#3D5AFE', count: 0 },
+      ERROR:      { color: '#FF5252', count: 0 },
+      DISABLED:   { color: '#9E9E9E', count: 0 },
+      DELETED:    { color: '#616161', count: 0 },
     };
     for (const t of targetList) {
       const st = t.status || 'ENABLED';
@@ -518,14 +519,6 @@
       }
     }
 
-    // Targets by destination — group targets by their sink service.
-    const typeMap = {};
-    for (const t of targetList) {
-      const key = t.service_display_name || t.service_name || 'unknown';
-      typeMap[key] = (typeMap[key] || 0) + 1;
-    }
-    const typeParts = Object.entries(typeMap).map(([k, n]) => `${n} ${k}`);
-    $('stat-target-by-type').textContent = typeParts.length ? typeParts.join(' · ') : 'no targets yet';
   }
 
   function renderDashboardHealth(h) {

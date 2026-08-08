@@ -159,6 +159,18 @@ def reconcile_subscription_targets(
     if not ds_links:
         return  # no downstream targets
 
+    # Mark active (ENABLED/ENQUEUED) links IN_PROGRESS so the parent target
+    # immediately reflects a pending sync via SSE. DISABLED/ERROR/DELETED
+    # links are untouched. The per-target pass below sets each link back to
+    # ENABLED on completion.
+    for link in ds_links:
+        if link.status in (STATE_ENABLED, STATE_ENQUEUED):
+            try:
+                db.set_target_subscription_status(link.target_id, sub_id, STATE_IN_PROGRESS)
+                link.status = STATE_IN_PROGRESS
+            except Exception:
+                pass
+
     output_dir = os.path.join("/output", sub.plugin_id, sub_name)
 
     # Collect FS files (recursive, one row per file)
@@ -211,12 +223,20 @@ def reconcile_subscription_targets(
             # The remote target must have been provisioned synchronously at
             # target create/update time (manager._ensure_target_remote). Recon
             # NEVER creates the remote target — it only reads the id from the
-            # DB. If it is missing here, skip this target (no remote to sync).
+            # DB. If it is missing here, the link transitions to ERROR so the
+            # user is notified and can re-provision via Update.
             if not svc.remote_target_id:
                 log.warning(
                     "remote_target_missing", sub_id=sub_id, name=sub_name,
                     target_id=target_id, service=svc.name,
-                    action="skip", result="remote_target_id null; provision via target create/update",
+                    action="error", result="remote_target_id null; mark link ERROR",
+                )
+                _transition_ds_error(
+                    ds_link, target_id, sub_id, db, log,
+                    sub_name, ds_row.name,
+                    "Remote target not provisioned (remote_target_id is null). "
+                    "Re-create or Update this target to provision the remote resource.",
+                    error_ds_names,
                 )
                 continue
 

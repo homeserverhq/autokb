@@ -397,7 +397,9 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         status = "ENABLED"
     elif any(s.status == "ERROR" for s in subs):
         status = "ERROR"
-    elif any(s.status in ("ENABLED", "ENQUEUED", "IN_PROGRESS") for s in subs):
+    elif any(s.status in ("IN_PROGRESS", "ENQUEUED") for s in subs):
+        status = "IN_PROGRESS"
+    elif any(s.status == "ENABLED" for s in subs):
         status = "ENABLED"
     elif any(s.status == "DELETED" for s in subs):
         status = "DELETED"

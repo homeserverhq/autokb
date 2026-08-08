@@ -35,7 +35,7 @@ import requests
 from utils.constants import (
     OPERATION_FULL, OPERATION_SINK_ONLY,
     STATE_ENABLED, STATE_ENQUEUED, STATE_ERROR, STATE_DISABLED,
-    STATE_DELETED,
+    STATE_DELETED, STATE_IN_PROGRESS,
 )
 from utils.database import (
     AKBDatafile, Sink, Target,
@@ -2687,8 +2687,8 @@ def _dkb_test_recon_cancel_sub_deleted(db, sub, ds):
         if count[0] != 1:
             return False, f"expected 1 upload before halt, got {count[0]}"
         link = db.get_target_subscription(ds.id, sub)
-        if link is None or link.status != STATE_ENABLED:
-            return False, "link should be left untouched on sub-level cancel"
+        if link is None or link.status != STATE_IN_PROGRESS:
+            return False, "link should be left unchanged (IN_PROGRESS from recon-start marking) on sub-level cancel"
         if any(c[0] == "remove_datafile" for c in svc.calls):
             return False, "remove_datafile should not be called on sub-level cancel"
 
@@ -2712,6 +2712,89 @@ def _dkb_test_recon_cancel_sub_deleted(db, sub, ds):
     if not any(c[0] == "remove_target" for c in svc.calls):
         return False, "remove_target not called for orphan target"
     return True, "OK"
+
+
+def _dkb_test_recon_null_remote_target(db, sub, ds):
+    """Verify null remote_target_id at recon time → link transitions to ERROR."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    sub_row = db.get_subscription(sub)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        mock_svc = MagicMock()
+        mock_svc.remote_target_id = None
+        mock_svc.name = "TestSvc"
+        mock_svc.set_cancel_check = MagicMock()
+        mock_svc._check_cancel = MagicMock()
+        mock_get.return_value = mock_svc
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    link = db.get_target_subscription(ds.id, sub)
+    if link is None or link.status != STATE_ERROR:
+        return False, f"expected link ERROR after null remote_target_id, got {link.status if link else 'None'}"
+    db.set_target_subscription_status(ds.id, sub, STATE_ENABLED)
+    return True, "OK"
+
+
+def _dkb_test_recon_marks_in_progress(db, sub, ds):
+    """Verify active links are marked IN_PROGRESS at recon start, then ENABLED at completion."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    sub_row = db.get_subscription(sub)
+    test_path = _write_output_file_test(sub_row.name, "in_progress_test.md", "content")
+    captured_status = [None]
+
+    def capture_add(sub_id_, path_, **kwargs):
+        link = db.get_target_subscription(ds.id, sub)
+        captured_status[0] = link.status
+        return "mock-id"
+
+    with patch("worker.sink_recon._get_service") as mock_get:
+        mock_svc = MagicMock()
+        mock_svc.remote_target_id = "mock-remote"
+        mock_svc.name = "TestSvc"
+        mock_svc.set_cancel_check = MagicMock()
+        mock_svc._check_cancel = MagicMock()
+        mock_svc.base_add_datafile = capture_add
+        mock_svc.base_update_datafile = MagicMock()
+        mock_svc.base_remove_datafile = MagicMock()
+        mock_get.return_value = mock_svc
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+
+    if captured_status[0] != STATE_IN_PROGRESS:
+        return False, f"expected link IN_PROGRESS during recon, got {captured_status[0]}"
+    link = db.get_target_subscription(ds.id, sub)
+    if link.status != STATE_ENABLED:
+        return False, f"expected link ENABLED after recon, got {link.status}"
+    with db.get_session() as s:
+        df = s.query(AKBDatafile).filter(AKBDatafile.path == test_path).first()
+        if df:
+            s.query(TargetDatafile).filter(TargetDatafile.datafile_id == df.id).delete()
+            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_target_status_derivation(db, sub, ds):
+    """Verify _serialise_target correctness across all link-status combinations."""
+    from manager.manager import _serialise_target
+    t = db.get_target(ds.id)
+    link = db.list_target_subscriptions(ds.id)[0]
+
+    statuses = [
+        ("ENABLED", "ENABLED"),
+        ("ERROR", "ERROR"),
+        ("IN_PROGRESS", "IN_PROGRESS"),
+        ("ENQUEUED", "IN_PROGRESS"),
+        ("DISABLED", "DISABLED"),
+    ]
+    for set_status, expected in statuses:
+        db.set_target_subscription_status(ds.id, sub, set_status)
+        links = db.list_target_subscriptions(ds.id)
+        result = _serialise_target(t, links, db)
+        if result["status"] != expected:
+            db.set_target_subscription_status(ds.id, sub, STATE_ENABLED)
+            return False, f"status={set_status}: expected {expected} got {result['status']}"
+
+    db.set_target_subscription_status(ds.id, sub, STATE_ENABLED)
+    return True, "All derivation scenarios OK"
 
 
 def _dkb_test_sink_cancel_check(db, sub, ds):
@@ -2887,6 +2970,9 @@ def _run_dkb_unit_tests():
         ("DKB Recon — cancel on link removed", lambda db, sub, ds: _dkb_test_recon_cancel_link_removed(db, sub, ds)),
         ("DKB Recon — cancel on link disabled", lambda db, sub, ds: _dkb_test_recon_cancel_link_disabled(db, sub, ds)),
         ("DKB Recon — cancel on sub deleted", lambda db, sub, ds: _dkb_test_recon_cancel_sub_deleted(db, sub, ds)),
+        ("DKB Recon — null remote target", lambda db, sub, ds: _dkb_test_recon_null_remote_target(db, sub, ds)),
+        ("DKB Recon — marks links IN_PROGRESS", lambda db, sub, ds: _dkb_test_recon_marks_in_progress(db, sub, ds)),
+        ("DKB Target — status derivation", lambda db, sub, ds: _dkb_test_target_status_derivation(db, sub, ds)),
         ("DKB Service — cancel check hook", lambda db, sub, ds: _dkb_test_sink_cancel_check(db, sub, ds)),
         ("DKB Pass II — last_checked consistent", lambda db, sub, ds: _dkb_test_pass2_last_checked(db, sub, ds)),
         ("DKB Filter — datafiles by sub", lambda db, sub, ds: _dkb_test_datafiles_by_sub(db, sub, ds)),

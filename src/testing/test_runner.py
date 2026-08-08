@@ -47,6 +47,16 @@ from utils.sink_registry import SinkRegistry
 from utils.queue_utils import QueueManager, _encode_item, _decode_item, P_QUEUE_KEY, S_QUEUE_KEY
 from utils.misc_utils import uuid7, uuid4
 
+import logging as _logging
+
+# The runner talks to the manager over HTTP via `requests`. Creating a
+# DatabaseManager (e.g. the startup purge or the Sink unit tests)
+# reconfigures the root logger to INFO with a stdout handler, which makes
+# urllib3 print a "Starting new HTTP connection" line for every API call.
+# Silence it — the runner's own [_log] output is all we want on stdout.
+_logging.getLogger("urllib3").setLevel(_logging.WARNING)
+_logging.getLogger("urllib3.connectionpool").setLevel(_logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -62,6 +72,13 @@ RUN_ID = os.environ.get("AUTOKB_RUN_ID") or time.strftime("%H%M%S") + "-" + str(
 # Stable marker so test-created subscriptions are identifiable across runs
 # and can be cleaned up WITHOUT touching user-created (real) subscriptions.
 TEST_SUB_PREFIX = "akbtest-"
+
+# Single-instance guard: only one test runner may touch the shared
+# manager / DB / filesystem at a time. A stale lock whose owner PID is
+# dead is broken automatically, so an interrupted run can't block the
+# next one. The TTL is only a backstop for an ungraceful crash.
+TEST_RUN_LOCK_KEY = "autokb:test_runner:lock"
+TEST_RUN_LOCK_TTL_MS = 2 * 60 * 60 * 1000  # 2 hours
 
 
 def _is_test_sub(sub: Dict[str, Any]) -> bool:
@@ -1530,6 +1547,56 @@ def _parse_argv(argv: List[str]) -> Tuple[bool, bool]:
     return True, "--reset" in argv
 
 
+def _acquire_run_lock() -> Tuple[bool, Optional[QueueManager]]:
+    """Single-instance guard: only one test runner at a time.
+
+    Returns ``(held, owner)``:
+      * ``(True, queue)`` — the caller owns the lock and must release it.
+      * ``(True, None)`` — Redis was unreachable; proceed without a lock.
+      * ``(False, None)`` — another live runner holds the lock; refuse.
+
+    A stale lock whose owner PID is no longer alive is broken and
+    re-acquired, so an interrupted/crashed run can never block the next
+    one indefinitely (the TTL is only a backstop).
+    """
+    try:
+        q = _sink_queue()
+        client = q.client
+    except Exception as exc:  # noqa: BLE001
+        _log(f"warning: run lock unavailable ({exc}); proceeding without a lock")
+        return True, None
+
+    try:
+        got = client.set(TEST_RUN_LOCK_KEY, str(os.getpid()), nx=True, px=TEST_RUN_LOCK_TTL_MS)
+        if got:
+            return True, q
+
+        owner = client.get(TEST_RUN_LOCK_KEY)
+        owner_alive = True
+        if owner and owner.isdigit():
+            try:
+                os.kill(int(owner), 0)
+            except ProcessLookupError:
+                owner_alive = False
+            except (PermissionError, OSError):
+                owner_alive = True
+        else:
+            # Lock value not a PID we understand — assume held by a live run.
+            owner_alive = True
+
+        if not owner_alive:
+            _log("Run lock owner is dead; breaking stale lock")
+            client.delete(TEST_RUN_LOCK_KEY)
+            got = client.set(TEST_RUN_LOCK_KEY, str(os.getpid()), nx=True, px=TEST_RUN_LOCK_TTL_MS)
+            if got:
+                return True, q
+    except Exception as exc:  # noqa: BLE001
+        _log(f"warning: run lock error ({exc}); proceeding without a lock")
+        return True, None
+
+    return False, None
+
+
 # ---------------------------------------------------------------------------
 # Sink e2e tests
 # ---------------------------------------------------------------------------
@@ -2736,11 +2803,22 @@ def _cleanup_test_plugins() -> None:
     except Exception:
         pass
 
-def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
-    """Scan DB + filesystem for leftover test artifacts. Any found = FAIL + clean.
-    Runs once at the very end of main(), after _cleanup_test_plugins().
+def _purge_test_artifacts(leaked: Optional[List[str]] = None) -> None:
+    """Delete every test artifact the runner may have left behind.
+
+    Uses the same sentinel-based detection as the leak check (test
+    subscription name prefixes, known service/target names, test datafile
+    paths, non-real plugin registry rows, and the test plugin/sink files
+    on disk).
+
+    When ``leaked`` is None this is a **silent startup cleanup**: anything
+    found is deleted and never reported as a failure. When a list is
+    passed, each leftover is appended to it so the caller can decide
+    whether to fail (the leak check at the end of a run does this).
     """
-    leaked: list[str] = []
+    real_plugins = {"crawl4AIWebScraperPlugin", "eBiblePlugin",
+                    "ePaperlessDoclingPlugin", "imapFolderWatchPlugin",
+                    "youTubeTranscriptionPlugin"}
     db2 = _sink_db()
     try:
         with db2.get_session() as s:
@@ -2749,20 +2827,23 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
             leaked_svcs = s.query(Sink).filter(
                 Sink.name.in_(svc_names)).all()
             for svc in leaked_svcs:
-                leaked.append(f"Sink(id={svc.id[:8]}, name={svc.name!r})")
+                if leaked is not None:
+                    leaked.append(f"Sink(id={svc.id[:8]}, name={svc.name!r})")
             svc_ids = [svc.id for svc in leaked_svcs]
             leaked_targs = s.query(Target).filter(
                 Target.name.in_(t_names) |
                 (Target.service_id.in_(svc_ids))).all()
             for t in leaked_targs:
-                leaked.append(f"Target(id={t.id[:8]}, name={t.name!r})")
+                if leaked is not None:
+                    leaked.append(f"Target(id={t.id[:8]}, name={t.name!r})")
             t_ids = [t.id for t in leaked_targs]
             leaked_files = s.query(AKBDatafile).filter(
                 AKBDatafile.path.like("/tmp/sink_test_output%") |
                 AKBDatafile.path.like("/output/test_plugin/test_sub%")
             ).all()
             for f in leaked_files:
-                leaked.append(f"AKBDatafile(id={f.id[:8]}, path={f.path!r})")
+                if leaked is not None:
+                    leaked.append(f"AKBDatafile(id={f.id[:8]}, path={f.path!r})")
             file_ids = [f.id for f in leaked_files]
             if t_ids:
                 s.query(TargetDatafile).filter(
@@ -2787,7 +2868,8 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
                 (Subscription.name.like("e2e-%"))
             ).all()
             for sub in test_subs:
-                leaked.append(f"Subscription(id={sub.id[:8]}, name={sub.name!r}, plugin={sub.plugin_id})")
+                if leaked is not None:
+                    leaked.append(f"Subscription(id={sub.id[:8]}, name={sub.name!r}, plugin={sub.plugin_id})")
             test_sub_ids = [sub.id for sub in test_subs]
             if test_sub_ids:
                 s.query(Subscription).filter(
@@ -2798,18 +2880,17 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
                 elogs = s.query(EventLog).filter(
                     EventLog.subscription_id.in_(test_sub_ids)).all()
                 for el in elogs:
-                    leaked.append(f"EventLog(id={el.id[:8]}, sub_id={el.subscription_id[:8]})")
+                    if leaked is not None:
+                        leaked.append(f"EventLog(id={el.id[:8]}, sub_id={el.subscription_id[:8]})")
                 s.query(EventLog).filter(
                     EventLog.subscription_id.in_(test_sub_ids)).delete(synchronize_session=False)
 
             # 4. PluginRegistryState: test plugin rows (should be zero after cleanup)
-            real_plugins = {"crawl4AIWebScraperPlugin", "eBiblePlugin",
-                            "ePaperlessDoclingPlugin", "imapFolderWatchPlugin",
-                            "youTubeTranscriptionPlugin"}
             test_plugin_rows = s.query(PluginRegistryState).filter(
                 ~PluginRegistryState.plugin_id.in_(real_plugins)).all()
             for pr in test_plugin_rows:
-                leaked.append(f"PluginRegistryState(plugin_id={pr.plugin_id!r})")
+                if leaked is not None:
+                    leaked.append(f"PluginRegistryState(plugin_id={pr.plugin_id!r})")
             for pr in test_plugin_rows:
                 s.delete(pr)
     finally:
@@ -2831,7 +2912,8 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
         for entry in sorted(os.listdir(output_root)):
             entry_path = os.path.join(output_root, entry)
             if os.path.isdir(entry_path) and entry in test_plugin_dirs:
-                leaked.append(f"/output/{entry}/")
+                if leaked is not None:
+                    leaked.append(f"/output/{entry}/")
                 shutil.rmtree(entry_path)
 
     # 6. Filesystem: /src/plugins test plugin files (should be zero after cleanup)
@@ -2841,7 +2923,8 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
             if fname.endswith(".py") and fname[:-3] not in real_plugins:
                 fpath = os.path.join(plugins_dir, fname)
                 if os.path.isfile(fpath):
-                    leaked.append(f"/src/plugins/{fname}")
+                    if leaked is not None:
+                        leaked.append(f"/src/plugins/{fname}")
                     os.remove(fpath)
 
     # 7. Filesystem: /src/sinks test Sink files (should be gone after cleanup)
@@ -2851,9 +2934,17 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
             if fname == "testSink.py":
                 fpath = os.path.join(sinks_dir, fname)
                 if os.path.isfile(fpath):
-                    leaked.append(f"/src/sinks/{fname}")
+                    if leaked is not None:
+                        leaked.append(f"/src/sinks/{fname}")
                     os.remove(fpath)
 
+
+def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
+    """Scan DB + filesystem for leftover test artifacts. Any found = FAIL + clean.
+    Runs once at the very end of main(), after _cleanup_test_plugins().
+    """
+    leaked: list[str] = []
+    _purge_test_artifacts(leaked)
     if leaked:
         _log(f"\n[LEAK] Found {len(leaked)} leftover test artifact(s):")
         for l in leaked:
@@ -2868,11 +2959,7 @@ def _run_leak_check(results: List[Tuple[str, bool, str]]) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main() -> int:
-    ok, reset_mode = _parse_argv(sys.argv)
-    if not ok:
-        return 2
-
+def _run_suite(reset_mode: bool) -> int:
     _log(f"Test runner starting; manager={MANAGER_URL} (reset={reset_mode})")
 
     if reset_mode:
@@ -2905,6 +2992,17 @@ def main() -> int:
     else:
         _log("Manager never became healthy")
         return 2
+
+    # Purge every test artifact left behind by a previous (possibly aborted)
+    # run. Mirrors the leak check's sentinel-based sweep but runs silently
+    # at startup: leftovers are cleaned, never reported as a failure. This
+    # deletes stale DB rows (subscriptions, targets, sinks, datafiles,
+    # plugin registry state), /output test dirs, and the test plugin/sink
+    # files on disk before they are re-synced below. Only test-created
+    # artifacts are touched — user subscriptions are NEVER removed here.
+    _log("Purging leftover test artifacts from previous runs...")
+    _purge_test_artifacts()
+    time.sleep(2.0)  # let the manager's file watcher notice the removals
 
     # Sync test plugins
     _sync_test_plugins()
@@ -2962,28 +3060,6 @@ def main() -> int:
         missing = expected_loaded_pre - loaded
         _log(f"TIMEOUT waiting for plugins: still missing {sorted(missing)}")
         return 3
-
-    # Clean up test-created subscriptions from previous runs. Only subs
-    # created by the test runner (marked with TEST_SUB_PREFIX / e2e- /
-    # test_plugin) are removed — user subscriptions are NEVER touched here.
-    _log("Cleaning up test subscriptions from previous runs...")
-    try:
-        subs = api_get("/api/subscriptions")
-        for sub in subs:
-            if not _is_test_sub(sub):
-                continue
-            try:
-                requests.delete(
-                    f"{MANAGER_URL}/api/subscriptions/{sub['id']}",
-                    headers=_api_headers(), timeout=10,
-                )
-            except Exception:
-                pass
-        # Note: event_log rows for deleted subs cascade via FK; real subs'
-        # event history is intentionally left intact.
-        time.sleep(2.0)  # Let the worker process DELETED cleanups
-    except Exception as exc:
-        _log(f"Cleanup warning: {exc}")
 
     # Verify all 21 expected plugins are loaded (except invalidNamePlugin)
     plugins = api_get("/api/plugins")
@@ -3088,6 +3164,27 @@ def main() -> int:
         mark = "✅" if ok else "❌"
         _log(f"  {mark} {name}: {msg}")
     return 0 if final_passed == final_total else 1
+
+
+def main() -> int:
+    ok, reset_mode = _parse_argv(sys.argv)
+    if not ok:
+        return 2
+
+    held, lock_q = _acquire_run_lock()
+    if not held:
+        _log("Another test-runner instance is active; refusing to run")
+        return 2
+
+    try:
+        return _run_suite(reset_mode)
+    finally:
+        if lock_q is not None:
+            try:
+                lock_q.client.delete(TEST_RUN_LOCK_KEY)
+                _log("Released test-runner lock")
+            except Exception as exc:  # noqa: BLE001
+                _log(f"warning: failed to release run lock: {exc}")
 
 
 if __name__ == "__main__":

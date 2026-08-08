@@ -660,6 +660,7 @@ def api_health():
         "db": db_ok,
         "redis": redis_ok,
         "registry_loaded": bool(reg.list_records()),
+        "sink_registry_loaded": bool(STATE.get("sink_registry") and STATE["sink_registry"].list_records()),
     }
 
 
@@ -1891,6 +1892,38 @@ def _validate_subscription_name(name: str) -> str:
     return name
 
 
+def _ensure_target_remote(ds_row, db, sink_registry, log) -> None:
+    """Synchronously ensure the remote target resource exists.
+
+    Called at target create/update time, BEFORE any queue items are pushed,
+    so the remote resource (e.g. the OpenWebUI Knowledge Base) is guaranteed
+    to exist before the worker reconciles. The recon engine must never create
+    the remote target — it only reads ``remote_target_id`` from the DB.
+    """
+    if sink_registry is None:
+        raise HTTPException(status_code=502, detail="Sink registry is not loaded")
+    svc_row = db.get_sink(ds_row.service_id)
+    if svc_row is None:
+        raise HTTPException(status_code=404, detail="Sink not found")
+    api_key = db.decrypt_target_api_key(ds_row)
+    # Patch the decrypted api_key onto a copy of the row so the sink instance
+    # (which reads ``target_row.api_key``) gets the real key.
+    import copy
+    patched = copy.copy(ds_row)
+    patched.api_key = api_key
+    svc = sink_registry.load_service_for_recon(svc_row.name, patched, db)
+    if svc is None:
+        raise HTTPException(status_code=502, detail=f"Sink service {svc_row.name!r} is not available")
+    if svc.remote_target_id:
+        return
+    try:
+        svc.base_add_target()
+    except Exception as exc:  # noqa: BLE001
+        log.error("target_remote_create_failed", target_id=ds_row.id,
+                  service=svc_row.name, error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Failed to create remote target: {exc}")
+
+
 @app.post("/api/sinks/{service_id}/targets")
 def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     db: DatabaseManager = STATE["db"]
@@ -1919,6 +1952,14 @@ def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
 
     t = db.create_target(service_id, name, api_url, api_key, t_extra,
                          include_path_in_filename=include_path)
+    # Provision the remote resource synchronously before any queue item is
+    # pushed — recon must never create the remote target itself.
+    try:
+        _ensure_target_remote(t, db, STATE.get("sink_registry"), LOG)
+    except HTTPException:
+        db.delete_target_row(t.id)
+        raise
+    t = db.get_target(t.id)
     if sub_ids:
         db.link_target_subscriptions(t.id, sub_ids, status="ENQUEUED")
         for sid in sub_ids:
@@ -1948,9 +1989,12 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
     if include_path is not None and not isinstance(include_path, bool):
         raise HTTPException(status_code=400, detail="include_path_in_filename must be a boolean")
 
-    db.update_target(target_id, api_url=api_url, api_key=api_key,
-                     target_extra_params=t_extra,
-                     include_path_in_filename=include_path)
+    t = db.update_target(target_id, api_url=api_url, api_key=api_key,
+                         target_extra_params=t_extra,
+                         include_path_in_filename=include_path)
+    # Provision the remote resource synchronously before any queue item is
+    # pushed (no-op when remote_target_id is already set).
+    _ensure_target_remote(t, db, STATE.get("sink_registry"), LOG)
 
     # Diff subscriptions
     new_sub_ids = body.get("subscription_ids", [])

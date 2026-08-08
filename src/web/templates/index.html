@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoKB</title>
   <link rel="icon" type="image/x-icon" href="/assets/favicon.ico" />
-  <link rel="stylesheet" href="/static/styles.css?v=61" />
+  <link rel="stylesheet" href="/static/styles.css?v=65" />
 </head>
 <body>
   <!-- Login page -->
@@ -108,6 +108,7 @@
             </article>
             <aside id="dashboard-stats" class="dashboard-stats">
               <div class="stats-card">
+                <div class="stats-group-header">Sources</div>
                 <div class="stats-row" data-stat="total-subs">
                   <span class="stats-label">Total Subscriptions</span>
                   <span class="stats-value" id="stat-total-subs">&mdash;</span>
@@ -117,13 +118,31 @@
                   <span class="stats-value" id="stat-total-plugins">&mdash;</span>
                 </div>
                 <div class="stats-row" data-stat="by-status">
-                  <span class="stats-label">By Status</span>
+                  <span class="stats-label">Subscription Status</span>
                   <div class="status-bar" id="stat-status-bar"></div>
                 </div>
                 <div class="stats-row" data-stat="by-type">
-                  <span class="stats-label">By Type</span>
+                  <span class="stats-label">Subscription Types</span>
                   <span class="stats-value" id="stat-by-type">&mdash;</span>
                 </div>
+                <div class="stats-group-header">Destinations</div>
+                <div class="stats-row" data-stat="total-sinks">
+                  <span class="stats-label">Total Destinations</span>
+                  <span class="stats-value" id="stat-total-sinks">&mdash;</span>
+                </div>
+                <div class="stats-row" data-stat="total-targets">
+                  <span class="stats-label">Total Targets</span>
+                  <span class="stats-value" id="stat-total-targets">&mdash;</span>
+                </div>
+                <div class="stats-row" data-stat="target-status">
+                  <span class="stats-label">Target Status</span>
+                  <div class="status-bar" id="stat-target-status-bar"></div>
+                </div>
+                <div class="stats-row" data-stat="target-type">
+                  <span class="stats-label">Targets By Destination</span>
+                  <span class="stats-value" id="stat-target-by-type">&mdash;</span>
+                </div>
+                <div class="stats-group-header">Other</div>
                 <div class="stats-row stats-row-link" data-stat="last-error">
                   <span class="stats-label">Last Error</span>
                   <span class="stats-value" id="stat-last-error">&mdash;</span>
@@ -138,6 +157,7 @@
                     <span class="health-pill" data-sys="db"><span class="health-dot"></span>Database</span>
                     <span class="health-pill" data-sys="redis"><span class="health-dot"></span>Redis</span>
                     <span class="health-pill" data-sys="registry"><span class="health-dot"></span>Source Registry</span>
+                    <span class="health-pill" data-sys="sink_registry"><span class="health-dot"></span>Destination Registry</span>
                   </span>
                 </div>
                 <div class="stats-error" id="stats-error" style="display: none;">
@@ -363,6 +383,6 @@
   </div>
 
   <script src="/static/marked.min.js"></script>
-  <script src="/static/app.js?v=61"></script>
+  <script src="/static/app.js?v=65"></script>
 </body>
 </html>

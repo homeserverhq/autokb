@@ -211,7 +211,7 @@ def __init__(self, target_row: Any, db: Any):
 | `name`        | The user-chosen Target name (e.g. `"My Dev KB"`). |
 | `api_url`     | Base URL of the remote service. **May be empty** — use your `default_api_url` as a fallback (the `or` pattern shown in the Section 2 skeleton). |
 | `api_key`     | The API key, **already decrypted** by the caller. Never send it back to AutoKB; it is masked in API responses and encrypted at rest in the database. |
-| `remote_target_id` | The id assigned by the **remote** service once the container (knowledge base / dataset) has been created. `None` until the first successful `add_target()`. |
+| `remote_target_id` | The id assigned by the **remote** service once the container (knowledge base / dataset) has been created. `None` until `add_target()` is called synchronously at target create/update time. |
 | `target_extra_params` | A free-form dict of extra configuration the user supplied when creating the Target (see Section 8). |
 
 You also receive `db`, the `DatabaseManager`, for any custom bookkeeping — but for a garden-variety sink you will never touch it: the base wrapper methods (Section 7) handle all persistence.
@@ -259,7 +259,7 @@ Called when a file is deleted from `/output/` but is still tracked on the target
 
 ### 6.4 `add_target() -> str`
 
-Called during recon when the target row has no `remote_target_id` yet — i.e. the first time a subscription's output must be delivered to this Target.
+Called synchronously by the Manager at target create/update time (never by the recon engine). The recon engine expects `remote_target_id` to already be set in the database.
 
 - Create the remote container — a knowledge base, dataset, collection, bucket, etc.
 - **Return the `remote_target_id`** assigned by the remote instance. The engine persists it on the target row, so later passes use it for `update`/`remove`.
@@ -335,7 +335,7 @@ def _upload_file(self, path: str) -> str:
 | `add_datafile`    | new file on disk         | `remote_datafile_id` | no  |
 | `update_datafile` | file content changed     | new `remote_datafile_id` | no |
 | `remove_datafile` | file deleted on disk     | — | **yes** (404 == success) |
-| `add_target`      | first recon, `remote_target_id` is null | `remote_target_id` | no |
+| `add_target`      | target create/update time, synchronously by Manager | `remote_target_id` | no |
 | `remove_target`   | last subscription removed | — | **yes** (404 == success) |
 | `clear_target`    | (contract only, unused)  | — | yes |
 
@@ -379,7 +379,7 @@ For each subscription, the engine:
 1. **Gathers linked Targets** (`target_subscription` rows). Subscriptions with no Targets are skipped entirely.
 2. **Collects files** on disk under `/output/{plugin}/{sub}/` (recursive).
 3. For each Target (skipping `DISABLED`/`ERROR` links):
-   - **Ensure the remote container exists** — if `remote_target_id` is null, calls `base_add_target()`. If it raises, the target link transitions to `ERROR` and recon continues to the next target.
+   - **Remote container already exists** — `remote_target_id` was set synchronously at target create/update time (see `manager._ensure_target_remote`). Recon never creates the remote container.
    - **Pass I.1 — adds**: every file on disk with no tracked join row → `base_add_datafile()`.
    - **Pass I.1 — updates**: every tracked file whose content hash on disk differs from the last synced hash → `base_update_datafile()`.
    - **Pass I.2 — removals**: every tracked join row with no matching file on disk → `base_remove_datafile()`.
@@ -389,7 +389,7 @@ For each subscription, the engine:
 
 ### Per-File Resilience
 
-The engine wraps **each** add/update/remove call in its own `try/except`. A failure on one file logs a warning (`sink_add_failed`, `sink_update_failed`, `sink_remove_failed`) and does **not** abort the rest of the recon. Only `add_target()` failures mark the whole link `ERROR` — because without a remote container nothing else can proceed.
+The engine wraps **each** add/update/remove call in its own `try/except`. A failure on one file logs a warning (`sink_add_failed`, `sink_update_failed`, `sink_remove_failed`) and does **not** abort the rest of the recon. (Since `add_target()` is now called at target create/update time by the Manager — never by recon — its failures surface as API errors before any queue items are pushed.)
 
 ### Mid-Run Cancellation
 
@@ -553,7 +553,7 @@ DELETE {api_url}/targets/{target_id}/files/{remote_id}  → delete a file    →
 DELETE {api_url}/targets/{target_id}/files    → clear a container          → 204
 ```
 
-The convention is deliberately minimal — one remote container per Data Target, one HTTP call per method. Files are added when they appear, replaced when they change, and deleted when they disappear; the container is created on the first recon and destroyed when the last subscription is removed. That keeps every method to a single request plus an error guard, which is the correct shape for most targets.
+The convention is deliberately minimal — one remote container per Data Target, one HTTP call per method. Files are added when they appear, replaced when they change, and deleted when they disappear; the container is created synchronously at target create/update time (by the Manager) and destroyed when the last subscription is removed. That keeps every method to a single request plus an error guard, which is the correct shape for most targets.
 
 ```python
 """restUploadSink — delivers AutoKB output to a simple REST file service.

@@ -208,15 +208,17 @@ def reconcile_subscription_targets(
             # abort mid-pass (and keep the lock/heartbeat alive) if the user
             # removes/disables the link or the subscription mid-recon.
             svc.set_cancel_check(_make_cancel_check(db, sub_id, target_id, queue, state))
+            # The remote target must have been provisioned synchronously at
+            # target create/update time (manager._ensure_target_remote). Recon
+            # NEVER creates the remote target — it only reads the id from the
+            # DB. If it is missing here, skip this target (no remote to sync).
             if not svc.remote_target_id:
-                try:
-                    svc.base_add_target()
-                except Exception as exc:
-                    _transition_ds_error(
-                        ds_link, target_id, sub_id, db, log,
-                        sub_name, svc.name, str(exc), error_ds_names,
-                    )
-                    continue
+                log.warning(
+                    "remote_target_missing", sub_id=sub_id, name=sub_name,
+                    target_id=target_id, service=svc.name,
+                    action="skip", result="remote_target_id null; provision via target create/update",
+                )
+                continue
 
             pass1_count = _reconcile_pass1(
                 fs_files, ds_link, target_id, sub_id, db, svc, queue, log, state,

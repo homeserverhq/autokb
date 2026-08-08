@@ -156,7 +156,8 @@ class BaseSink(ABC):
         """Create the remote target (knowledge base / dataset).
 
         Returns the remote_target_id assigned by the remote instance.
-        Called when ``remote_target_id`` is null on first recon.
+        Called synchronously by the Manager at target create/update time
+        (``_ensure_target_remote``) — never by the recon engine.
         """
         ...
 

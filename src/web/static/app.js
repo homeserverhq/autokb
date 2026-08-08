@@ -300,19 +300,24 @@
   }
 
   // ---- Dashboard ----
-  // Three in-memory values feed the stats panel:
+  // In-memory values feed the stats panel:
   //   - lastErrorTs: most recent event_log timestamp with exit_code != 0
   //     (set by loadDashboard's fetch of /api/logging)
   //   - lastPluginsCount: length of the most recent /api/plugins response
   //     (kept up to date by loadPlugins() so the dashboard's Total
   //     Plugins stays correct without a dedicated /api/plugins call)
+  //   - lastSinksCount: length of the most recent /api/sinks response
+  //   - lastTargetsCount: length of the most recent /api/targets response
+  //     (also refreshed by loadSinks()/loadAllTargets() on their views)
   //   - dashboardHealthInterval: 30s health-timer handle, cleared on nav away
   let lastErrorTs = null;
   let lastPluginsCount = null;
+  let lastSinksCount = null;
+  let lastTargetsCount = null;
   let dashboardHealthInterval = null;
 
   async function loadDashboard() {
-    // On every entry, fire all four data sources in parallel. Each
+    // On every entry, fire all data sources in parallel. Each
     // populates its own stat; the panel re-renders incrementally as each
     // resolves (the readme is static and renders with the page).
     $('stats-error').style.display = 'none';
@@ -323,13 +328,17 @@
       api('/subscriptions'),
       api('/subscriptions/activity?hours=24'),
       api('/health'),
+      api('/sinks'),
+      api('/targets'),
     ]);
-    const [pluginsRes, subsRes, activityRes, healthRes] = results;
+    const [pluginsRes, subsRes, activityRes, healthRes, sinksRes, targetsRes] = results;
     const ok = (r) => r.status === 'fulfilled' ? r.value : null;
     const plugins = ok(pluginsRes);
     const subs = ok(subsRes);
     const activity = ok(activityRes) || {};
     const health = ok(healthRes);
+    const sinks = ok(sinksRes);
+    const targets = ok(targetsRes);
 
     // Caches used by renderDashboardStats (called on every SSE event).
     allSubsCache = subs || [];
@@ -356,6 +365,13 @@
     // when the user has never visited the Data Sources page (which is
     // the only other path that updates lastPluginsCount).
     if (plugins) lastPluginsCount = plugins.length;
+    // Same for sinks/targets: cache their counts and the target array so
+    // the destination stats render without a dedicated view visit.
+    if (sinks) lastSinksCount = sinks.length;
+    if (Array.isArray(targets)) {
+      lastTargetsCount = targets.length;
+      targetsCache = targets;
+    }
     renderDashboardStats();
 
     // If any of the four primary fetches failed, surface the inline
@@ -458,6 +474,58 @@
     if (typeof lastPluginsCount === 'number') {
       $('stat-total-plugins').textContent = lastPluginsCount;
     }
+
+    // Total sinks & targets — populated by loadDashboard() and refreshed
+    // on the Data Destinations / Targets views (see loadSinks / loadAllTargets).
+    if (typeof lastSinksCount === 'number') {
+      $('stat-total-sinks').textContent = lastSinksCount;
+    }
+    if (typeof lastTargetsCount === 'number') {
+      $('stat-total-targets').textContent = lastTargetsCount;
+    }
+
+    // Target status — same mini-bar shape as the subscription status bar,
+    // but derived from the targets' own statuses.
+    const targetList = Array.isArray(targetsCache) ? targetsCache : [];
+    const tGroups = {
+      ENABLED:  { color: '#00C853', count: 0 },
+      ERROR:    { color: '#FF5252', count: 0 },
+      DISABLED: { color: '#9E9E9E', count: 0 },
+      DELETED:  { color: '#616161', count: 0 },
+    };
+    for (const t of targetList) {
+      const st = t.status || 'ENABLED';
+      if (tGroups[st]) tGroups[st].count++;
+    }
+    const tBar = $('stat-target-status-bar');
+    tBar.innerHTML = '';
+    if (targetList.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'status-bar-empty';
+      empty.textContent = 'no targets yet';
+      tBar.appendChild(empty);
+    } else {
+      for (const [name, info] of Object.entries(tGroups)) {
+        if (info.count === 0) continue;
+        const pct = (info.count / targetList.length) * 100;
+        const seg = document.createElement('div');
+        seg.className = 'status-bar-seg';
+        seg.style.width = pct + '%';
+        seg.style.background = info.color;
+        seg.title = `${name}: ${info.count}`;
+        if (pct >= 10) seg.textContent = info.count;
+        tBar.appendChild(seg);
+      }
+    }
+
+    // Targets by destination — group targets by their sink service.
+    const typeMap = {};
+    for (const t of targetList) {
+      const key = t.service_display_name || t.service_name || 'unknown';
+      typeMap[key] = (typeMap[key] || 0) + 1;
+    }
+    const typeParts = Object.entries(typeMap).map(([k, n]) => `${n} ${k}`);
+    $('stat-target-by-type').textContent = typeParts.length ? typeParts.join(' · ') : 'no targets yet';
   }
 
   function renderDashboardHealth(h) {
@@ -469,12 +537,19 @@
       const pill = document.querySelector('.health-pill[data-sys="registry"]');
       if (pill) pill.title = 'Source registry is not loaded';
     }
+    const sinkRegOk = h.sink_registry_loaded === true;
+    setHealthPill('sink_registry', sinkRegOk);
+    if (!sinkRegOk) {
+      const pill = document.querySelector('.health-pill[data-sys="sink_registry"]');
+      if (pill) pill.title = 'Destination registry is not loaded';
+    }
   }
 
   function markHealthUnreachable() {
     setHealthPill('db', false);
     setHealthPill('redis', false);
     setHealthPill('registry', false);
+    setHealthPill('sink_registry', false);
   }
 
   function setHealthPill(sys, ok) {
@@ -1280,6 +1355,7 @@
     try {
       const services = await api('/sinks');
       sinksCache = services;
+      lastSinksCount = services.length;
       const grid = $('destination-grid');
       grid.innerHTML = '';
       for (const s of services) {
@@ -1457,6 +1533,7 @@
     try {
       const targets = await api('/targets');
       targetsCache = targets;
+      lastTargetsCount = targets.length;
       renderAllTargetsTable();
     } catch (e) { console.error(e); }
   }

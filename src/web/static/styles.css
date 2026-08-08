@@ -405,7 +405,7 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
   color: #E0E0E0;
 }
 .dashboard-stats {
-  flex: 0 0 320px;
+  flex: 0 0 400px;
   min-width: 0;
 }
 .stats-card {
@@ -416,6 +416,15 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
   display: flex;
   flex-direction: column;
 }
+.stats-group-header {
+  padding: 16px 16px 4px;
+  color: #4DA6FF;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.stats-group-header:first-child { padding-top: 12px; }
 .stats-row {
   display: flex;
   align-items: center;
@@ -443,6 +452,7 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
   text-align: right;
   min-width: 0;
 }
+.stats-row[data-stat="target-status"] .stats-label { padding-right: 45px; }
 .status-bar {
   display: flex;
   height: 18px;

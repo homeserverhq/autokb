@@ -1875,17 +1875,11 @@ def test_dkb_delete_strict_failure_force() -> Tuple[bool, str]:
         s.add(Sink(id=bogus, name="NoSuchSinkClass"))
     t_id = None
     try:
-        r = requests.post(
-            f"{MANAGER_URL}/api/sinks/{bogus}/targets",
-            headers={**_api_headers(), "Content-Type": "application/json"},
-            data=json.dumps({"name": "StrictFailTarget", "api_url": "http://fake/api",
-                             "api_key": "x", "target_extra_params": {}, "subscription_ids": []}),
-            timeout=30,
-        )
-        if r.status_code != 200:
-            return False, f"StrictFail: create target failed {r.status_code}: {r.text[:200]}"
-        t = r.json()
-        t_id = t["target_id"]
+        # Create the target directly via DB (bypassing the API's
+        # _ensure_target_remote, which requires a real sink class — this test
+        # is about the delete behaviour, not target creation).
+        t = db.create_target(bogus, "StrictFailTarget", "http://fake/api", "x", {})
+        t_id = t.id
         r2 = requests.delete(f"{MANAGER_URL}/api/targets/{t_id}", headers=_api_headers(), timeout=30)
         if r2.status_code != 502:
             return False, f"StrictFail: expected 502 got {r2.status_code}"

@@ -36,7 +36,6 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
     metadata = {
         "name": "crawl4AIWebScraperPlugin",
         "display_name": "Crawl4AI Web Scraper",
-        "icon": "crawl4AIWebScraperPlugin.png",
         "description": (
             "Deep-crawls a website via the Crawl4AI API (BFS strategy) and "
             "stores the extracted markdown content, one file per page. "

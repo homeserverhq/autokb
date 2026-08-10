@@ -11,7 +11,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-from .misc_utils import get_logger, sanitize_name
+from .misc_utils import get_logger, resolve_service_icon, sanitize_name
 from .sink_base import BaseSink
 
 
@@ -24,7 +24,7 @@ class SinkServiceRecord:
         self.metadata = metadata
         self.file_path = file_path
         self.display_name = metadata.get("display_name") or service_name
-        self.icon = metadata.get("icon", "default_icon.png")
+        self.icon = resolve_service_icon(cls, metadata)
 
 
 class SinkRegistry:

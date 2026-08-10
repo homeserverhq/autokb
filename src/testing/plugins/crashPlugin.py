@@ -7,7 +7,6 @@ class crashPlugin(BaseSubscription):
     metadata = {
         "name": "crashPlugin",
         "display_name": "crashPlugin",
-        "icon": "default_icon.png",
         "description": "Immediate crash plugin (Test 6)",
         "sub_type": "SCHEDULED",
     }

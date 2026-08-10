@@ -1017,8 +1017,6 @@ def api_dev_lab_save(body: Dict[str, Any] = Body(...)):
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Validation failed"))
     sanitized = result["plugin_id"]
-    if icon_b64:
-        code = _set_metadata_icon_in_source(code, f"{sanitized}.png")
     code = _set_metadata_display_name_in_source(code, display_name, "BaseSubscription")
     target_path = f"/src/plugins/{sanitized}.py"
     tmp_path = f"/tmp/.{sanitized}.py.tmp"
@@ -1131,80 +1129,6 @@ def _find_plugin_class_in_module(module: Any) -> Optional[Type[Any]]:
             found = obj
             break
     return found
-
-
-def _set_metadata_icon_in_source(code: str, icon_filename: str,
-                                 base_class_marker: str = "BaseSubscription") -> str:
-    """Update the metadata["icon"] value in plugin/DKB source code.
-
-    Returns the modified source string. The rewrite is a precise text
-    splice over the value's source range, so surrounding whitespace,
-    comments, and unrelated code are preserved. If the subclass, the
-    metadata dict, the "icon" key, or a writable value position cannot be
-    located, the source is returned unchanged.
-    """
-    import ast
-    new_value_repr = f'"{icon_filename}"'
-    try:
-        tree = ast.parse(code, filename="<dev_lab>")
-    except SyntaxError:
-        return code
-    target_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
-                if base_class_marker in bn:
-                    target_class = node
-                    break
-        if target_class is not None:
-            break
-    if target_class is None:
-        return code
-    metadata_assign = None
-    for node in target_class.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "metadata" for t in node.targets
-        ):
-            if isinstance(node.value, ast.Dict):
-                metadata_assign = node
-                break
-    if metadata_assign is None:
-        return code
-    dict_node = metadata_assign.value
-    icon_value = None
-    for i, key in enumerate(dict_node.keys):
-        if key is None:
-            continue
-        key_str = None
-        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-            key_str = key.value
-        elif hasattr(ast, "unparse"):
-            try:
-                key_str = ast.unparse(key)
-            except Exception:
-                pass
-        if key_str == "icon":
-            icon_value = dict_node.values[i]
-            break
-    if icon_value is None or not isinstance(icon_value, ast.Constant):
-        return code
-    if not hasattr(icon_value, "end_lineno") or icon_value.end_lineno is None:
-        return code
-    start_line = icon_value.lineno - 1
-    start_col = icon_value.col_offset
-    end_line = icon_value.end_lineno - 1
-    end_col = icon_value.end_col_offset
-    lines = code.splitlines(keepends=True)
-    if start_line == end_line:
-        line = lines[start_line]
-        lines[start_line] = line[:start_col] + new_value_repr + line[end_col:]
-    else:
-        first_part = lines[start_line][:start_col] + new_value_repr
-        last_part = lines[end_line][end_col:]
-        lines[start_line] = first_part + last_part
-        del lines[start_line + 1:end_line + 1]
-    return "".join(lines)
 
 
 def _require_display_name(body: Dict[str, Any]) -> str:
@@ -1635,8 +1559,6 @@ def api_sink_dev_lab_save(body: Dict[str, Any] = Body(...)):
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error", "Validation failed"))
     sanitized = result["service_name"]
-    if icon_b64:
-        code = _set_metadata_icon_in_source(code, f"{sanitized}.png", base_class_marker="BaseSink")
     code = _set_metadata_display_name_in_source(code, display_name, "BaseSink")
     target_path = f"/src/sinks/{sanitized}.py"
     tmp_path = f"/tmp/.{sanitized}.py.tmp"

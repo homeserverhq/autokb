@@ -43,6 +43,20 @@ class BaseSink(ABC):
 
     metadata: Dict[str, str] = {}  # overridden by subclass
 
+    @classmethod
+    def icon(cls) -> str:
+        """Icon asset filename for this service, derived from the service name.
+
+        Returns ``{sanitize_name(metadata["name"])}.png`` so concrete sinks do
+        not declare an ``icon`` key in their ``metadata``. Falls back to
+        ``default_icon.png`` when the class has no usable ``name``.
+        """
+        name = (getattr(cls, "metadata", None) or {}).get("name", "")
+        try:
+            return f"{sanitize_name(name)}.png"
+        except ValueError:
+            return "default_icon.png"
+
     # Optional per-service defaulting. Subclasses may override:
     #   * default_api_url — fallback base URL when the target row has none
     #   * api_key_env_var — env var that supplies the API key default

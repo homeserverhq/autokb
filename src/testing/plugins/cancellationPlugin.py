@@ -19,7 +19,6 @@ class cancellationPlugin(BaseSubscription):
     metadata = {
         "name": "cancellationPlugin",
         "display_name": "cancellationPlugin",
-        "icon": "cancellationPlugin.png",
         "description": "Graceful cancellation plugin (Test 7)",
         "sub_type": "SCHEDULED",
     }

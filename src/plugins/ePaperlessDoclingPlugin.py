@@ -33,7 +33,6 @@ class ePaperlessDoclingPlugin(BaseSubscription):
     metadata = {
         "name": "ePaperlessDoclingPlugin",
         "display_name": "Paperless Docling Parser",
-        "icon": "ePaperlessDoclingPlugin.png",
         "description": (
             "Watches a Paperless-ngx storage path, sends new and changed "
             "documents to Docling for OCR and parsing, and writes chunked "

@@ -6,7 +6,6 @@ class editMatchPlugin(BaseSubscription):
     metadata = {
         "name": "editMatchPlugin",
         "display_name": "editMatchPlugin",
-        "icon": "default_icon.png",
         "description": "edit match plugin V1",
         "sub_type": "SCHEDULED",
     }

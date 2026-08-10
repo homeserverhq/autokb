@@ -144,6 +144,32 @@ def plugin_id_from_metadata(metadata: Dict[str, Any]) -> str:
     return sanitize_name(metadata["name"])
 
 
+def resolve_service_icon(cls: Any, metadata: Dict[str, Any],
+                         assets_dir: str = "") -> str:
+    """Derive the icon asset filename for a service class.
+
+    Uses ``cls.icon()`` when defined (BaseSink / BaseSubscription derive it
+    from ``metadata["name"]``); otherwise falls back to the ``icon`` key in
+    ``metadata``. If the referenced file is missing from the assets
+    directory, returns ``default_icon.png``. When the assets directory does
+    not exist (e.g. the Worker, which does not mount ``/assets``), the
+    derived name is returned unchanged.
+    """
+    if hasattr(cls, "icon"):
+        try:
+            icon = cls.icon()
+        except Exception:  # noqa: BLE001
+            icon = metadata.get("icon", "default_icon.png")
+    else:
+        icon = metadata.get("icon", "default_icon.png")
+    if not icon:
+        return "default_icon.png"
+    assets_dir = assets_dir or os.environ.get("AUTOKB_ASSETS_DIR", "/assets")
+    if os.path.isdir(assets_dir) and not os.path.isfile(os.path.join(assets_dir, icon)):
+        return "default_icon.png"
+    return icon
+
+
 # ---------------------------------------------------------------------------
 # Fernet-style symmetric encryption (uses base64 + AES via cryptography)
 # ---------------------------------------------------------------------------
@@ -561,6 +587,7 @@ __all__ = [
     "get_logger",
     "sanitize_name",
     "plugin_id_from_metadata",
+    "resolve_service_icon",
     "PasswordCipher",
     "augment_schema",
     "ensure_extra_params",

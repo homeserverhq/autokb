@@ -10,7 +10,6 @@ class happyPathPlugin(BaseSubscription):
     metadata = {
         "name": "happyPathPlugin",
         "display_name": "happyPathPlugin",
-        "icon": "default_icon.png",
         "description": "Normal success path plugin (Test 1)",
         "sub_type": "SCHEDULED",
     }

@@ -24,7 +24,6 @@ class TestSink(BaseSink):
         "name": "testSink",
         "display_name": "testSink",
         "description": "End-to-end test Sink service",
-        "icon": "default_icon.png",
     }
 
     def _file_name(self, path: str) -> str:

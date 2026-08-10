@@ -10,7 +10,6 @@ class noHeartbeatPlugin(BaseSubscription):
     metadata = {
         "name": "noHeartbeatPlugin",
         "display_name": "noHeartbeatPlugin",
-        "icon": "default_icon.png",
         "description": "Heartbeat timeout plugin (Test 3)",
         "sub_type": "SCHEDULED",
     }

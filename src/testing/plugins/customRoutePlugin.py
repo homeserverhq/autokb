@@ -11,7 +11,6 @@ class customRoutePlugin(BaseSubscription):
     metadata = {
         "name": "customRoutePlugin",
         "display_name": "customRoutePlugin",
-        "icon": "default_icon.png",
         "description": "Custom API routes plugin (Test 13)",
         "sub_type": "SCHEDULED",
     }

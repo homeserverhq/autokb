@@ -7,7 +7,6 @@ class monitorErrorPlugin(BaseSubscription):
     metadata = {
         "name": "monitorErrorPlugin",
         "display_name": "monitorErrorPlugin",
-        "icon": "default_icon.png",
         "description": "Monitor exception retry loop (Test 16)",
         "sub_type": "EVENT_BASED",
     }

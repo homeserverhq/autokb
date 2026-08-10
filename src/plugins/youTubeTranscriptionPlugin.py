@@ -419,7 +419,6 @@ class youTubeTranscriptionPlugin(BaseSubscription):
     metadata = {
         "name": "youTubeTranscriptionPlugin",
         "display_name": "YouTube Transcriptions",
-        "icon": "youTubeTranscriptionPlugin.png",
         "description": (
             "Downloads transcripts for all videos in a YouTube channel and "
             "optionally applies chunking with natural break points. Set cron to daily "

@@ -24,7 +24,6 @@ class imapFolderWatchPlugin(BaseSubscription):
     metadata = {
         "name": "imapFolderWatchPlugin",
         "display_name": "IMAP Folder Watch",
-        "icon": "imapFolderWatchPlugin.png",
         "description": "Watches an email IMAP folder via IDLE; optionally chunks new mail as markdown. When monitoring subfolders, a shorter cron interval (e.g. every 5 minutes) is recommended.",
         "sub_type": "EVENT_BASED",
         "monitor_timeout": 1500,

@@ -33,7 +33,7 @@ Worker recon engine → compare /output vs remote → your six methods
 - be a valid **camelCase** identifier ≤ 32 characters;
 - equal `sanitize_name(metadata["name"])` exactly.
 
-If your sink needs data files (icons, reference data), those go in `/assets/` and are referenced by the `metadata["icon"]` field. When uploading through the **Developer Lab**, you can attach the `.png` icon alongside the sink code.
+If your sink needs data files (icons, reference data), those go in `/assets/`. The icon filename is derived from the sink name: `{sanitize_name(metadata["name"])}.png`. Upload or place a matching `.png` in `/assets/`; `default_icon.png` is used when absent.
 
 ### Zero Access Required
 
@@ -58,7 +58,6 @@ class myFirstSink(BaseSink):
         "name": "myFirstSink",
         "display_name": "My First Connector",
         "description": "Uploads AutoKB output files to an example REST endpoint.",
-        "icon": "myFirstSink.png",
     }
     default_api_url = "https://example.com"
     api_key_env_var = "MY_FIRST_SINK_API_KEY"
@@ -151,8 +150,11 @@ The `metadata` dict is a **class-level** attribute. It is validated at load time
 |----------------|--------|----------|-------------|
 | `name`         | str    | Yes      | camelCase identifier, ≤ 32 chars, must **end with `Sink`** and equal the `.py` filename stem exactly (after `sanitize_name()`). Example: `"openWebUISink"` |
 | `display_name` | str    | No       | Human-friendly label shown in the Data Destinations grid and Target forms (e.g. `"Open WebUI Knowledge Base"`). Falls back to `name` when absent. |
-| `icon`         | str    | No       | Filename in `/assets/`. Default: `"default_icon.png"`. Place a matching `.png` in `/repos/autokb/assets/` (≤ 512×512). |
 | `description`  | str    | No       | Shown in the Data Destinations grid. Should explain what remote service this connects to and what a Target maps to on the remote side. |
+
+### Icon
+
+The icon filename is derived from the sink name: `{sanitize_name(metadata["name"])}.png`. Place a matching `.png` in `/assets/` or upload via the Developer Lab. Falls back to `default_icon.png` when missing.
 
 ### Naming Rules
 
@@ -583,7 +585,6 @@ class RestUploadSink(BaseSink):
             "Data Target creates one container on the remote service; files "
             "are added, replaced on change, and removed when deleted."
         ),
-        "icon": "restUploadSink.png",
     }
     default_api_url = "http://rest-upload-app:8000"
     api_key_env_var = "REST_UPLOAD_API_KEY"
@@ -721,7 +722,7 @@ To adapt it to a real service (Open WebUI, Cognee, a WebDAV server, etc.), chang
 | Item | Location / Method |
 |------|------------------|
 | Sink `.py` file | **Option A:** Upload via Web UI **Developer Lab → Destination Developer** (`#/devlab/destination`) — paste code, click **Save**. **Option B:** Place directly in `/src/sinks/{yourSink}.py`. |
-| Sink icon `.png` | **Option A:** Upload through the Developer Lab's icon picker alongside your sink code. **Option B:** Place manually in `/assets/{yourSink}.png` (≤ 512×512, referenced by `metadata["icon"]`). |
+| Sink icon `.png` | **Option A:** Upload through the Developer Lab's icon picker alongside your sink code. **Option B:** Place manually in `/assets/{yourSink}.png` (≤ 512×512). The registry derives the filename from the sink name — no `metadata["icon"]` key needed. |
 
 Both delivery methods end up in the same place — the Developer Lab writes the file to `/src/sinks/`, triggering the same hot-swap watcher. There is no registration step, no API call, and no restart. The Manager's watcher reloads the `SinkRegistry` and upserts the `sink` row within ~2 seconds; the Worker lazy-loads the file from disk on demand, so the very next recon uses your new code.
 
@@ -746,4 +747,4 @@ Before considering your sink complete, verify:
 - [ ] Failures are reported by raising, never by returning empty/`None` remote ids
 - [ ] Remote calls use a timeout and a `_check`-style HTTP guard that surfaces a readable error
 - [ ] Any new dependencies are documented and conveyed to the Docker image maintainer
-- [ ] Icon file (if not using `default_icon.png`) is placed in `/assets/` or uploaded via Developer Lab
+- [ ] Icon file (if not using `default_icon.png`) is placed in `/assets/{yourSink}.png` or uploaded via Developer Lab (filename is auto-derived from the sink name)

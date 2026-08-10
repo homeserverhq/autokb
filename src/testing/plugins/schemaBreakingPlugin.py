@@ -6,7 +6,6 @@ class schemaBreakingPlugin(BaseSubscription):
     metadata = {
         "name": "schemaBreakingPlugin",
         "display_name": "schemaBreakingPlugin",
-        "icon": "default_icon.png",
         "description": "Schema breaking change plugin — V1 (title+author)",
         "sub_type": "SCHEDULED",
     }

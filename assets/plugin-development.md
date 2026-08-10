@@ -21,7 +21,7 @@ Worker picks up subscription → child process → plugin.getData(config, progre
 
 **Everything** your plugin needs must live in one `.py` file. There are no sidecar files, no companion modules, no package directories. The file stem (minus `.py`) must be a valid **camelCase** identifier ≤ 32 characters.
 
-If your plugin needs logic split across multiple concerns, write helper functions inside the same file. If it needs data files (icons, reference data), those go in `/assets/` and are referenced by the `metadata["icon"]` field. When uploading through the **Developer Lab**, you can attach the `.png` icon alongside the plugin code.
+If your plugin needs logic split across multiple concerns, write helper functions inside the same file. If it needs data files (icons, reference data), those go in `/assets/`. The icon filename is derived from the plugin name: `{sanitize_name(metadata["name"])}.png`. Upload or place a matching `.png` in `/assets/`; `default_icon.png` is used when absent.
 
 ### Zero Access Required
 
@@ -39,7 +39,6 @@ from utils.plugin_base import BaseSubscription
 class myFirstPlugin(BaseSubscription):
     metadata = {
         "name": "myFirstPlugin",
-        "icon": "default_icon.png",
         "description": "Downloads data from an example source and writes it as markdown files.",
         "sub_type": "SCHEDULED",
     }
@@ -87,9 +86,12 @@ The `metadata` dict is a **class-level** attribute. It is validated at load time
 | Field          | Type   | Required | Description |
 |----------------|--------|----------|-------------|
 | `name`         | str    | Yes      | camelCase identifier, ≤ 32 chars, must match the `.py` filename stem exactly (after `sanitize_name()`). Example: `"youTubeTranscriptionPlugin"` |
-| `icon`         | str    | No       | Filename in `/assets/`. Default: `"default_icon.png"`. Place a matching `.png` in `/repos/autokb/assets/` (≤ 512×512). |
 | `description`  | str    | No       | Shown in the Data Sources grid. Should explain what data source this connects to and any scheduling advice. |
 | `sub_type`     | str    | Yes      | `"SCHEDULED"` or `"EVENT_BASED"` — see below. |
+
+### Icon
+
+The icon filename is derived from the plugin name: `{sanitize_name(metadata["name"])}.png`. Place a matching `.png` in `/assets/` or upload via the Developer Lab. Falls back to `default_icon.png` when missing.
 
 ### `sub_type`: SCHEDULED vs EVENT_BASED
 
@@ -927,7 +929,6 @@ from utils.plugin_base import BaseSubscription
 class rssFeedPlugin(BaseSubscription):
     metadata = {
         "name": "rssFeedPlugin",
-        "icon": "rssFeedPlugin.png",
         "description": (
             "Fetches articles from an RSS/Atom feed and writes each as "
             "markdown. Long articles are chunked by token budget."
@@ -1155,7 +1156,7 @@ This plugin demonstrates every major concept: schema with configurable fields (i
 | Item | Location / Method |
 |------|------------------|
 | Plugin `.py` file | **Option A:** Upload via Web UI **Developer Lab** (`#/devlab`) — paste code, click **Save**. **Option B:** Place directly in `/src/plugins/{yourPlugin}.py`. |
-| Plugin icon `.png` | **Option A:** Upload through the Developer Lab's icon picker alongside your plugin code. **Option B:** Place manually in `/assets/{yourPlugin}.png` (≤ 512×512, referenced by `metadata["icon"]`). |
+| Plugin icon `.png` | **Option A:** Upload through the Developer Lab's icon picker alongside your plugin code. **Option B:** Place manually in `/assets/{yourPlugin}.png` (≤ 512×512). The registry derives the filename from the plugin name — no `metadata["icon"]` key needed. |
 
 Both delivery methods end up in the same place — the Developer Lab writes the file to `/src/plugins/`, triggering the same hot-swap watcher. There is no registration step, no API call, and no restart.
 
@@ -1182,6 +1183,6 @@ Before considering your plugin complete, verify:
 - [ ] If the plugin chunks, `get_schema()` exposes a `chunking_enabled` boolean (default `True`) and `getData()` honors it
 - [ ] Token counting uses `tiktoken.get_encoding("cl100k_base")` (pre-cached)
 - [ ] Any new dependencies are documented and conveyed to the Docker image maintainer
-- [ ] Icon file (if not using `default_icon.png`) is placed in `/assets/` or uploaded via Developer Lab
+- [ ] Icon file (if not using `default_icon.png`) is placed in `/assets/{yourPlugin}.png` or uploaded via Developer Lab
 - [ ] All blocking I/O in `getData()` is sync; all I/O in `monitor()` is async
 - [ ] Structured logging uses `self.log.info/error` with keyword arguments

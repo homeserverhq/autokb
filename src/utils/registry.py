@@ -25,6 +25,7 @@ from .misc_utils import (
     collect_password_field_names,
     get_logger,
     plugin_id_from_metadata,
+    resolve_service_icon,
     sanitize_name,
     schema_hash,
 )
@@ -236,7 +237,7 @@ class PluginRegistry:
             plugin_id=plugin_id,
             name=meta["name"],
             display_name=meta.get("display_name") or meta["name"],
-            icon=meta.get("icon", "default_icon.png"),
+            icon=resolve_service_icon(cls, meta),
             description=meta.get("description", ""),
             sub_type=sub_type,
             default_access_level=access,

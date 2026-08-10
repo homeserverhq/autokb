@@ -9,7 +9,6 @@ class monitorNeverTriggerPlugin(BaseSubscription):
     metadata = {
         "name": "monitorNeverTriggerPlugin",
         "display_name": "monitorNeverTriggerPlugin",
-        "icon": "default_icon.png",
         "description": "Monitor never triggers — cron fallback (Test 15)",
         "sub_type": "EVENT_BASED",
     }

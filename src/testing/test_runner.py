@@ -598,7 +598,6 @@ from utils.plugin_base import BaseSubscription
 class schemaBreakingPlugin(BaseSubscription):
     metadata = {
         "name": "schemaBreakingPlugin",
-        "icon": "default_icon.png",
         "description": "Schema breaking change plugin — V1 (title+author)",
         "sub_type": "SCHEDULED",
     }
@@ -626,7 +625,6 @@ from utils.plugin_base import BaseSubscription
 class schemaBreakingPlugin(BaseSubscription):
     metadata = {
         "name": "schemaBreakingPlugin",
-        "icon": "default_icon.png",
         "description": "Schema breaking change plugin — V2 (title+writer)",
         "sub_type": "SCHEDULED",
     }
@@ -1101,7 +1099,6 @@ from utils.plugin_base import BaseSubscription
 class editMatchPlugin(BaseSubscription):
     metadata = {
         "name": "editMatchPlugin",
-        "icon": "default_icon.png",
         "description": "edit match plugin V1",
         "sub_type": "SCHEDULED",
     }
@@ -1136,7 +1133,6 @@ from utils.plugin_base import BaseSubscription
 class editMatchPlugin(BaseSubscription):
     metadata = {
         "name": "editMatchPlugin",
-        "icon": "default_icon.png",
         "description": "edit match plugin V2 (same schema, different output)",
         "sub_type": "SCHEDULED",
     }
@@ -1171,7 +1167,6 @@ from utils.plugin_base import BaseSubscription
 class editMatchPlugin(BaseSubscription):
     metadata = {
         "name": "editMatchPlugin",
-        "icon": "default_icon.png",
         "description": "edit match plugin V3 (different schema — should be rejected)",
         "sub_type": "SCHEDULED",
     }
@@ -2012,7 +2007,7 @@ _MOCK_REMOTE_UPDATED = "remote-updated-456"
 
 class _MockSink(BaseSink):
     """Concrete Sink service for testing — records all calls."""
-    metadata = {"name": "MockSink", "display_name": "MockSink", "description": "Test Sink service", "icon": "mock.png"}
+    metadata = {"name": "MockSink", "display_name": "MockSink", "description": "Test Sink service"}
 
     def __init__(self, target_row, db):
         super().__init__(target_row, db)
@@ -2337,6 +2332,36 @@ def _dkb_test_remote_filename_include_path():
         return False, f"outside-output: got {got3!r}, want {want3!r}"
 
     return True, "OK"
+
+
+def _dkb_test_icon():
+    """Verify icon is derived from service name, falls back on missing file."""
+    from utils.sink_base import BaseSink
+    from utils.plugin_base import BaseSubscription
+    from utils.misc_utils import resolve_service_icon
+
+    class _TestSink(BaseSink):
+        metadata = {"name": "testSink", "display_name": "T", "description": "t"}
+    assert _TestSink.icon() == "testSink.png", _TestSink.icon()
+
+    class _TestPlugin(BaseSubscription):
+        metadata = {"name": "testPlugin", "description": "t", "sub_type": "SCHEDULED"}
+    assert _TestPlugin.icon() == "testPlugin.png", _TestPlugin.icon()
+
+    assert BaseSink.icon() == "default_icon.png", BaseSink.icon()
+    assert BaseSubscription.icon() == "default_icon.png", BaseSubscription.icon()
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "testSink.png"), "wb") as f:
+            f.write(b"x")
+        assert resolve_service_icon(_TestSink, _TestSink.metadata, assets_dir=d) == "testSink.png"
+
+        class _NoIcon(BaseSink):
+            metadata = {"name": "noIcon", "display_name": "N", "description": "n"}
+        assert resolve_service_icon(_NoIcon, _NoIcon.metadata, assets_dir=d) == "default_icon.png"
+
+    return True, "icon derivation + fallback OK"
 
 
 def _dkb_test_base_add_datafile(db, sub, ds):
@@ -2957,6 +2982,7 @@ def _run_dkb_unit_tests():
         ("DKB Registry — load", None),
         ("DKB Service — compute hash", None),
         ("DKB Service — remote filename with path", None),
+        ("DKB Icon — derivation + fallback", None),
         ("DKB Service — base_add_datafile", lambda db, sub, ds: _dkb_test_base_add_datafile(db, sub, ds)),
         ("DKB Service — base_update_datafile", lambda db, sub, ds: _dkb_test_base_update_datafile(db, sub, ds)),
         ("DKB Service — base_remove_datafile", lambda db, sub, ds: _dkb_test_base_remove_datafile(db, sub, ds)),
@@ -2997,6 +3023,7 @@ def _run_dkb_unit_tests():
                               _dkb_test_queue_roundtrip() if "roundtrip" in name else \
                               _dkb_test_registry_load() if "Registry" in name else \
                               _dkb_test_remote_filename_include_path() if "remote filename" in name else \
+                              _dkb_test_icon() if "Icon" in name else \
                               (_dkb_test_compute_hash(), "OK")
                 else:
                     # Create fresh fixtures per test

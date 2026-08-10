@@ -7,7 +7,6 @@ class eventHappyPlugin(BaseSubscription):
     metadata = {
         "name": "eventHappyPlugin",
         "display_name": "eventHappyPlugin",
-        "icon": "default_icon.png",
         "description": "EVENT_BASED success plugin (Test 2)",
         "sub_type": "EVENT_BASED",
     }

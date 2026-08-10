@@ -36,11 +36,24 @@ class BaseSubscription(ABC):
     # ---- mandatory class-level overrides (validated at load time) ----
     metadata: Dict[str, Any] = {
         "name": "",
-        "icon": "default_icon.png",
         "description": "",
         "sub_type": "SCHEDULED",
     }
     DEFAULT_ACCESS_LEVEL: str = ACCESS_PRIVATE
+
+    @classmethod
+    def icon(cls) -> str:
+        """Icon asset filename for this plugin, derived from the service name.
+
+        Returns ``{sanitize_name(metadata["name"])}.png`` so concrete plugins
+        do not declare an ``icon`` key in their ``metadata``. Falls back to
+        ``default_icon.png`` when the class has no usable ``name``.
+        """
+        name = (getattr(cls, "metadata", None) or {}).get("name", "")
+        try:
+            return f"{sanitize_name(name)}.png"
+        except ValueError:
+            return "default_icon.png"
 
     # ---- internal state set by the Managed Execution Wrapper ----
     _heartbeat_event: Optional[Any] = None

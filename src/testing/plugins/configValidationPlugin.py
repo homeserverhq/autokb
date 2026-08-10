@@ -7,7 +7,6 @@ class configValidationPlugin(BaseSubscription):
     metadata = {
         "name": "configValidationPlugin",
         "display_name": "configValidationPlugin",
-        "icon": "default_icon.png",
         "description": "All schema field types (Test 17)",
         "sub_type": "SCHEDULED",
     }

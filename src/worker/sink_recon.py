@@ -292,11 +292,20 @@ def reconcile_subscription_targets(
         except Exception:
             pass
 
+    # --- Pass III: heal remote drift — DB rows missing on the remote ---
+    try:
+        healed_count = _pass3_heal_remote(
+            sub, ds_links, db, sink_registry, queue, log, error_ds_names,
+        )
+    except Exception as exc:
+        healed_count = 0
+        log.error("sink_pass3_failed", sub_id=sub_id, error=str(exc))
+
     log.info(
         "sink_recon_complete",
         sub_id=sub_id, name=sub_name,
         added=add_count, updated=update_count, removed=remove_count,
-        errors=len(error_ds_names),
+        healed=healed_count, errors=len(error_ds_names),
     )
 
 
@@ -495,6 +504,75 @@ def _pass2_akb_datafiles(sub, db, output_dir, fs_files, log) -> None:
                 log.error("sink_pass2_hash_failed", path=df.path, error=str(exc))
                 raise
             db.update_datafile_stats(df.id, st.st_size, st.st_mtime, real_hash, checked_at)
+
+
+def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_names) -> int:
+    """Pass III — reconcile our DB against the remote target.
+
+    For every tracked datafile whose remote copy is missing on the remote
+    (regardless of *why* it drifted — external deletion, a cross-KB ``DELETE``,
+    a crash mid-pass), re-push it so both sides agree again. Returns the
+    number of files healed.
+    """
+    sub_id = sub.id
+    sub_name = sub.name
+    healed = 0
+
+    for ds_link in ds_links:
+        if ds_link.status not in (STATE_ENABLED, STATE_IN_PROGRESS, STATE_ENQUEUED):
+            continue
+        target_id = ds_link.target_id
+        ds_row = db.get_target(target_id)
+        if ds_row is None:
+            continue
+        svc = _get_service(ds_row, db, sink_registry, log)
+        if svc is None or not svc.remote_target_id:
+            continue
+        svc.set_cancel_check(_make_cancel_check(db, sub_id, target_id, queue, {"n": 0}))
+
+        rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
+        if not rows:
+            continue
+
+        # Only sinks that can enumerate their remote target are healable.
+        if not callable(getattr(svc, "_kb_files", None)):
+            continue
+
+        # Snapshot of remote file ids for this KB (one read per target).
+        try:
+            remote_ids = {f.get("id") for f in svc._kb_files(svc.remote_target_id)}
+        except Exception as exc:
+            log.error("sink_pass3_remote_read_failed", target_id=target_id, error=str(exc))
+            _transition_ds_error(
+                ds_link, target_id, sub_id, db, log,
+                sub_name, ds_row.name, str(exc), error_ds_names,
+            )
+            continue
+
+        for t_df in rows:
+            svc._check_cancel()
+            df = db.get_datafile(t_df.datafile_id)
+            if df is None:
+                continue  # Pass II already removed the datafile
+            if not os.path.exists(df.path):
+                continue  # missing on FS — Pass I.a / Pass II handle it
+            if not t_df.remote_datafile_id:
+                continue  # schema enforces NOT NULL — defensive skip
+            if t_df.remote_datafile_id in remote_ids:
+                continue  # present on remote — already reconciled
+            try:
+                # Re-push the current content; the sink's duplicate-content
+                # recovery rewrites the remote to point at the fresh id.
+                svc.base_update_datafile(df.id, df.hash)
+                healed += 1
+            except Exception as exc:
+                log.error("sink_pass3_heal_failed", datafile_id=df.id, target_id=target_id, error=str(exc))
+                _transition_ds_error(
+                    ds_link, target_id, sub_id, db, log,
+                    sub_name, ds_row.name, str(exc), error_ds_names,
+                )
+                break
+    return healed
 
 
 def _invoke_remove(ds_link, target_id, ds_df, db, sink_registry, log, sub_name, error_ds_names):

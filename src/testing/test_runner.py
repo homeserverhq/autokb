@@ -3062,6 +3062,199 @@ def _dkb_test_delete_orphan_best_effort(db, sub, ds):
     return True, "OK"
 
 
+# ---- OpenWebUI sink duplicate-content recovery + Pass III heal tests ----
+
+_DUP_MSG = "400: Duplicate content detected. Please provide unique content to proceed."
+
+
+def _sink_owui_row():
+    import types
+    return types.SimpleNamespace(
+        id="ds-1", service_id="svc-1", name="WebScrapes",
+        api_url="http://owui:8080", api_key="sk-x", remote_target_id="kb-1",
+        target_extra_params={}, include_path_in_filename=True,
+        access_level="PRIVATE",
+    )
+
+
+class _FakeResp:
+    def __init__(self, status, body=None):
+        self.status_code = status
+        self._body = body if body is not None else {}
+        self.text = json.dumps(self._body) if isinstance(self._body, (dict, list)) else str(self._body)
+
+    def json(self):
+        return self._body
+
+
+class _TLog:
+    def error(self, *a, **k): pass
+    def warning(self, *a, **k): pass
+    def info(self, *a, **k): pass
+
+
+def _owui_dup_session(content_text="dup text"):
+    """Scripted OpenWebUI backend simulator.
+
+    Remote file repo + per-KB links with content-hash dedup semantics:
+    linking a file fails with the duplicate 400 whenever *another* linked
+    file already holds the same content hash. Deleting a file unlinks it.
+    """
+    import hashlib
+    dup_hash = hashlib.sha256(content_text.encode("utf-8")).hexdigest()
+    state = {
+        "remote": {"OLD1": dup_hash},   # repo: id -> content hash
+        "linked": {"OLD1"},              # file ids currently linked into kb-1
+        "seq": 0,
+        "deleted": [],
+        "deleted_new": 0,
+        "link_calls": [],
+    }
+
+    def handle(method, url, kw):
+        path = url.split("/api/v1/", 1)[-1]
+        page = (kw.get("params") or {}).get("page", 1) if method == "GET" else 1
+
+        if method == "POST" and path == "files/":
+            state["seq"] += 1
+            fid = f"NEW{state['seq']}"
+            state["remote"][fid] = dup_hash
+            return _FakeResp(200, {"id": fid})
+
+        if method == "GET" and path.startswith("files/") and path.endswith("/process/status"):
+            return _FakeResp(200, {"status": "completed"})
+
+        if method == "GET" and path.startswith("files/") and path.endswith("/data/content"):
+            return _FakeResp(200, {"content": content_text})
+
+        if method == "GET" and path == "knowledge/kb-1/files":
+            if page > 1:
+                return _FakeResp(200, {"items": [], "total": 0})
+            items = [{"id": fid, "hash": h} for fid, h in state["remote"].items() if fid in state["linked"]]
+            return _FakeResp(200, {"items": items, "total": len(items)})
+
+        if method == "POST" and path == "knowledge/kb-1/file/add":
+            fid = (kw.get("json") or {}).get("file_id")
+            state["link_calls"].append(fid)
+            if any(other != fid for other in state["linked"] if other in state["remote"]):
+                return _FakeResp(400, {"detail": _DUP_MSG})
+            state["linked"].add(fid)
+            return _FakeResp(200, {})
+
+        if method == "DELETE" and path.startswith("files/"):
+            fid = path.split("files/", 1)[-1]
+            if fid not in state["remote"]:
+                return _FakeResp(404, {"detail": "Not found"})
+            del state["remote"][fid]
+            state["linked"].discard(fid)
+            state["deleted"].append(fid)
+            if fid.startswith("NEW"):
+                state["deleted_new"] += 1
+            return _FakeResp(200, {"message": "deleted"})
+
+        raise AssertionError(f"unexpected owui request: {method} {path}")
+
+    return _FakeSession(handle, state)
+
+
+class _FakeSession:
+    def __init__(self, handle, state):
+        self.handle = handle
+        self.state = state
+
+
+def _patch_owui_requests(sess):
+    from contextlib import contextmanager
+    from unittest.mock import patch
+
+    @contextmanager
+    def _cm():
+        with patch("sinks.openWebUISink.requests.post", side_effect=lambda url, **kw: sess.handle("POST", url, kw)), \
+             patch("sinks.openWebUISink.requests.get", side_effect=lambda url, **kw: sess.handle("GET", url, kw)), \
+             patch("sinks.openWebUISink.requests.delete", side_effect=lambda url, **kw: sess.handle("DELETE", url, kw)):
+            yield
+    return _cm()
+
+
+def _dkb_test_owui_dup_add(db, sub, ds):
+    """Owui sink: duplicate on add → delete the colliding file, re-link the
+    fresh upload, and persist the fresh remote id in target_datafile."""
+    from sinks.openWebUISink import OpenWebUISink
+    sub_name = _get_sub_name(db, sub)
+    path = _write_output_file_test(sub_name, "dup.md", "# Dup\ncontent\n")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    sess = _owui_dup_session()
+    svc = OpenWebUISink(ds_row, db)
+    svc.remote_target_id = "kb-1"
+    with _patch_owui_requests(sess):
+        svc.base_add_datafile(sub, path)
+    df = db.get_datafile_by_path(path)
+    t_df = db.get_target_datafile(ds.id, df.id)
+    if t_df is None:
+        return False, "target_datafile row not created"
+    if t_df.remote_datafile_id != "NEW1":
+        return False, f"expected fresh remote id NEW1 got {t_df.remote_datafile_id}"
+    if "OLD1" not in sess.state["deleted"]:
+        return False, "existing colliding file was not deleted"
+    if sess.state["deleted_new"]:
+        return False, "fresh upload should be kept, not deleted"
+    if sess.state["link_calls"] != ["NEW1", "NEW1"]:
+        return False, f"expected fresh file re-linked after recovery, got {sess.state['link_calls']}"
+    return True, "dup add recovery OK"
+
+
+def _dkb_test_owui_dup_update(db, sub, ds):
+    """Owui sink: duplicate on update → drop the old remote owner, keep the
+    fresh upload as the new remote id."""
+    from sinks.openWebUISink import OpenWebUISink
+    path = _write_output_file_test(_get_sub_name(db, sub), "dupu.md", "# Dup\nelse\n")
+    row = _sink_owui_row()
+    svc = OpenWebUISink(row, db)
+    sess = _owui_dup_session(content_text="# Dup\nelse\n")
+    with _patch_owui_requests(sess):
+        new_id = svc.update_datafile("OLD1", path)
+    if not new_id.startswith("NEW"):
+        return False, f"expected a fresh remote id got {new_id}"
+    if "OLD1" not in sess.state["deleted"]:
+        return False, "old colliding file not replaced"
+    if sess.state["deleted_new"]:
+        return False, "fresh upload should be kept, not deleted"
+    return True, "dup update recovery OK"
+
+
+def _dkb_test_pass3_heal_update(db, sub, ds):
+    """Pass III: a tracked file whose remote copy vanished from the remote is
+    re-pushed (base_update_datafile) and the row's remote id updated."""
+    from unittest.mock import patch
+    from worker.sink_recon import _pass3_heal_remote
+    sub_row = db.get_subscription(sub)
+    sub_name = _get_sub_name(db, sub)
+    path = _write_output_file_test(sub_name, "heal.md", "# heal\n")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _MockSink(ds_row, db)
+    svc.remote_target_id = "kb-1"
+    db.set_target_remote_id(ds.id, "kb-1")
+    svc.base_add_datafile(sub, path)
+    df = db.get_datafile_by_path(path)
+    t_df = db.get_target_datafile(ds.id, df.id)
+    if t_df is None or t_df.remote_datafile_id != _MOCK_REMOTE_ID:
+        return False, "precondition failed: tracked row missing"
+    svc._kb_files = lambda kb: []  # remote lost the file
+    links = db.list_targets_for_subscription(sub)
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        healed = _pass3_heal_remote(sub_row, links, db, None, None, _TLog(), [])
+    if healed != 1:
+        return False, f"expected 1 healed got {healed}"
+    if not any(c[0] == "update_datafile" for c in svc.calls):
+        return False, "update_datafile not invoked for drift"
+    t_df2 = db.get_target_datafile(ds.id, df.id)
+    if t_df2 is None or t_df2.remote_datafile_id != _MOCK_REMOTE_UPDATED:
+        return False, "remote id not healed to new id"
+    return True, "Pass III update-heal OK"
+
+
 def _run_dkb_unit_tests():
     """Run all Sink unit tests inline, return (passed, total, results)."""
     tests = [
@@ -3100,6 +3293,9 @@ def _run_dkb_unit_tests():
         ("DKB Delete — strict raises on remote failure", lambda db, sub, ds: _dkb_test_delete_strict_raises(db, sub, ds)),
         ("DKB Delete — strict success keeps rows for caller", lambda db, sub, ds: _dkb_test_delete_strict_success(db, sub, ds)),
         ("DKB Delete — orphan best-effort deletes rows", lambda db, sub, ds: _dkb_test_delete_orphan_best_effort(db, sub, ds)),
+        ("DKB Sink — dup add recovery (owui)", lambda db, sub, ds: _dkb_test_owui_dup_add(db, sub, ds)),
+        ("DKB Sink — dup update recovery (owui)", lambda db, sub, ds: _dkb_test_owui_dup_update(db, sub, ds)),
+        ("DKB Pass III — heal update path", lambda db, sub, ds: _dkb_test_pass3_heal_update(db, sub, ds)),
     ]
 
     results = []

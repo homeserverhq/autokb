@@ -11,6 +11,7 @@ REST API (``{api_url}/api/v1``). The upload/link lifecycle mirrors the legacy
     orphaned versions linger. Deletes are idempotent (404 == success).
 """
 
+import hashlib
 import os
 import time
 
@@ -172,6 +173,53 @@ class OpenWebUISink(BaseSink):
     def _kb_files(self, kb_id: str):
         return self._paginated_get(f"knowledge/{kb_id}/files")
 
+    def _is_duplicate_error(self, exc: Exception) -> bool:
+        """True when the exception is OpenWebUI's duplicate-content rejection."""
+        return "Duplicate content detected" in str(exc)
+
+    def _content_hash(self, file_id: str) -> str:
+        """Content hash of a processed file, computed exactly like OpenWebUI's
+        ``calculate_sha256_string`` (sha256 of the extracted UTF-8 text). The
+        dedup logic stores this hash in ``metadata.hash`` / ``file.hash``, so a
+        match against the KB file listing identifies the file holding the same
+        content under a different id.
+        """
+        resp = requests.get(
+            self._url(f"files/{file_id}/data/content"),
+            headers=self._headers(),
+            timeout=self._timeout,
+        )
+        self._check(resp, f"get content for {file_id}")
+        content = (resp.json() or {}).get("content", "") if isinstance(resp.json(), dict) else ""
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def _recover_duplicate(self, new_file_id: str) -> bool:
+        """Resolve a duplicate-content rejection so *new_file_id* becomes the
+        sole owner of that content in the KB: find the existing file holding
+        the same text, delete it (clearing the dedup blocker), then re-link
+        the fresh upload. Returns True when the fresh file is linked.
+        """
+        try:
+            content_hash = self._content_hash(new_file_id)
+        except Exception:
+            return False
+        existing_id = None
+        for f in self._kb_files(self.remote_target_id):
+            if f.get("id") != new_file_id and f.get("hash") == content_hash:
+                existing_id = f.get("id")
+                break
+        if not existing_id:
+            return False
+        try:
+            self._delete_file(existing_id)
+        except Exception:
+            return False
+        try:
+            self._link_to_kb(self.remote_target_id, new_file_id)
+        except Exception:
+            return False
+        return True
+
     def _create_kb(self, name: str) -> str:
         payload = {"name": name, "description": f"AutoKB sync: {name}"}
         if self.access_level == "PUBLIC":
@@ -193,12 +241,13 @@ class OpenWebUISink(BaseSink):
         file_id = self._upload_file(path)
         try:
             self._link_to_kb(self.remote_target_id, file_id)
-        except Exception:
-            try:
-                self._delete_file(file_id)
-            except Exception:
-                pass
-            raise
+        except RuntimeError as exc:
+            if not (self._is_duplicate_error(exc) and self._recover_duplicate(file_id)):
+                try:
+                    self._delete_file(file_id)
+                except Exception:
+                    pass
+                raise
         return file_id
 
     def update_datafile(self, remote_datafile_id: str, path: str) -> str:
@@ -207,13 +256,15 @@ class OpenWebUISink(BaseSink):
             return new_id  # remote deduped by content → nothing to clean up
         try:
             self._link_to_kb(self.remote_target_id, new_id)
-        except Exception:
-            try:
-                self._delete_file(new_id)
-            except Exception:
-                pass
-            raise
-        self._delete_file(remote_datafile_id)
+        except RuntimeError as exc:
+            if not (self._is_duplicate_error(exc) and self._recover_duplicate(new_id)):
+                try:
+                    self._delete_file(new_id)
+                except Exception:
+                    pass
+                raise
+        if remote_datafile_id and remote_datafile_id != new_id:
+            self._delete_file(remote_datafile_id)
         return new_id
 
     def remove_datafile(self, remote_datafile_id: str) -> None:

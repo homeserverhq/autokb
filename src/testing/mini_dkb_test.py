@@ -103,7 +103,7 @@ sub_id = None; t_id = None
 
 try:
     sub = api_post("/api/subscriptions/testSinkWriterPlugin", {
-        "name": sub_name, "config": {}, "access_level": "PRIVATE", "cron": "0 0 * * *"})
+        "name": sub_name, "config": {}, "cron": "0 0 * * *"})
     sub_id = sub["id"]
     log(f"  created sub {sub_id}")
 
@@ -164,7 +164,7 @@ sub_id = None; t_id = None
 
 try:
     sub = api_post("/api/subscriptions/testSinkWriterPlugin", {
-        "name": sub_name, "config": {}, "access_level": "PRIVATE", "cron": "0 0 * * *"})
+        "name": sub_name, "config": {}, "cron": "0 0 * * *"})
     sub_id = sub["id"]
     log(f"  created sub {sub_id}")
 
@@ -255,7 +255,7 @@ with db.get_session() as s:
     p = s.query(PluginRegistryState).filter(PluginRegistryState.plugin_id == "test_plugin").first()
     if not p:
         s.add(PluginRegistryState(plugin_id="test_plugin", schema_hash="abc", last_loaded=__import__("datetime").datetime.now()))
-    s.add(Sub(id=sub_id, plugin_id="test_plugin", name=f"mini_sub_{uid}", config={}, status="ENABLED", access_level="PRIVATE", sub_type="SCHEDULED", cron="0 0 * * *"))
+    s.add(Sub(id=sub_id, plugin_id="test_plugin", name=f"mini_sub_{uid}", config={}, status="ENABLED", sub_type="SCHEDULED", cron="0 0 * * *"))
 inst.base_add_datafile(sub_id, df_path)
 tdf = db.list_datafiles_for_target(t.id)
 assert len(tdf) == 1, f"expected 1 tdf, got {len(tdf)}"

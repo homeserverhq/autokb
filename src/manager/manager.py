@@ -161,7 +161,6 @@ def _serialise_subscription(sub, password_fields: List[str]) -> Dict[str, Any]:
         "last_updated": sub.last_updated.isoformat() if sub.last_updated else None,
         "last_heartbeat": sub.last_heartbeat.isoformat() if sub.last_heartbeat else None,
         "last_error": sub.last_error,
-        "access_level": sub.access_level,
         "progress": sub.progress,
         "sub_type": sub.sub_type,
         "cron": sub.cron,
@@ -424,6 +423,7 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         "schedule_start": t.schedule_start,
         "schedule_end": t.schedule_end,
         "pages_per_batch": t.pages_per_batch,
+        "access_level": t.access_level,
         "status": status,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "subscriptions": [
@@ -634,7 +634,6 @@ def api_plugin_details(plugin_id: str):
         "icon": rec.icon,
         "description": rec.description,
         "sub_type": rec.sub_type,
-        "default_access_level": rec.default_access_level,
     }
 
 
@@ -737,10 +736,6 @@ async def api_create_subscription(plugin_id: str, body: Dict[str, Any] = Body(..
             cron = f"{_random.randint(0, 59)} {_random.randint(0, 23)} * * *"
         else:
             cron = f"{_random.randint(0, 59)} {_random.randint(0, 23)} * * {_random.randint(0, 6)}"
-    access_level = body.get("access_level") or rec.default_access_level
-    if access_level not in (ACCESS_PRIVATE, ACCESS_PUBLIC):
-        raise HTTPException(status_code=400, detail=f"Invalid access_level: {access_level}")
-
     if cron and not is_valid_cron(cron):
         raise HTTPException(status_code=400, detail=f"Invalid cron expression: {cron}")
 
@@ -760,7 +755,6 @@ async def api_create_subscription(plugin_id: str, body: Dict[str, Any] = Body(..
         config=config,
         sub_type=rec.sub_type,
         cron=cron,
-        access_level=access_level,
         description=body.get("description"),
         password_field_names=rec.password_fields,
     )
@@ -797,9 +791,6 @@ async def api_edit_subscription(sub_id: str, body: Dict[str, Any] = Body(...)):
 
     config = body.get("config", sub.config)
     cron = body.get("cron", sub.cron)
-    access_level = body.get("access_level", sub.access_level)
-    if access_level not in (ACCESS_PRIVATE, ACCESS_PUBLIC):
-        raise HTTPException(status_code=400, detail=f"Invalid access_level: {access_level}")
     if cron and not is_valid_cron(cron):
         raise HTTPException(status_code=400, detail=f"Invalid cron expression: {cron}")
 
@@ -819,7 +810,6 @@ async def api_edit_subscription(sub_id: str, body: Dict[str, Any] = Body(...)):
         sub_id,
         config=config,
         cron=cron,
-        access_level=access_level,
         password_field_names=rec.password_fields,
         merge_passwords=True,
     )
@@ -1286,16 +1276,6 @@ def _validate_plugin_code(code: str, plugin_name: str) -> Dict[str, Any]:
     )
     if not has_metadata:
         return {"ok": False, "error": "Missing class-level 'metadata' attribute"}
-
-    # DEFAULT_ACCESS_LEVEL
-    has_dal = any(
-        isinstance(n, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "DEFAULT_ACCESS_LEVEL" for t in n.targets
-        )
-        for n in found_class.body
-    )
-    if not has_dal:
-        return {"ok": False, "error": "Missing class-level 'DEFAULT_ACCESS_LEVEL' attribute"}
 
     if sanitized in AUTOKB_RESERVED_NAMES:
         return {"ok": False, "error": f"Plugin name '{plugin_name}' is reserved and cannot be used."}
@@ -1835,6 +1815,21 @@ def _validate_pages_per_batch(value) -> int:
     return value
 
 
+def _validate_access_level(value) -> str:
+    """Validate an optional ``access_level`` (PRIVATE or PUBLIC, default PRIVATE).
+
+    None → PRIVATE. Anything else outside the two allowed values → 400.
+    """
+    if value is None:
+        return ACCESS_PRIVATE
+    if value not in (ACCESS_PRIVATE, ACCESS_PUBLIC):
+        raise HTTPException(
+            status_code=400,
+            detail="access_level must be either PRIVATE or PUBLIC",
+        )
+    return value
+
+
 def _validate_subscription_name(name: str) -> str:
     """Validate a subscription name using the canonical-form check.
 
@@ -1934,12 +1929,14 @@ def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     schedule_end = body.get("schedule_end")
     _validate_schedule_times(schedule_start, schedule_end)
     pages_per_batch = _validate_pages_per_batch(body.get("pages_per_batch"))
+    access_level = _validate_access_level(body.get("access_level"))
 
     t = db.create_target(service_id, name, api_url, api_key, t_extra,
                          include_path_in_filename=include_path,
                          schedule_start=schedule_start,
                          schedule_end=schedule_end,
-                         pages_per_batch=pages_per_batch)
+                         pages_per_batch=pages_per_batch,
+                         access_level=access_level)
     # Provision the remote resource synchronously before any queue item is
     # pushed — recon must never create the remote target itself.
     try:
@@ -1984,13 +1981,18 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
         _validate_pages_per_batch(body.get("pages_per_batch"))
         if "pages_per_batch" in body else None
     )
+    access_level = (
+        _validate_access_level(body.get("access_level"))
+        if "access_level" in body else None
+    )
 
     t = db.update_target(target_id, api_url=api_url, api_key=api_key,
                          target_extra_params=t_extra,
                          include_path_in_filename=include_path,
                          schedule_start=schedule_start,
                          schedule_end=schedule_end,
-                         pages_per_batch=pages_per_batch)
+                         pages_per_batch=pages_per_batch,
+                         access_level=access_level)
     # Provision the remote resource synchronously before any queue item is
     # pushed (no-op when remote_target_id is already set).
     _ensure_target_remote(t, db, STATE.get("sink_registry"), LOG)

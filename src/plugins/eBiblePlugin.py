@@ -132,7 +132,6 @@ class eBiblePlugin(BaseSubscription):
         "description": "Downloads all Bible scripture for the selected version and applies custom chunking strategy on each chapter. Set cron to yearly (0 0 1 1 *) since Bible data doesn't change (Hebrews 13:8). All data is courtesy of  https://bible.helloao.org/ and https://ebible.org/",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PUBLIC"
 
     def get_custom_routes(self):
         return [PluginRoute(path="/versions", method="GET", handler=_get_bible_versions)]

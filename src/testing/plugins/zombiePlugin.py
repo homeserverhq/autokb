@@ -23,7 +23,6 @@ class zombiePlugin(BaseSubscription):
         "description": "Zombie — ignores cancellation, force-killed (Test 19)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"label": {"type": "string"}}}

@@ -10,7 +10,6 @@ class eventHappyPlugin(BaseSubscription):
         "description": "EVENT_BASED success plugin (Test 2)",
         "sub_type": "EVENT_BASED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def __init__(self):
         super().__init__()

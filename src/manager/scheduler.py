@@ -33,7 +33,6 @@ from utils.constants import (
     SUB_TYPE_SCHEDULED,
     TRIGGERABLE_STATES,
     WATCHDOG_TIMEOUT_S,
-    ACCESS_PRIVATE,
 )
 from utils.database import DatabaseManager, EventLog, Subscription
 from utils.misc_utils import (

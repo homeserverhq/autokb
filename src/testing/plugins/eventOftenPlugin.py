@@ -12,7 +12,6 @@ class eventOftenPlugin(BaseSubscription):
         "description": "EVENT_BASED — fires on enable, then every 42s",
         "sub_type": "EVENT_BASED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     FIRE_INTERVAL_SECONDS = 42
 

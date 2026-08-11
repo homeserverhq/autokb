@@ -22,7 +22,6 @@ class cancellationPlugin(BaseSubscription):
         "description": "Graceful cancellation plugin (Test 7)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

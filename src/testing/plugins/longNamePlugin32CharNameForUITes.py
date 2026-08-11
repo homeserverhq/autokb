@@ -15,7 +15,6 @@ class longNamePlugin32CharNameForUITes(BaseSubscription):
         "description": "32-char name plugin (UI tile layout test)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

@@ -10,7 +10,6 @@ class passwordPlugin(BaseSubscription):
         "description": "Password field encryption plugin (Test 9)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

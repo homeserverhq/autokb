@@ -13,7 +13,6 @@ class delayedInitPlugin(BaseSubscription):
         "description": "Delayed init plugin (Test 12)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"label": {"type": "string"}}}

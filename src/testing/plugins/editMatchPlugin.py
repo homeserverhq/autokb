@@ -9,7 +9,6 @@ class editMatchPlugin(BaseSubscription):
         "description": "edit match plugin V1",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

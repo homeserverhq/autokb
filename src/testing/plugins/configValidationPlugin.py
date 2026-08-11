@@ -10,7 +10,6 @@ class configValidationPlugin(BaseSubscription):
         "description": "All schema field types (Test 17)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

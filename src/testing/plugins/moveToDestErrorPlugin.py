@@ -10,7 +10,6 @@ class moveToDestErrorPlugin(BaseSubscription):
         "description": "Invalid output path plugin (Test 20)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"label": {"type": "string"}}}

@@ -22,7 +22,6 @@ class largeOutputPlugin(BaseSubscription):
         "description": "Large output plugin (Test 11)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

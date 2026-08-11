@@ -12,7 +12,6 @@ class monitorNeverTriggerPlugin(BaseSubscription):
         "description": "Monitor never triggers — cron fallback (Test 15)",
         "sub_type": "EVENT_BASED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"marker": {"type": "string"}}}

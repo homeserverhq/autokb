@@ -427,7 +427,6 @@ class youTubeTranscriptionPlugin(BaseSubscription):
         "sub_type": "SCHEDULED",
     }
 
-    DEFAULT_ACCESS_LEVEL = "PUBLIC"
 
     def get_schema(self):
         return {

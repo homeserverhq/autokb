@@ -7,7 +7,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from .constants import ACCESS_PRIVATE
 from .misc_utils import sanitize_name, SubscriptionCancelledError
 
 
@@ -29,8 +28,8 @@ class BaseSubscription(ABC):
     """The base class that all data source plugins must subclass.
 
     Subclasses must override the class-level ``metadata`` dict and
-    ``DEFAULT_ACCESS_LEVEL`` and implement ``get_schema()``, ``getData()``,
-    and (for event-driven plugins) ``monitor()``.
+    implement ``get_schema()``, ``getData()``, and (for event-driven
+    plugins) ``monitor()``.
     """
 
     # ---- mandatory class-level overrides (validated at load time) ----
@@ -39,7 +38,6 @@ class BaseSubscription(ABC):
         "description": "",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL: str = ACCESS_PRIVATE
 
     @classmethod
     def icon(cls) -> str:

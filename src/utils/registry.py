@@ -11,8 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Type
 
 from .constants import (
-    ACCESS_PRIVATE,
-    ACCESS_PUBLIC,
     AUTOKB_RESERVED_NAMES,
     STATE_DELETED,
     STATE_DISABLED,
@@ -39,7 +37,6 @@ class PluginRecord:
     icon: str
     description: str
     sub_type: str
-    default_access_level: str
     cls: Type[BaseSubscription]
     file_path: str
     display_name: str = ""
@@ -207,11 +204,6 @@ class PluginRegistry:
                 f"Plugin {plugin_id!r} name is reserved by AUTOKB_RESERVED_DSN"
             )
 
-        # Default access level validation
-        access = getattr(cls, "DEFAULT_ACCESS_LEVEL", ACCESS_PRIVATE)
-        if access not in (ACCESS_PRIVATE, ACCESS_PUBLIC):
-            raise ValueError(f"DEFAULT_ACCESS_LEVEL must be PRIVATE or PUBLIC, got {access!r}")
-
         sub_type = meta.get("sub_type")
         if sub_type not in (SUB_TYPE_SCHEDULED, SUB_TYPE_EVENT_BASED):
             raise ValueError(f"metadata.sub_type must be SCHEDULED or EVENT_BASED, got {sub_type!r}")
@@ -240,7 +232,6 @@ class PluginRegistry:
             icon=resolve_service_icon(cls, meta),
             description=meta.get("description", ""),
             sub_type=sub_type,
-            default_access_level=access,
             cls=cls,
             file_path=path,
             schema=schema,

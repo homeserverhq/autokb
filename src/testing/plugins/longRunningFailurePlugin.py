@@ -13,7 +13,6 @@ class longRunningFailurePlugin(BaseSubscription):
         "description": "Long running failure plugin (Test 5)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

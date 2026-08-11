@@ -122,7 +122,6 @@ class ManagerPluginRegistry(PluginRegistry):
                 "icon": rec.icon,
                 "description": rec.description,
                 "sub_type": rec.sub_type,
-                "default_access_level": rec.default_access_level,
             })
         return out
 

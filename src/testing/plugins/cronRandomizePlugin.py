@@ -12,7 +12,6 @@ class cronRandomizePlugin(BaseSubscription):
         "description": "Cron randomization test (Test 26)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

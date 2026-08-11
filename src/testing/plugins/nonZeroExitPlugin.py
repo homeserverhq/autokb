@@ -12,7 +12,6 @@ class nonZeroExitPlugin(BaseSubscription):
         "description": "Bare sys.exit(1) plugin (Test 18)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"label": {"type": "string"}}}

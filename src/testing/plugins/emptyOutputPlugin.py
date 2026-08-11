@@ -10,7 +10,6 @@ class emptyOutputPlugin(BaseSubscription):
         "description": "Empty output plugin (Test 10)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

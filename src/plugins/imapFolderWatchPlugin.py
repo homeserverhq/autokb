@@ -28,7 +28,6 @@ class imapFolderWatchPlugin(BaseSubscription):
         "sub_type": "EVENT_BASED",
         "monitor_timeout": 1500,
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def __init__(self):
         super().__init__()

@@ -66,7 +66,7 @@ class BaseSink(ABC):
 
     def __init__(self, target_row: Any, db: Any):
         """*target_row* is an ORM row with attributes:
-        ``id, service_id, name, api_url, api_key, remote_target_id, target_extra_params, include_path_in_filename``
+        ``id, service_id, name, api_url, api_key, remote_target_id, target_extra_params, include_path_in_filename, access_level``
         """
         self.target_id = target_row.id
         self.service_id = target_row.service_id
@@ -78,6 +78,7 @@ class BaseSink(ABC):
         self.include_path_in_filename = bool(
             getattr(target_row, "include_path_in_filename", False)
         )
+        self.access_level = getattr(target_row, "access_level", "PRIVATE")
         self._output_root = "/output"
         self.db = db
         self._cancel_check = None

@@ -10,7 +10,6 @@ class monitorErrorPlugin(BaseSubscription):
         "description": "Monitor exception retry loop (Test 16)",
         "sub_type": "EVENT_BASED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"label": {"type": "string"}}}

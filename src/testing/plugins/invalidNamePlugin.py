@@ -26,7 +26,6 @@ class _BadNamePlugin(BaseSubscription):
         "description": "Invalid name plugin (Test 14) — should be rejected at load",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"x": {"type": "string"}}}

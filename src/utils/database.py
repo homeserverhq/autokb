@@ -76,7 +76,6 @@ class Subscription(Base):
     last_heartbeat = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)
     last_message = Column(Text, nullable=True)
-    access_level = Column(String(7), nullable=False, default=ACCESS_PRIVATE)
     progress = Column(Integer, nullable=False, default=0)
     sub_type = Column(String(32), nullable=False, default="SCHEDULED")
     cron = Column(String(255), nullable=True)
@@ -131,6 +130,7 @@ class Target(Base):
     schedule_start = Column(String(5), nullable=True)
     schedule_end = Column(String(5), nullable=True)
     pages_per_batch = Column(Integer, nullable=False, default=10, server_default="10")
+    access_level = Column(String(7), nullable=False, default=ACCESS_PRIVATE, server_default="PRIVATE")
 
     service = relationship("Sink", back_populates="targets")
 
@@ -226,7 +226,6 @@ class DatabaseManager:
         config: Dict[str, Any],
         sub_type: str,
         cron: Optional[str],
-        access_level: str,
         description: Optional[str] = None,
         password_field_names: Optional[List[str]] = None,
     ) -> Subscription:
@@ -240,7 +239,6 @@ class DatabaseManager:
             config=encrypted,
             status=STATE_ENABLED,
             last_updated=datetime.now(timezone.utc),
-            access_level=access_level,
             progress=0,
             sub_type=sub_type,
             cron=cron,
@@ -346,7 +344,6 @@ class DatabaseManager:
         *,
         config: Optional[Dict[str, Any]] = None,
         cron: Optional[str] = None,
-        access_level: Optional[str] = None,
         password_field_names: Optional[List[str]] = None,
         merge_passwords: bool = False,
     ) -> Optional[Subscription]:
@@ -380,8 +377,6 @@ class DatabaseManager:
                     sub.config = merged
             if cron is not None:
                 sub.cron = cron
-            if access_level is not None:
-                sub.access_level = access_level
             sub.last_updated = datetime.now(timezone.utc)
             s.flush()
             s.execute(text(f"SELECT pg_notify('{NOTIFY_CHANNEL}', :sid)"), {"sid": sub_id})
@@ -682,7 +677,8 @@ class DatabaseManager:
                       target_extra_params: Dict[str, Any] = None,
                       include_path_in_filename: bool = False,
                       schedule_start: str = None, schedule_end: str = None,
-                      pages_per_batch: int = 10) -> Target:
+                      pages_per_batch: int = 10,
+                      access_level: str = ACCESS_PRIVATE) -> Target:
         encrypted = self._cipher.encrypt(api_key) if api_key else ""
         t = Target(
             id=str(uuid4()),
@@ -693,6 +689,7 @@ class DatabaseManager:
             schedule_start=schedule_start or None,
             schedule_end=schedule_end or None,
             pages_per_batch=pages_per_batch,
+            access_level=access_level,
         )
         with self.get_session() as s:
             s.add(t)
@@ -715,7 +712,7 @@ class DatabaseManager:
                       api_key: str = None, target_extra_params: Dict[str, Any] = None,
                       include_path_in_filename: bool = None,
                       schedule_start: str = None, schedule_end: str = None,
-                      pages_per_batch: int = None) -> Optional[Target]:
+                      pages_per_batch: int = None, access_level: str = None) -> Optional[Target]:
         with self.get_session() as s:
             t = s.query(Target).filter(Target.id == target_id).first()
             if not t:
@@ -736,6 +733,8 @@ class DatabaseManager:
                 t.schedule_end = schedule_end or None
             if pages_per_batch is not None:
                 t.pages_per_batch = pages_per_batch
+            if access_level is not None:
+                t.access_level = access_level
             s.flush()
             s.refresh(t)
             return t

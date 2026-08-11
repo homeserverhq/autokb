@@ -14,7 +14,6 @@ class customRoutePlugin(BaseSubscription):
         "description": "Custom API routes plugin (Test 13)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {"type": "object", "properties": {"echo": {"type": "string"}}}

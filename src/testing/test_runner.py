@@ -210,8 +210,8 @@ def _delete_sub(sub_id: str) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 def create_sub(plugin_id: str, name: str, config: Dict[str, Any], cron: Optional[str] = None,
-               access_level: str = "PRIVATE", expected_status: int = 200) -> Dict[str, Any]:
-    body: Dict[str, Any] = {"name": name, "config": config, "access_level": access_level}
+               expected_status: int = 200) -> Dict[str, Any]:
+    body: Dict[str, Any] = {"name": name, "config": config}
     if cron is not None:
         body["cron"] = cron
     r = requests.post(
@@ -601,8 +601,6 @@ class schemaBreakingPlugin(BaseSubscription):
         "description": "Schema breaking change plugin — V1 (title+author)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
-
     def get_schema(self):
         return {
             "type": "object",
@@ -628,8 +626,6 @@ class schemaBreakingPlugin(BaseSubscription):
         "description": "Schema breaking change plugin — V2 (title+writer)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
-
     def get_schema(self):
         return {
             "type": "object",
@@ -1102,8 +1098,6 @@ class editMatchPlugin(BaseSubscription):
         "description": "edit match plugin V1",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
-
     def get_schema(self):
         return {
             "type": "object",
@@ -1136,8 +1130,6 @@ class editMatchPlugin(BaseSubscription):
         "description": "edit match plugin V2 (same schema, different output)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
-
     def get_schema(self):
         return {
             "type": "object",
@@ -1170,8 +1162,6 @@ class editMatchPlugin(BaseSubscription):
         "description": "edit match plugin V3 (different schema — should be rejected)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
-
     def get_schema(self):
         return {
             "type": "object",
@@ -2050,7 +2040,7 @@ def _sink_create_fixtures(db):
         sub_id = str(uuid4())
         s.add(Subscription(
             id=sub_id, plugin_id="test_plugin", name=f"test_sub_{sub_id}",
-            config={}, status=STATE_ENABLED, access_level="PRIVATE",
+            config={}, status=STATE_ENABLED,
             sub_type="SCHEDULED", cron="0 0 * * *",
         ))
         s.flush()
@@ -2989,8 +2979,7 @@ def _dkb_test_datafiles_by_sub(db, sub, ds):
     other = str(_uuid.uuid4())
     with db.get_session() as s:
         s.add(Subscription(id=other, plugin_id="test_plugin",
-                           name=f"test_other_{other}", config={}, status=STATE_DISABLED,
-                           access_level="PRIVATE", sub_type="SCHEDULED", cron="0 0 31 12 *"))
+                           name=f"test_other_{other}", config={}, status=STATE_DISABLED, sub_type="SCHEDULED", cron="0 0 31 12 *"))
         s.flush()
         df1_id = str(_uuid.uuid4()); df2_id = str(_uuid.uuid4())
         s.add(AKBDatafile(id=df1_id, subscription_id=sub, path=f"/tmp/sink_test/{df1_id}.md",

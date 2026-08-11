@@ -621,7 +621,6 @@
         <div>
           <span class="sub-row-name">${escapeHtml(sub.name)}</span>
           <span class="badge badge-${sub.status}">${sub.status}</span>
-          <span class="badge badge-${sub.access_level}">${sub.access_level}</span>
           <span class="sub-row-meta" style="margin-left: 8px;">24h activity: <span class="activity-count" data-sub="${sub.id}">...</span></span>
           <span class="sub-row-meta" style="margin-left: 8px;">Updated: <span class="last-updated" data-sub="${sub.id}">${escapeHtml(relativeTime(sub.last_updated))}</span></span>
           ${sub.last_message ? `<span class="sub-row-meta sub-row-message" style="margin-left: 8px;">Last Message: ${escapeHtml(sub.last_message)}</span>` : ''}
@@ -680,15 +679,6 @@
     const statusBadge = row.querySelector(`.badge-${sub.status}`);
     if (!statusBadge) {
       // Status changed; re-render the row.
-      const fresh = buildSubscriptionRow(sub, plugin);
-      row.replaceWith(fresh);
-      return;
-    }
-    // Access level may have changed via Edit (status didn't). If the
-    // current access-level badge doesn't match, re-render so the badge
-    // updates in place.
-    const accessBadge = row.querySelector(`.badge-${sub.access_level}`);
-    if (!accessBadge) {
       const fresh = buildSubscriptionRow(sub, plugin);
       row.replaceWith(fresh);
       return;
@@ -886,18 +876,6 @@
       <small class="sub-row-meta">Default: ${plugin.sub_type === 'SCHEDULED' ? '0 0 * * 0' : '0 0 * * *'}</small>
     `;
     fields.appendChild(cronDiv);
-    // Access level
-    const accDiv = document.createElement('div');
-    accDiv.className = 'form-field';
-    const currentAcc = sub?.access_level || plugin.default_access_level;
-    accDiv.innerHTML = `
-      <label>Access Level</label>
-      <select name="access_level">
-        <option value="PRIVATE" ${currentAcc === 'PRIVATE' ? 'selected' : ''}>PRIVATE</option>
-        <option value="PUBLIC" ${currentAcc === 'PUBLIC' ? 'selected' : ''}>PUBLIC</option>
-      </select>
-    `;
-    fields.appendChild(accDiv);
     // Webhook trigger URL (edit mode only)
     if (isEdit) {
       const div = document.createElement('div');
@@ -1045,14 +1023,12 @@
     const config = {};
     let name = null;
     let cron = null;
-    let access_level = null;
     if (formSubId) {
       // Edit: every form field is part of the config. The "name" field on
       // this form is the *config* name (schema-defined), not the
       // subscription's display name — they're different concepts.
       for (const [k, v] of fd.entries()) {
         if (k === 'cron') { cron = v; continue; }
-        if (k === 'access_level') { access_level = v; continue; }
         const parsed = parseFormValue(k, v);
         if (parsed !== undefined) config[k] = parsed;
       }
@@ -1066,7 +1042,6 @@
       for (const [k, v] of fd.entries()) {
         if (k === 'sub_name') { name = v; continue; }
         if (k === 'cron') { cron = v; continue; }
-        if (k === 'access_level') { access_level = v; continue; }
         const parsed = parseFormValue(k, v);
         if (parsed !== undefined) config[k] = parsed;
       }
@@ -1078,7 +1053,7 @@
     if (formSubId) {
       // Edit
       try {
-        const body = { config, cron, access_level };
+        const body = { config, cron };
         await api(`/subscriptions/${formSubId}`, { method: 'PUT', body: JSON.stringify(body) });
         $('form-modal').style.display = 'none';
       } catch (e) { alert('Save failed: ' + e.message); }
@@ -1096,7 +1071,7 @@
         return;
       }
       try {
-        const body = { name, config, cron, access_level };
+        const body = { name, config, cron };
         await api(`/subscriptions/${formPluginId}`, { method: 'POST', body: JSON.stringify(body) });
         $('form-modal').style.display = 'none';
         if (currentPluginId) loadSubscriptions(currentPluginId);
@@ -1290,7 +1265,6 @@
     const row = document.createElement('div');
     row.className = 'all-subs-row';
     const status = sub.status || 'ENABLED';
-    const access = sub.access_level || 'PRIVATE';
     const count = allSubsActivity[sub.id] != null ? allSubsActivity[sub.id] : '…';
     const isTerminal = ['DELETED'].includes(status);
     const canTrigger = ['ENABLED', 'ENQUEUED', 'IN_PROGRESS'].includes(status);
@@ -1301,7 +1275,6 @@
       <span class="all-subs-col-name">${escapeHtml(sub.name)}</span>
       <span class="all-subs-col-plugin">${escapeHtml(sub.plugin_display_name || sub.plugin_id)}</span>
       <span class="all-subs-col-status"><span class="badge badge-${status}">${escapeHtml(status)}${status === 'IN_PROGRESS' && Number.isFinite(sub.progress) ? ` (${Math.round(sub.progress)}%)` : ''}</span></span>
-      <span class="all-subs-col-access"><span class="badge badge-${access}">${escapeHtml(access)}</span></span>
       <span class="all-subs-col-activity">${count}</span>
       <span class="all-subs-col-updated">${escapeHtml(relativeTime(sub.last_updated))}</span>
       <span class="all-subs-col-edit"><button class="btn btn-primary" data-act="edit" data-sub="${escapeHtml(sub.id)}" data-plugin="${escapeHtml(sub.plugin_id)}" ${isTerminal ? 'disabled' : ''}>Edit</button></span>
@@ -1445,6 +1418,7 @@
           <span class="sub-row-chevron" data-chevron>${isExpanded ? '▾' : '▸'}</span>
           <span class="sub-row-name">${escapeHtml(ds.name)}</span>
           <span class="badge badge-${status}">${status}</span>
+          <span class="badge badge-${ds.access_level || 'PRIVATE'}">${escapeHtml(ds.access_level || 'PRIVATE')}</span>
           <span class="sub-row-meta" style="margin-left:8px;">${subCount} sub${subCount === 1 ? '' : 's'}</span>
           <span class="sub-row-meta" style="margin-left:8px;">Updated: ${escapeHtml(relativeTime(ds.last_updated))}</span>
         </div>
@@ -1561,6 +1535,7 @@
       </span>
       <span class="all-subs-col-plugin">${escapeHtml(t.service_display_name || t.service_name || '')}</span>
       <span class="all-subs-col-status"><span class="badge badge-${status}">${escapeHtml(status)}</span></span>
+      <span class="all-subs-col-access"><span class="badge badge-${t.access_level || 'PRIVATE'}">${escapeHtml(t.access_level || 'PRIVATE')}</span></span>
       <span class="all-subs-col-updated">${escapeHtml(relativeTime(t.last_updated))}</span>
       <span class="all-subs-col-edit"><button class="btn btn-primary" data-ds="${escapeHtml(t.target_id)}" data-svc="${escapeHtml(t.service_id)}" ${isTerminal ? 'disabled' : ''}>Edit</button></span>
       <span class="all-subs-col-toggle"><button class="btn ${toggleClass}" data-ds="${escapeHtml(t.target_id)}" data-target="${canEnable ? 'ENABLED' : 'DISABLED'}" ${isTerminal ? 'disabled' : ''}>${toggleLabel}</button></span>
@@ -1731,8 +1706,17 @@
     keyDiv.innerHTML = `<label>API Key ${keyRequired ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" placeholder="${keyPlaceholder}" />
     <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : (hasKeyDefault ? 'Leave blank to use the server-configured default key.' : '')}</small>`;
     fields.appendChild(keyDiv);
+    // Access Level — first-class PRIVATE / PUBLIC, placed before Pages Per Batch.
+    const alValue = (ds && ds.access_level) ? ds.access_level : 'PRIVATE';
+    const alDiv = document.createElement('div'); alDiv.className = 'form-field';
+    alDiv.innerHTML = `<label>Access Level <span class="form-field-error">*</span></label>` +
+      `<select name="access_level">
+        <option value="PRIVATE" ${alValue === 'PRIVATE' ? 'selected' : ''}>PRIVATE</option>
+        <option value="PUBLIC" ${alValue === 'PUBLIC' ? 'selected' : ''}>PUBLIC</option>
+      </select>` +
+      `<small class="sub-row-meta">Remote knowledge base / dataset visibility. Applied per destination sink.</small>`;
+    fields.appendChild(alDiv);
     // Pages Per Batch — first-class integer (min 1, max 100, default 10).
-    // Available on both create and edit; only affects batch granularity.
     const ppbValue = (ds && ds.pages_per_batch != null) ? ds.pages_per_batch : 10;
     const ppbDiv = document.createElement('div'); ppbDiv.className = 'form-field';
     ppbDiv.innerHTML = `<label>Pages Per Batch <span class="form-field-error">*</span></label>` +
@@ -1825,7 +1809,7 @@
     const linked = Array.from($('target-linked-subs').options).map(o => o.value);
     let pagesPerBatch = Number(fd.get('pages_per_batch'));
     if (!Number.isInteger(pagesPerBatch) || pagesPerBatch < 1 || pagesPerBatch > 100) pagesPerBatch = 10;
-    const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked, pages_per_batch: pagesPerBatch, schedule_start: fd.get('schedule_start') || '', schedule_end: fd.get('schedule_end') || '' };
+    const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked, access_level: fd.get('access_level'), pages_per_batch: pagesPerBatch, schedule_start: fd.get('schedule_start') || '', schedule_end: fd.get('schedule_end') || '' };
     if (!targetFormTargetId) {
         body.include_path_in_filename = !!fd.get('include_path_in_filename');
     }

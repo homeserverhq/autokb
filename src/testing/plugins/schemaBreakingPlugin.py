@@ -9,7 +9,6 @@ class schemaBreakingPlugin(BaseSubscription):
         "description": "Schema breaking change plugin — V1 (title+author)",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PRIVATE"
 
     def get_schema(self):
         return {

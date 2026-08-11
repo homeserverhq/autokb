@@ -80,15 +80,12 @@ class AutoKBClient:
         name: str,
         config: dict = {},
         cron: Optional[str] = None,
-        access_level: Optional[str] = None,
         description: Optional[str] = None,
         api_key: Optional[str] = None,
     ) -> Any:
         body: dict[str, Any] = {"name": name, "config": config}
         if cron is not None:
             body["cron"] = cron
-        if access_level is not None:
-            body["access_level"] = access_level
         if description is not None:
             body["description"] = description
         return await self.post(f"/api/subscriptions/{plugin_id}", api_key, json=body)
@@ -98,14 +95,11 @@ class AutoKBClient:
         sub_id: str,
         config: dict = {},
         cron: Optional[str] = None,
-        access_level: Optional[str] = None,
         api_key: Optional[str] = None,
     ) -> Any:
         body: dict[str, Any] = {"config": config}
         if cron is not None:
             body["cron"] = cron
-        if access_level is not None:
-            body["access_level"] = access_level
         return await self.put(f"/api/subscriptions/{sub_id}", api_key, json=body)
 
     async def delete_subscription(self, sub_id: str, api_key: Optional[str] = None) -> Any:

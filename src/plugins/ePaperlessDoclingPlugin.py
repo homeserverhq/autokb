@@ -89,8 +89,18 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                 },
                 "chunking_enabled": {
                     "type": "boolean",
-                    "default": True,
+                    "default": False,
                     "description": "Chunk output (~490 tokens per file). Disable for one markdown file per document.",
+                },
+                "use_paperless_content": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Reuse Paperless's own OCR content instead of re-parsing "
+                        "with Docling. Fetches the document's content field first; "
+                        "if non-empty, no PDF download or re-OCR happens. Falls "
+                        "back to normal Docling parsing when content is empty."
+                    ),
                 },
             },
             "required": [
@@ -114,7 +124,8 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         dl_key = config.get("docling_api_key") or os.environ.get("DOCLING_API_KEY") or ""
         sp_id = config["storage_path_id"]
         owner_username = config.get("owner_username", "").strip()
-        chunking_enabled = config.get("chunking_enabled", True)
+        chunking_enabled = config.get("chunking_enabled", False)
+        use_paperless_content = bool(config.get("use_paperless_content", True))
 
         pl_headers = {"Authorization": f"Token {pl_token}"}
 
@@ -221,12 +232,22 @@ class ePaperlessDoclingPlugin(BaseSubscription):
             progress_callback(pct, message=f"Processing {original_name}")
 
             try:
-                pdf_bytes = self._download_document(
-                    pl_url, pl_headers, doc_id
-                )
-                chunks = self._process_with_docling(
-                    dl_url, dl_key, pdf_bytes, original_name, chunking_enabled, progress_callback, pct
-                )
+                if use_paperless_content:
+                    content_text = self._fetch_content(pl_url, pl_headers, doc_id)
+                else:
+                    content_text = ""
+                if content_text:
+                    chunks = self._chunks_from_content(
+                        dl_url, dl_key, content_text, original_name,
+                        chunking_enabled, progress_callback, pct,
+                    )
+                else:
+                    pdf_bytes = self._download_document(
+                        pl_url, pl_headers, doc_id
+                    )
+                    chunks = self._process_with_docling(
+                        dl_url, dl_key, pdf_bytes, original_name, chunking_enabled, progress_callback, pct
+                    )
                 for chunk in chunks:
                     suffix = f"-{chunk['chunk_index']:03d}" if chunking_enabled else ""
                     tmp = f"/tmp/{doc_id}.{checksum_prefix}{suffix}.md"
@@ -330,6 +351,17 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         resp.raise_for_status()
         return resp.content
 
+    @staticmethod
+    def _fetch_content(base_url, headers, doc_id):
+        resp = requests.get(
+            f"{base_url}/api/documents/{doc_id}/",
+            headers=headers,
+            params={"fields": "content"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return (resp.json().get("content") or "").strip()
+
     # ------------------------------------------------------------------
     # Docling helpers
     # ------------------------------------------------------------------
@@ -340,91 +372,116 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         if api_key:
             dl_headers["x-api-key"] = api_key
 
-        files = {"files": (filename, pdf_bytes, "application/pdf")}
-
         if chunking_enabled:
-            overhead = len(tiktoken.get_encoding("cl100k_base").encode(
-                f"Original file: {filename}\n\n"
-            ))
-            data = {
-                **_DOCLING_OPTIONS,
-                "chunking_max_tokens": _CHUNKING_MAX_TOKENS - overhead,
-            }
-            bool_keys = [
-                "convert_do_ocr",
-                "convert_force_ocr",
-                "chunking_use_markdown_tables",
-                "chunking_merge_peers",
-            ]
-            for bool_key in bool_keys:
-                data[bool_key] = str(data[bool_key]).lower()
-            data["convert_document_timeout"] = str(data["convert_document_timeout"])
-
-            resp = requests.post(
-                f"{base_url}/v1/chunk/hybrid/file/async",
-                headers=dl_headers, files=files, data=data, timeout=30,
+            return self._chunk_with_docling(
+                base_url, dl_headers, pdf_bytes, filename, "application/pdf",
+                progress_callback, current_pct,
             )
-            if resp.status_code in (401, 403):
-                raise DoclingAuthError(
-                    f"Docling auth failed (HTTP {resp.status_code}): {resp.text[:300]}"
-                )
-            resp.raise_for_status()
-            task_id = resp.json()["task_id"]
 
-            self.log.info("docling_chunk_submitted", task_id=task_id, filename=filename)
-            self._poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct)
+        files = {"files": (filename, pdf_bytes, "application/pdf")}
+        data = {
+            "to_formats": "md",
+            "convert_do_ocr": str(True).lower(),
+            "convert_force_ocr": str(True).lower(),
+            "convert_ocr_engine": "easyocr",
+            "convert_pdf_backend": "docling_parse",
+            "convert_table_mode": "accurate",
+            "convert_image_export_mode": "placeholder",
+            "convert_document_timeout": str(86400),
+        }
 
-            resp = requests.get(
-                f"{base_url}/v1/result/{task_id}", headers=dl_headers, timeout=30,
+        resp = requests.post(
+            f"{base_url}/v1/convert/file/async",
+            headers=dl_headers, files=files, data=data, timeout=30,
+        )
+        if resp.status_code in (401, 403):
+            raise DoclingAuthError(
+                f"Docling auth failed (HTTP {resp.status_code}): {resp.text[:300]}"
             )
-            resp.raise_for_status()
-            result_data = resp.json()
+        resp.raise_for_status()
+        task_id = resp.json()["task_id"]
 
-            chunks = result_data.get("chunks", [])
-            if not chunks:
-                raise RuntimeError("Docling returned empty chunks")
-            return chunks
+        self.log.info("docling_convert_submitted", task_id=task_id, filename=filename)
+        self._poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct)
 
-        else:
-            data = {
-                "to_formats": "md",
-                "convert_do_ocr": str(True).lower(),
-                "convert_force_ocr": str(True).lower(),
-                "convert_ocr_engine": "easyocr",
-                "convert_pdf_backend": "docling_parse",
-                "convert_table_mode": "accurate",
-                "convert_image_export_mode": "placeholder",
-                "convert_document_timeout": str(86400),
-            }
+        resp = requests.get(
+            f"{base_url}/v1/result/{task_id}", headers=dl_headers, timeout=30,
+        )
+        resp.raise_for_status()
+        result_data = resp.json()
 
-            resp = requests.post(
-                f"{base_url}/v1/convert/file/async",
-                headers=dl_headers, files=files, data=data, timeout=30,
+        if result_data["status"] != "success":
+            raise RuntimeError(f"Docling conversion failed: {result_data.get('status')}")
+
+        md_content = result_data.get("document", {}).get("md_content", "")
+        if not md_content:
+            raise RuntimeError("Docling returned empty md_content")
+
+        return [{"chunk_index": 0, "text": md_content}]
+
+    def _chunks_from_content(
+        self, base_url, api_key, content, filename, chunking_enabled, progress_callback, current_pct
+    ):
+        if not chunking_enabled:
+            return [{"chunk_index": 0, "text": content}]
+
+        text = f"Original file: {filename}\n\n{content}"
+        dl_headers = {}
+        if api_key:
+            dl_headers["x-api-key"] = api_key
+        stem, ext = os.path.splitext(filename)
+        upload_name = f"{stem}.txt" if ext else f"{filename}.txt"
+        return self._chunk_with_docling(
+            base_url, dl_headers, text.encode("utf-8"), upload_name, "text/plain",
+            progress_callback, current_pct,
+        )
+
+    def _chunk_with_docling(
+        self, base_url, dl_headers, file_bytes, filename, content_type, progress_callback, current_pct
+    ):
+        overhead = len(tiktoken.get_encoding("cl100k_base").encode(
+            f"Original file: {filename}\n\n"
+        ))
+        data = {
+            **_DOCLING_OPTIONS,
+            "chunking_max_tokens": _CHUNKING_MAX_TOKENS - overhead,
+        }
+        bool_keys = [
+            "convert_do_ocr",
+            "convert_force_ocr",
+            "chunking_use_markdown_tables",
+            "chunking_merge_peers",
+        ]
+        for bool_key in bool_keys:
+            data[bool_key] = str(data[bool_key]).lower()
+        data["convert_document_timeout"] = str(data["convert_document_timeout"])
+
+        files = {"files": (filename, file_bytes, content_type)}
+
+        resp = requests.post(
+            f"{base_url}/v1/chunk/hybrid/file/async",
+            headers=dl_headers, files=files, data=data, timeout=30,
+        )
+        if resp.status_code in (401, 403):
+            raise DoclingAuthError(
+                f"Docling auth failed (HTTP {resp.status_code}): {resp.text[:300]}"
             )
-            if resp.status_code in (401, 403):
-                raise DoclingAuthError(
-                    f"Docling auth failed (HTTP {resp.status_code}): {resp.text[:300]}"
-                )
-            resp.raise_for_status()
-            task_id = resp.json()["task_id"]
+        resp.raise_for_status()
+        task_id = resp.json()["task_id"]
 
-            self.log.info("docling_convert_submitted", task_id=task_id, filename=filename)
-            self._poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct)
+        self.log.info("docling_chunk_submitted", task_id=task_id, filename=filename)
+        self._poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct)
 
-            resp = requests.get(
-                f"{base_url}/v1/result/{task_id}", headers=dl_headers, timeout=30,
-            )
-            resp.raise_for_status()
-            result_data = resp.json()
+        resp = requests.get(
+            f"{base_url}/v1/result/{task_id}", headers=dl_headers, timeout=30,
+        )
+        resp.raise_for_status()
+        result_data = resp.json()
 
-            if result_data["status"] != "success":
-                raise RuntimeError(f"Docling conversion failed: {result_data.get('status')}")
-
-            md_content = result_data.get("document", {}).get("md_content", "")
-            if not md_content:
-                raise RuntimeError("Docling returned empty md_content")
-
-            return [{"chunk_index": 0, "text": md_content}]
+        chunks = result_data.get("chunks", [])
+        if not chunks:
+            raise RuntimeError("Docling returned empty chunks")
+        return chunks
 
     def _poll_docling_task(self, base_url, headers, task_id, progress_callback, current_pct):
         poll_url = f"{base_url}/v1/status/poll/{task_id}"

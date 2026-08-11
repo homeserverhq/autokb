@@ -1706,16 +1706,18 @@
     keyDiv.innerHTML = `<label>API Key ${keyRequired ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" placeholder="${keyPlaceholder}" />
     <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : (hasKeyDefault ? 'Leave blank to use the server-configured default key.' : '')}</small>`;
     fields.appendChild(keyDiv);
-    // Access Level — first-class PRIVATE / PUBLIC, placed before Pages Per Batch.
-    const alValue = (ds && ds.access_level) ? ds.access_level : 'PRIVATE';
-    const alDiv = document.createElement('div'); alDiv.className = 'form-field';
-    alDiv.innerHTML = `<label>Access Level <span class="form-field-error">*</span></label>` +
-      `<select name="access_level">
-        <option value="PRIVATE" ${alValue === 'PRIVATE' ? 'selected' : ''}>PRIVATE</option>
-        <option value="PUBLIC" ${alValue === 'PUBLIC' ? 'selected' : ''}>PUBLIC</option>
-      </select>` +
-      `<small class="sub-row-meta">Remote knowledge base / dataset visibility. Applied per destination sink.</small>`;
-    fields.appendChild(alDiv);
+    // Access Level — creation only (applied once when the remote target is
+    // provisioned; changing it later would not affect an already-created KB).
+    if (!ds) {
+        const alDiv = document.createElement('div'); alDiv.className = 'form-field';
+        alDiv.innerHTML = `<label>Access Level <span class="form-field-error">*</span></label>` +
+          `<select name="access_level">
+            <option value="PRIVATE" selected>PRIVATE</option>
+            <option value="PUBLIC">PUBLIC</option>
+          </select>` +
+          `<small class="sub-row-meta">Remote knowledge base / dataset visibility. Applied once at creation time.</small>`;
+        fields.appendChild(alDiv);
+    }
     // Pages Per Batch — first-class integer (min 1, max 100, default 10).
     const ppbValue = (ds && ds.pages_per_batch != null) ? ds.pages_per_batch : 10;
     const ppbDiv = document.createElement('div'); ppbDiv.className = 'form-field';
@@ -1809,9 +1811,10 @@
     const linked = Array.from($('target-linked-subs').options).map(o => o.value);
     let pagesPerBatch = Number(fd.get('pages_per_batch'));
     if (!Number.isInteger(pagesPerBatch) || pagesPerBatch < 1 || pagesPerBatch > 100) pagesPerBatch = 10;
-    const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked, access_level: fd.get('access_level'), pages_per_batch: pagesPerBatch, schedule_start: fd.get('schedule_start') || '', schedule_end: fd.get('schedule_end') || '' };
+    const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked, pages_per_batch: pagesPerBatch, schedule_start: fd.get('schedule_start') || '', schedule_end: fd.get('schedule_end') || '' };
     if (!targetFormTargetId) {
         body.include_path_in_filename = !!fd.get('include_path_in_filename');
+        body.access_level = fd.get('access_level') || 'PRIVATE';
     }
     if (name) body.name = name;
     try {

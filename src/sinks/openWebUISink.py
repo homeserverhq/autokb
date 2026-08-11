@@ -173,10 +173,15 @@ class OpenWebUISink(BaseSink):
         return self._paginated_get(f"knowledge/{kb_id}/files")
 
     def _create_kb(self, name: str) -> str:
+        payload = {"name": name, "description": f"AutoKB sync: {name}"}
+        if self.access_level == "PUBLIC":
+            payload["access_grants"] = [
+                {"principal_type": "user", "principal_id": "*", "permission": "read"}
+            ]
         resp = requests.post(
             self._url("knowledge/create"),
             headers=self._headers(),
-            json={"name": name, "description": f"AutoKB sync: {name}"},
+            json=payload,
             timeout=self._timeout,
         )
         self._check(resp, "create KB")

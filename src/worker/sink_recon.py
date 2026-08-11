@@ -327,26 +327,31 @@ def _reconcile_pass1(
     remove_count = 0
     ds_df_rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
     ds_df_by_datafile = {r.datafile_id: r for r in ds_df_rows}
-    processed_datafile_ids = set()
 
-    for fpath, st in fs_files.items():
-        # Abort mid-pass if the link/sub was removed or disabled while uploading.
+    # Pass I.a — Remove from remote files that no longer exist on the FS.
+    for ds_df in ds_df_rows:
         svc._check_cancel()
-        # Gate upserts on the target's upload window (adds/updates only).
+        df = db.get_datafile(ds_df.datafile_id)
+        if df is None or df.path not in fs_files:
+            try:
+                svc.base_remove_datafile(ds_df.datafile_id)
+                remove_count += 1
+            except Exception as exc:
+                log.error("sink_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
+                raise
+
+    # Pass I.b — Add / update files that are on the FS.
+    for fpath, st in fs_files.items():
+        svc._check_cancel()
         svc._check_schedule()
         if state is not None:
             state["n"] += 1
         size = st.st_size
         mtime = st.st_mtime
 
-        # get (or create) akb_datafile
         df = db.get_datafile_by_path(fpath)
         ds_df = ds_df_by_datafile.get(df.id) if df else None
         if df is None or ds_df is None:
-            # Unknown file, OR known file not yet linked to this target → add.
-            # base_add_datafile is idempotent (get_or_create + dedup by
-            # get_target_datafile). Reuse the known hash when size/mtime
-            # already match so we avoid hashing the file again.
             try:
                 if df is not None and _file_matches_db(fpath, df):
                     svc.base_add_datafile(sub_id, fpath, known_hash=df.hash)
@@ -357,8 +362,6 @@ def _reconcile_pass1(
                 log.error("sink_add_failed", path=fpath, error=str(exc))
                 raise
             continue
-
-        processed_datafile_ids.add(df.id)
 
         if _file_matches_db(fpath, df):
             if ds_df and ds_df.hash != df.hash:
@@ -390,16 +393,6 @@ def _reconcile_pass1(
                 update_count += 1
             except Exception as exc:
                 log.error("sink_update_failed", datafile_id=df.id, hash=real_hash, error=str(exc))
-                raise
-
-    for ds_df in ds_df_rows:
-        svc._check_cancel()
-        if ds_df.datafile_id not in processed_datafile_ids:
-            try:
-                svc.base_remove_datafile(ds_df.datafile_id)
-                remove_count += 1
-            except Exception as exc:
-                log.error("sink_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
                 raise
 
     # Flush any batched upsert that never crossed its size threshold (and any

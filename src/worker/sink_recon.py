@@ -332,6 +332,8 @@ def _reconcile_pass1(
     for fpath, st in fs_files.items():
         # Abort mid-pass if the link/sub was removed or disabled while uploading.
         svc._check_cancel()
+        # Gate upserts on the target's upload window (adds/updates only).
+        svc._check_schedule()
         if state is not None:
             state["n"] += 1
         size = st.st_size
@@ -448,6 +450,21 @@ def _handle_recon_cancel(kind, ds_link, target_id, sub_id, db, sink_registry, lo
                 )
             except Exception as exc:
                 log.warning("sink_recon_cancel_cleanup_failed", target_id=target_id, error=str(exc))
+        return False
+    if kind == "outside_schedule":
+        # Upload window is closed. NOT an error — reset the link so it stays
+        # ENABLED (files remain pending on the FS) and let the next recon
+        # finish the job when the window reopens.
+        log.info("sink_recon_deferred", target_id=target_id, sub_id=sub_id,
+                 sub_name=sub_name, reason="outside_upload_window")
+        cur = db.get_target_subscription(target_id, sub_id)
+        if cur and cur.status in (STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS):
+            try:
+                db.set_target_subscription_status(
+                    target_id, sub_id, STATE_ENABLED, message="Outside upload window — deferred",
+                )
+            except Exception:
+                pass
         return False
     # link_disabled — halt uploads for this target; rows already written are
     # kept (the files really are on the remote) and the DISABLED status is

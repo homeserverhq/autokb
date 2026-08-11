@@ -551,6 +551,51 @@ def uuid4() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-target upload schedule window
+# ---------------------------------------------------------------------------
+def parse_schedule_window(start: Optional[str], end: Optional[str]) -> Optional[Tuple[int, int]]:
+    """Parse a ``"HH:MM"`` daily window into (start, end) minutes-of-day.
+
+    Returns ``None`` when no window is configured (both bounds empty),
+    malformed, or degenerate (``start == end``). Overnight windows
+    (``end <= start``) wrap midnight, e.g. ``("22:00", "06:00")`` →
+    ``(1320, 360)``.
+    """
+    def _to_min(s: Optional[str]) -> Optional[int]:
+        if not s or not isinstance(s, str):
+            return None
+        try:
+            h, m = s.strip().split(":", 1)
+            hh, mm = int(h), int(m)
+        except (ValueError, AttributeError):
+            return None
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return None
+        return hh * 60 + mm
+
+    s_min = _to_min(start)
+    e_min = _to_min(end)
+    if s_min is None or e_min is None:
+        return None
+    if s_min == e_min:
+        return None
+    return (s_min, e_min)
+
+
+def in_schedule_window(now: datetime, window: Tuple[int, int]) -> bool:
+    """True when *now* falls inside the daily *window* (minutes-of-day).
+
+    Inclusive start, exclusive end. Overnight windows (``end <= start``)
+    wrap midnight: ``m >= start or m < end``.
+    """
+    start, end = window
+    m = now.hour * 60 + now.minute
+    if start <= end:
+        return start <= m < end
+    return m >= start or m < end
+
+
+# ---------------------------------------------------------------------------
 # SubscriptionCancelledError
 # ---------------------------------------------------------------------------
 class SubscriptionCancelledError(Exception):
@@ -576,6 +621,8 @@ class SinkCancelledError(Exception):
         the whole recon (the worker handles full cleanup next loop).
       * ``"sub_disabled"``  — the subscription is DISABLED; abort the whole
         recon (no cleanup needed).
+      * ``"outside_schedule"`` — the target's upload window is closed; halt
+        this target's upserts without error (files stay pending).
     """
 
     def __init__(self, kind: str = "link_removed", *args):
@@ -599,6 +646,8 @@ __all__ = [
     "schema_hash",
     "is_valid_cron",
     "cron_due",
+    "parse_schedule_window",
+    "in_schedule_window",
     "send_smtp_notification",
     "uuid7",
     "uuid4",

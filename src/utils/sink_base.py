@@ -9,9 +9,10 @@ bookkeeping, hashing, etc.
 import hashlib
 import os
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, Dict, Optional
 
-from utils.misc_utils import SinkCancelledError, sanitize_name
+from utils.misc_utils import SinkCancelledError, in_schedule_window, parse_schedule_window, sanitize_name
 
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB
@@ -80,6 +81,10 @@ class BaseSink(ABC):
         self._output_root = "/output"
         self.db = db
         self._cancel_check = None
+        self._schedule_window = parse_schedule_window(
+            getattr(target_row, "schedule_start", None),
+            getattr(target_row, "schedule_end", None),
+        )
 
     def set_cancel_check(self, check) -> None:
         """Install a cancellation callback.
@@ -105,6 +110,19 @@ class BaseSink(ABC):
             kind = self._cancel_check()
             if kind:
                 raise SinkCancelledError(kind)
+
+    def _check_schedule(self) -> None:
+        """Abort the recon pass when outside this target's upload window.
+
+        Called by the recon engine before each file *upsert* (add/update).
+        Raises :class:`SinkCancelledError` (kind ``"outside_schedule"``) when
+        a window is configured and the current local time is outside it.
+        Removals are intentionally NOT gated.
+        """
+        if self._schedule_window is not None and not in_schedule_window(
+            datetime.now(), self._schedule_window
+        ):
+            raise SinkCancelledError("outside_schedule")
 
     def remote_file_name(self, path: str) -> str:
         """Deterministic remote filename for *path*.

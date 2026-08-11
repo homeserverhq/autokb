@@ -421,6 +421,8 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         "remote_target_id": t.remote_target_id,
         "target_extra_params": t.target_extra_params or {},
         "include_path_in_filename": bool(t.include_path_in_filename),
+        "schedule_start": t.schedule_start,
+        "schedule_end": t.schedule_end,
         "status": status,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "subscriptions": [
@@ -1778,6 +1780,40 @@ def _validate_target_name(name: str) -> str:
     return name
 
 
+def _validate_schedule_times(start, end) -> None:
+    """Validate an optional daily upload window (``"HH:MM"``, 24-hour).
+
+    Both empty → no scheduling (OK). Exactly one set, unparseable, out-of-range,
+    or equal bounds → 400. Times are interpreted in the host's local timezone.
+    """
+    def _clean(v) -> str:
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise HTTPException(status_code=400, detail="schedule_start/schedule_end must be strings")
+        return v.strip()
+
+    s, e = _clean(start), _clean(end)
+    if not s and not e:
+        return
+    if not s or not e:
+        raise HTTPException(
+            status_code=400,
+            detail="schedule_start and schedule_end must both be set, or both left blank",
+        )
+    try:
+        sh, sm_ = s.split(":", 1)
+        eh, em_ = e.split(":", 1)
+        shh, smm = int(sh), int(sm_)
+        ehh, emm = int(eh), int(em_)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Schedule times must be HH:MM (24-hour)")
+    if not (0 <= shh <= 23 and 0 <= smm <= 59 and 0 <= ehh <= 23 and 0 <= emm <= 59):
+        raise HTTPException(status_code=400, detail="Schedule times must be HH:MM (24-hour)")
+    if shh * 60 + smm == ehh * 60 + emm:
+        raise HTTPException(status_code=400, detail="Schedule start and end must differ")
+
+
 def _validate_subscription_name(name: str) -> str:
     """Validate a subscription name using the canonical-form check.
 
@@ -1873,9 +1909,14 @@ def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     include_path = body.get("include_path_in_filename", False)
     if not isinstance(include_path, bool):
         raise HTTPException(status_code=400, detail="include_path_in_filename must be a boolean")
+    schedule_start = body.get("schedule_start")
+    schedule_end = body.get("schedule_end")
+    _validate_schedule_times(schedule_start, schedule_end)
 
     t = db.create_target(service_id, name, api_url, api_key, t_extra,
-                         include_path_in_filename=include_path)
+                         include_path_in_filename=include_path,
+                         schedule_start=schedule_start,
+                         schedule_end=schedule_end)
     # Provision the remote resource synchronously before any queue item is
     # pushed — recon must never create the remote target itself.
     try:
@@ -1912,10 +1953,16 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
     include_path = body.get("include_path_in_filename")
     if include_path is not None and not isinstance(include_path, bool):
         raise HTTPException(status_code=400, detail="include_path_in_filename must be a boolean")
+    schedule_start = body.get("schedule_start")
+    schedule_end = body.get("schedule_end")
+    if schedule_start is not None or schedule_end is not None:
+        _validate_schedule_times(schedule_start, schedule_end)
 
     t = db.update_target(target_id, api_url=api_url, api_key=api_key,
                          target_extra_params=t_extra,
-                         include_path_in_filename=include_path)
+                         include_path_in_filename=include_path,
+                         schedule_start=schedule_start,
+                         schedule_end=schedule_end)
     # Provision the remote resource synchronously before any queue item is
     # pushed (no-op when remote_target_id is already set).
     _ensure_target_remote(t, db, STATE.get("sink_registry"), LOG)

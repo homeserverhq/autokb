@@ -2364,6 +2364,64 @@ def _dkb_test_icon():
     return True, "icon derivation + fallback OK"
 
 
+def _dkb_test_schedule():
+    """Verify target schedule parse/window math plus the _check_schedule gate."""
+    from types import SimpleNamespace
+    from datetime import datetime
+    from utils.misc_utils import SinkCancelledError, in_schedule_window, parse_schedule_window
+
+    assert parse_schedule_window(None, None) is None
+    assert parse_schedule_window("", "") is None
+    assert parse_schedule_window("06:00", None) is None
+    assert parse_schedule_window(None, "06:00") is None
+    assert parse_schedule_window("abc", "06:00") is None
+    assert parse_schedule_window("99:00", "06:00") is None
+    assert parse_schedule_window("12:00", "12:00") is None
+    assert parse_schedule_window("22:00", "06:00") == (1320, 360), "overnight wrap"
+    assert parse_schedule_window("06:00", "22:00") == (360, 1320), "normal window"
+
+    # Add 8:00 manually to dodge the "6 is int, 00 is int" shadowing below.
+    def _dt(h, m):
+        return datetime(2026, 1, 1, h, m)
+
+    # normal window [06:00, 22:00)
+    w = (360, 1320)
+    assert in_schedule_window(_dt(6, 0), w) is True, "start inclusive"
+    assert in_schedule_window(_dt(8, 30), w) is True
+    assert in_schedule_window(_dt(21, 59), w) is True
+    assert in_schedule_window(_dt(22, 0), w) is False, "end exclusive"
+    assert in_schedule_window(_dt(2, 0), w) is False
+
+    # overnight wrap [22:00, 06:00)
+    w2 = (1320, 360)
+    assert in_schedule_window(_dt(22, 0), w2) is True, "wrap start inclusive"
+    assert in_schedule_window(_dt(23, 59), w2) is True
+    assert in_schedule_window(_dt(1, 0), w2) is True
+    assert in_schedule_window(_dt(5, 59), w2) is True
+    assert in_schedule_window(_dt(6, 0), w2) is False, "wrap end exclusive"
+    assert in_schedule_window(_dt(12, 0), w2) is False
+
+    # _check_schedule gate on a real sink instance (schedule columns are NULL)
+    row = SimpleNamespace(id="t1", service_id="s1", name="T", api_url="u",
+                          api_key="k", remote_target_id=None,
+                          target_extra_params={}, include_path_in_filename=False,
+                          schedule_start=None, schedule_end=None)
+    svc = _MockSink(row, None)
+    svc._check_schedule()  # no window -> never raises
+
+    m = datetime.now().hour * 60 + datetime.now().minute
+    svc._schedule_window = (m, m)  # degenerate window excludes now
+    try:
+        svc._check_schedule()
+        return False, "_check_schedule did not raise outside window"
+    except SinkCancelledError as exc:
+        if exc.kind != "outside_schedule":
+            return False, f"unexpected cancel kind {exc.kind}"
+    svc._schedule_window = (m, (m + 1) % 1440)  # window that includes now
+    svc._check_schedule()  # must not raise
+    return True, "schedule parse + window gating OK"
+
+
 def _dkb_test_base_add_datafile(db, sub, ds):
     ds_row = db.get_target(ds.id)
     ds_row.api_key = db.decrypt_target_api_key(ds_row)
@@ -2597,6 +2655,52 @@ def _dkb_test_recon_known_hash_no_rehash(db, sub, ds):
                 return False, "compute_file_hash called despite matching size/mtime"
     with db.get_session() as s:
         s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+    return True, "OK"
+
+
+def _dkb_test_recon_schedule_gated(db, sub, ds):
+    """A target outside its upload window defers upserts (no ERROR, link stays
+    ENABLED with a 'deferred' message); the same pass uploads once the window
+    includes the current time. Removal operations are NOT gated."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+
+    def window_strs(delta_start, delta_end):
+        from datetime import datetime
+        m = datetime.now().hour * 60 + datetime.now().minute
+        fmt = lambda x: f"{(x % 1440) // 60:02d}:{(x % 1440) % 60:02d}"
+        return fmt(m + delta_start), fmt(m + delta_end)
+
+    sub_row = db.get_subscription(sub)
+    _write_output_file_test(sub_row.name, "gated.md", "# gated\ncontent")
+
+    # Phase 1: window excludes now → nothing uploaded, link stays ENABLED.
+    s, e = window_strs(1, 2)
+    db.update_target(ds.id, schedule_start=s, schedule_end=e)
+    svc = _mk_cancel_test_svc(db, ds)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        mock_get.return_value = svc
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if any(c[0] in ("add_datafile", "update_datafile") for c in svc.calls):
+        return False, f"gated pass uploaded {svc.calls}"
+    link = db.get_target_subscription(ds.id, sub)
+    if link is None or link.status != STATE_ENABLED:
+        return False, f"gated pass left link {link.status if link else 'gone'}"
+    if link.last_message and "deferred" not in link.last_message:
+        return False, f"expected deferred message, got {link.last_message!r}"
+    if db.list_datafiles_for_target_subscription(ds.id, sub):
+        return False, "gated pass wrote target_datafile rows"
+
+    # Phase 2: window includes now → same file uploads.
+    s2, e2 = window_strs(0, 1)
+    db.update_target(ds.id, schedule_start=s2, schedule_end=e2)
+    svc2 = _mk_cancel_test_svc(db, ds)
+    with patch("worker.sink_recon._get_service") as mock_get:
+        mock_get.return_value = svc2
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    adds = [c for c in svc2.calls if c[0] == "add_datafile"]
+    if len(adds) != 1:
+        return False, f"expected 1 upload after window opens, got {len(adds)}"
     return True, "OK"
 
 
@@ -2983,6 +3087,7 @@ def _run_dkb_unit_tests():
         ("DKB Service — compute hash", None),
         ("DKB Service — remote filename with path", None),
         ("DKB Icon — derivation + fallback", None),
+        ("DKB Schedule — parse + window gating", None),
         ("DKB Service — base_add_datafile", lambda db, sub, ds: _dkb_test_base_add_datafile(db, sub, ds)),
         ("DKB Service — base_update_datafile", lambda db, sub, ds: _dkb_test_base_update_datafile(db, sub, ds)),
         ("DKB Service — base_remove_datafile", lambda db, sub, ds: _dkb_test_base_remove_datafile(db, sub, ds)),
@@ -2990,6 +3095,7 @@ def _run_dkb_unit_tests():
         ("DKB Recon — adds new file", lambda db, sub, ds: _dkb_test_recon_add(db, sub, ds)),
         ("DKB Recon — adds existing known file", lambda db, sub, ds: _dkb_test_recon_add_existing_df(db, sub, ds)),
         ("DKB Recon — known hash avoids re-hash", lambda db, sub, ds: _dkb_test_recon_known_hash_no_rehash(db, sub, ds)),
+        ("DKB Recon — outside schedule defers uploads", lambda db, sub, ds: _dkb_test_recon_schedule_gated(db, sub, ds)),
         ("DKB Recon — removes deleted file", lambda db, sub, ds: _dkb_test_recon_remove(db, sub, ds)),
         ("DKB Recon — skips disabled DS", lambda db, sub, ds: _dkb_test_recon_skip_disabled(db, sub, ds)),
         ("DKB Recon — error on failure", lambda db, sub, ds: _dkb_test_recon_error(db, sub, ds)),
@@ -3024,6 +3130,7 @@ def _run_dkb_unit_tests():
                               _dkb_test_registry_load() if "Registry" in name else \
                               _dkb_test_remote_filename_include_path() if "remote filename" in name else \
                               _dkb_test_icon() if "Icon" in name else \
+                              _dkb_test_schedule() if "Schedule" in name else \
                               (_dkb_test_compute_hash(), "OK")
                 else:
                     # Create fresh fixtures per test

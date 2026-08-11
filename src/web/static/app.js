@@ -1749,7 +1749,7 @@
     // uploads have been made would orphan existing remote file names).
     if (!ds) {
         const pathDiv = document.createElement('div'); pathDiv.className = 'form-field';
-        pathDiv.innerHTML = `<label><input type="checkbox" name="include_path_in_filename" /> Include full directory structure in remote filename</label><small class="sub-row-meta">When enabled, the remote filename includes the plugin/subdirectory path: <code>autokb_{target}_{plugin}_{sub}_{basename}</code>.</small>`;
+        pathDiv.innerHTML = `<label><input type="checkbox" name="include_path_in_filename" checked /> Include full directory structure in remote filename</label><small class="sub-row-meta">When enabled, the remote filename includes the plugin/subdirectory path: <code>autokb_{target}_{plugin}_{sub}_{basename}</code>.</small>`;
         fields.appendChild(pathDiv);
     }
     // Subscription transfer list

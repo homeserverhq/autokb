@@ -350,6 +350,8 @@ h3 { color: #fff; font-size: 20px; font-weight: 600; margin: 36px 0 8px; }
 .form-field { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
 .form-row { display: flex; gap: 8px; }
 .form-row > .form-field { flex: 1; margin-bottom: 0; }
+.form-hint { display: block; margin: 2px 0 12px; }
+input[type="time"]::-webkit-datetime-edit-ampm-field { display: none; }
 .form-field label { color: #9E9E9E; font-size: 13px; }
 .form-field input, .form-field select, .form-field textarea {
   background: #0A0A0A; color: #FFFFFF; border: 1px solid #2A2A2A;

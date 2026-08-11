@@ -1695,7 +1695,7 @@
     // Name (editable only on create; immutable after creation)
     const nameDiv = document.createElement('div'); nameDiv.className = 'form-field';
     if (isEdit) {
-      nameDiv.innerHTML = `<label>Name</label><div class="sub-row-meta" style="padding:8px 0;">${escapeHtml(ds.name)}</div><small class="sub-row-meta">Target name cannot be changed after creation.</small>`;
+      nameDiv.innerHTML = `<label>Name</label><div class="sub-row-meta">${escapeHtml(ds.name)}</div>`;
     } else {
       nameDiv.innerHTML = `<label>Name <span class="form-field-error">*</span></label>` +
         `<input type="text" name="target_name" required maxlength="${TARGET_NAME_MAX_LEN}" />` +
@@ -1738,9 +1738,13 @@
     // Upload schedule window — available on BOTH create and edit.
     const schedRow = document.createElement('div'); schedRow.className = 'form-row';
     schedRow.innerHTML = `
-      <div class="form-field"><label>Upload Window Start</label><input type="time" name="schedule_start" value="${escapeHtml(ds ? (ds.schedule_start || '') : '')}" /><small class="sub-row-meta">Only upload files to this target during this daily window. Leave both blank to always allow.</small></div>
-      <div class="form-field"><label>Upload Window End</label><input type="time" name="schedule_end" value="${escapeHtml(ds ? (ds.schedule_end || '') : '')}" /></div>`;
+      <div class="form-field"><label>Upload Window Start (e.g. 22:00)</label><input type="time" name="schedule_start" value="${escapeHtml(ds ? (ds.schedule_start || '') : '')}" /></div>
+      <div class="form-field"><label>Upload Window End (e.g. 06:00)</label><input type="time" name="schedule_end" value="${escapeHtml(ds ? (ds.schedule_end || '') : '')}" /></div>`;
     fields.appendChild(schedRow);
+    const schedHint = document.createElement('small');
+    schedHint.className = 'sub-row-meta form-hint';
+    schedHint.textContent = 'Only upload files to this target during this daily window. Leave both blank to always allow.';
+    fields.appendChild(schedHint);
     // include_path_in_filename checkbox — creation only (changing after
     // uploads have been made would orphan existing remote file names).
     if (!ds) {
@@ -1750,7 +1754,7 @@
     }
     // Subscription transfer list
     const transferDiv = document.createElement('div'); transferDiv.className = 'form-field';
-    transferDiv.innerHTML = `<label>Linked Subscriptions</label><div class="transfer-list"><div class="transfer-panel"><div class="transfer-header">Available</div><select id="target-available-subs" multiple></select></div><div class="transfer-buttons"><button type="button" class="btn btn-primary" id="target-transfer-right">&gt;&gt;</button><button type="button" class="btn btn-primary" id="target-transfer-left">&lt;&lt;</button></div><div class="transfer-panel"><div class="transfer-header">Linked</div><select id="target-linked-subs" multiple></select></div></div>`;
+    transferDiv.innerHTML = `<div class="transfer-list"><div class="transfer-panel"><div class="transfer-header">Available</div><select id="target-available-subs" multiple></select></div><div class="transfer-buttons"><button type="button" class="btn btn-primary" id="target-transfer-right">&gt;&gt;</button><button type="button" class="btn btn-primary" id="target-transfer-left">&lt;&lt;</button></div><div class="transfer-panel"><div class="transfer-header">Linked</div><select id="target-linked-subs" multiple></select></div></div>`;
     fields.appendChild(transferDiv);
     // Populate subscription lists
     const allSubs = await api('/subscriptions');

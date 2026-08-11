@@ -1736,12 +1736,11 @@
     extraDiv.innerHTML = `<label>Extra Params (JSON)</label><textarea name="target_extra_params" rows="4">${escapeHtml(ds ? JSON.stringify(ds.target_extra_params || {}, null, 2) : '{}')}</textarea>`;
     fields.appendChild(extraDiv);
     // Upload schedule window — available on BOTH create and edit.
-    const schedDiv = document.createElement('div'); schedDiv.className = 'form-field';
-    schedDiv.innerHTML = `<label>Upload Window Start</label><input type="time" name="schedule_start" value="${escapeHtml(ds ? (ds.schedule_start || '') : '')}" /><small class="sub-row-meta">Only upload files to this target during this daily window. Leave both blank to always allow.</small>`;
-    fields.appendChild(schedDiv);
-    const schedEndDiv = document.createElement('div'); schedEndDiv.className = 'form-field';
-    schedEndDiv.innerHTML = `<label>Upload Window End</label><input type="time" name="schedule_end" value="${escapeHtml(ds ? (ds.schedule_end || '') : '')}" />`;
-    fields.appendChild(schedEndDiv);
+    const schedRow = document.createElement('div'); schedRow.className = 'form-row';
+    schedRow.innerHTML = `
+      <div class="form-field"><label>Upload Window Start</label><input type="time" name="schedule_start" value="${escapeHtml(ds ? (ds.schedule_start || '') : '')}" /><small class="sub-row-meta">Only upload files to this target during this daily window. Leave both blank to always allow.</small></div>
+      <div class="form-field"><label>Upload Window End</label><input type="time" name="schedule_end" value="${escapeHtml(ds ? (ds.schedule_end || '') : '')}" /></div>`;
+    fields.appendChild(schedRow);
     // include_path_in_filename checkbox — creation only (changing after
     // uploads have been made would orphan existing remote file names).
     if (!ds) {

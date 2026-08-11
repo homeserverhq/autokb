@@ -130,6 +130,7 @@ class Target(Base):
     include_path_in_filename = Column(Boolean, nullable=False, default=False, server_default="false")
     schedule_start = Column(String(5), nullable=True)
     schedule_end = Column(String(5), nullable=True)
+    pages_per_batch = Column(Integer, nullable=False, default=10, server_default="10")
 
     service = relationship("Sink", back_populates="targets")
 
@@ -680,7 +681,8 @@ class DatabaseManager:
     def create_target(self, service_id: str, name: str, api_url: str, api_key: str,
                       target_extra_params: Dict[str, Any] = None,
                       include_path_in_filename: bool = False,
-                      schedule_start: str = None, schedule_end: str = None) -> Target:
+                      schedule_start: str = None, schedule_end: str = None,
+                      pages_per_batch: int = 10) -> Target:
         encrypted = self._cipher.encrypt(api_key) if api_key else ""
         t = Target(
             id=str(uuid4()),
@@ -690,6 +692,7 @@ class DatabaseManager:
             include_path_in_filename=bool(include_path_in_filename),
             schedule_start=schedule_start or None,
             schedule_end=schedule_end or None,
+            pages_per_batch=pages_per_batch,
         )
         with self.get_session() as s:
             s.add(t)
@@ -711,7 +714,8 @@ class DatabaseManager:
     def update_target(self, target_id: str, *, name: str = None, api_url: str = None,
                       api_key: str = None, target_extra_params: Dict[str, Any] = None,
                       include_path_in_filename: bool = None,
-                      schedule_start: str = None, schedule_end: str = None) -> Optional[Target]:
+                      schedule_start: str = None, schedule_end: str = None,
+                      pages_per_batch: int = None) -> Optional[Target]:
         with self.get_session() as s:
             t = s.query(Target).filter(Target.id == target_id).first()
             if not t:
@@ -730,6 +734,8 @@ class DatabaseManager:
                 t.schedule_start = schedule_start or None
             if schedule_end is not None:
                 t.schedule_end = schedule_end or None
+            if pages_per_batch is not None:
+                t.pages_per_batch = pages_per_batch
             s.flush()
             s.refresh(t)
             return t

@@ -208,6 +208,16 @@ class BaseSink(ABC):
         """
         ...
 
+    def flush(self) -> None:
+        """Flush any buffered remote operations (e.g. batched upserts).
+
+        No-op by default. Sinks that buffer work across upsets (such as
+        page-bounded upload batches) override this to send their remaining
+        pending work; the sink reconciliation engine calls it at the end of
+        each target's recon pass and before removals.
+        """
+        return None
+
     # ---- concrete wrapper methods (DB bookkeeping + abstract calls) ----
 
     def base_add_datafile(self, sub_id: str, path: str, known_hash: Optional[str] = None) -> None:

@@ -1731,6 +1731,14 @@
     keyDiv.innerHTML = `<label>API Key ${keyRequired ? '<span class="form-field-error">*</span>' : ''}</label><input type="password" name="api_key" value="" placeholder="${keyPlaceholder}" />
     <small class="sub-row-meta">${isEdit ? 'Leave blank to keep the existing key.' : (hasKeyDefault ? 'Leave blank to use the server-configured default key.' : '')}</small>`;
     fields.appendChild(keyDiv);
+    // Pages Per Batch — first-class integer (min 1, max 100, default 10).
+    // Available on both create and edit; only affects batch granularity.
+    const ppbValue = (ds && ds.pages_per_batch != null) ? ds.pages_per_batch : 10;
+    const ppbDiv = document.createElement('div'); ppbDiv.className = 'form-field';
+    ppbDiv.innerHTML = `<label>Pages Per Batch <span class="form-field-error">*</span></label>` +
+      `<input type="number" name="pages_per_batch" min="1" max="100" value="${escapeHtml(ppbValue)}" required />` +
+      `<small class="sub-row-meta">How many estimated pages to upload to the remote source at a time, then wait for the whole batch to finish before continuing (min 1, max 100).</small>`;
+    fields.appendChild(ppbDiv);
     // target_extra_params
     const extraDiv = document.createElement('div'); extraDiv.className = 'form-field';
     extraDiv.innerHTML = `<label>Extra Params (JSON)</label><textarea name="target_extra_params" rows="4">${escapeHtml(ds ? JSON.stringify(ds.target_extra_params || {}, null, 2) : '{}')}</textarea>`;
@@ -1815,7 +1823,9 @@
     let extra = fd.get('target_extra_params');
     try { extra = JSON.parse(extra); } catch (e) { extra = {}; }
     const linked = Array.from($('target-linked-subs').options).map(o => o.value);
-    const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked, schedule_start: fd.get('schedule_start') || '', schedule_end: fd.get('schedule_end') || '' };
+    let pagesPerBatch = Number(fd.get('pages_per_batch'));
+    if (!Number.isInteger(pagesPerBatch) || pagesPerBatch < 1 || pagesPerBatch > 100) pagesPerBatch = 10;
+    const body = { api_url: apiUrl, api_key: apiKey, target_extra_params: extra, subscription_ids: linked, pages_per_batch: pagesPerBatch, schedule_start: fd.get('schedule_start') || '', schedule_end: fd.get('schedule_end') || '' };
     if (!targetFormTargetId) {
         body.include_path_in_filename = !!fd.get('include_path_in_filename');
     }

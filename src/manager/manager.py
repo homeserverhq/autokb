@@ -423,6 +423,7 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
         "include_path_in_filename": bool(t.include_path_in_filename),
         "schedule_start": t.schedule_start,
         "schedule_end": t.schedule_end,
+        "pages_per_batch": t.pages_per_batch,
         "status": status,
         "last_updated": last_updated.isoformat() if last_updated else None,
         "subscriptions": [
@@ -1814,6 +1815,26 @@ def _validate_schedule_times(start, end) -> None:
         raise HTTPException(status_code=400, detail="Schedule start and end must differ")
 
 
+def _validate_pages_per_batch(value) -> int:
+    """Validate an optional ``pages_per_batch`` (int in [1, 100], default 10).
+
+    None → 10. Non-integer, boolean, or out-of-range → 400.
+    """
+    if value is None:
+        return 10
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(
+            status_code=400,
+            detail="pages_per_batch must be an integer between 1 and 100",
+        )
+    if not (1 <= value <= 100):
+        raise HTTPException(
+            status_code=400,
+            detail="pages_per_batch must be between 1 and 100",
+        )
+    return value
+
+
 def _validate_subscription_name(name: str) -> str:
     """Validate a subscription name using the canonical-form check.
 
@@ -1912,11 +1933,13 @@ def api_create_target(service_id: str, body: Dict[str, Any] = Body(...)):
     schedule_start = body.get("schedule_start")
     schedule_end = body.get("schedule_end")
     _validate_schedule_times(schedule_start, schedule_end)
+    pages_per_batch = _validate_pages_per_batch(body.get("pages_per_batch"))
 
     t = db.create_target(service_id, name, api_url, api_key, t_extra,
                          include_path_in_filename=include_path,
                          schedule_start=schedule_start,
-                         schedule_end=schedule_end)
+                         schedule_end=schedule_end,
+                         pages_per_batch=pages_per_batch)
     # Provision the remote resource synchronously before any queue item is
     # pushed — recon must never create the remote target itself.
     try:
@@ -1957,12 +1980,17 @@ def api_update_target(target_id: str, body: Dict[str, Any] = Body(...)):
     schedule_end = body.get("schedule_end")
     if schedule_start is not None or schedule_end is not None:
         _validate_schedule_times(schedule_start, schedule_end)
+    pages_per_batch = (
+        _validate_pages_per_batch(body.get("pages_per_batch"))
+        if "pages_per_batch" in body else None
+    )
 
     t = db.update_target(target_id, api_url=api_url, api_key=api_key,
                          target_extra_params=t_extra,
                          include_path_in_filename=include_path,
                          schedule_start=schedule_start,
-                         schedule_end=schedule_end)
+                         schedule_end=schedule_end,
+                         pages_per_batch=pages_per_batch)
     # Provision the remote resource synchronously before any queue item is
     # pushed (no-op when remote_target_id is already set).
     _ensure_target_remote(t, db, STATE.get("sink_registry"), LOG)

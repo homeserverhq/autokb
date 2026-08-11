@@ -402,6 +402,10 @@ def _reconcile_pass1(
                 log.error("sink_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
                 raise
 
+    # Flush any batched upsert that never crossed its size threshold (and any
+    # leftover after the removal loop). No-op for sinks that do not batch.
+    svc.flush()
+
     return add_count, update_count, remove_count
 
 

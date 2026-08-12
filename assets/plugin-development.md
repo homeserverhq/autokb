@@ -42,7 +42,6 @@ class myFirstPlugin(BaseSubscription):
         "description": "Downloads data from an example source and writes it as markdown files.",
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PUBLIC"
 
     def get_schema(self):
         return {
@@ -119,14 +118,7 @@ Use EVENT_BASED when:
 **What to implement:** `get_schema()`, `getData()`, `monitor()`.  
 **Crucial requirement:** `monitor()` is async and runs in the Manager's event loop. Use **asyncio-native libraries only** (e.g. `aioimaplib`, `aiofiles`, `asyncio` subprocess). Blocking calls will stall the entire Manager. If you cannot use an async library, put a SCHEDULED wrapper that polls instead.
 
-### `DEFAULT_ACCESS_LEVEL`
-
-A class-level string, `"PRIVATE"` or `"PUBLIC"`.
-
-| Value     | When to use |
-|-----------|-------------|
-| `"PUBLIC"` | Data sources where the subscription config contains no secrets (e.g. Bible plugin, web scraper). The config is visible through the API. |
-| `"PRIVATE"` | Data sources where the config contains credentials (e.g. IMAP plugin with password). The config is masked in API responses; password-format fields are encrypted at rest. |
+*Access level / destination visibility is configured on the **sink Target**, not the plugin — see `assets/sink-development.md`. Secret handling for subscription config is controlled by `"format": "password"` schema properties (below).*
 
 ---
 
@@ -902,7 +894,6 @@ When the file watcher detects a new or changed plugin file, the system validates
 | Exactly one `BaseSubscription` subclass exists | Plugin is not loaded |
 | `metadata["name"]` exists and matches filename stem (after sanitization) | Plugin is not loaded |
 | `sub_type` is `"SCHEDULED"` or `"EVENT_BASED"` | Plugin is not loaded |
-| `DEFAULT_ACCESS_LEVEL` is `"PRIVATE"` or `"PUBLIC"` | Plugin is not loaded |
 | `get_schema()` returns a dict | Plugin is not loaded |
 | Schema hash has not changed since last load (if subscriptions exist) | Plugin refused, existing subscriptions disabled with "breaking change" error |
 
@@ -935,7 +926,6 @@ class rssFeedPlugin(BaseSubscription):
         ),
         "sub_type": "SCHEDULED",
     }
-    DEFAULT_ACCESS_LEVEL = "PUBLIC"
     MAX_CHUNK_TOKENS = 490
 
     def get_schema(self):
@@ -1170,7 +1160,6 @@ Before considering your plugin complete, verify:
 - [ ] Class subclasses `BaseSubscription`
 - [ ] `metadata["name"]` matches the filename stem (camelCase, ≤ 32 chars)
 - [ ] `metadata["sub_type"]` is `"SCHEDULED"` or `"EVENT_BASED"` (and `monitor()` is implemented if EVENT_BASED)
-- [ ] `DEFAULT_ACCESS_LEVEL` is `"PRIVATE"` or `"PUBLIC"`
 - [ ] `get_schema()` returns a valid JSON Schema dict
 - [ ] `getData()` calls `progress_callback()` periodically
 - [ ] `getData()` does NOT catch `SubscriptionCancelledError`

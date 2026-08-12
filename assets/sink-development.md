@@ -214,7 +214,11 @@ def __init__(self, target_row: Any, db: Any):
 | `api_url`     | Base URL of the remote service. **May be empty** — use your `default_api_url` as a fallback (the `or` pattern shown in the Section 2 skeleton). |
 | `api_key`     | The API key, **already decrypted** by the caller. Never send it back to AutoKB; it is masked in API responses and encrypted at rest in the database. |
 | `remote_target_id` | The id assigned by the **remote** service once the container (knowledge base / dataset) has been created. `None` until `add_target()` is called synchronously at target create/update time. |
-| `target_extra_params` | A free-form dict of extra configuration the user supplied when creating the Target (see Section 8). |
+| `target_extra_params` | A free-form dict of extra configuration the user supplied when creating the Target (see Section 9). |
+| `include_path_in_filename` | `bool` — whether the full directory under `/output/` is embedded in the deterministic remote filename (see `remote_file_name` in Section 7). |
+| `access_level` | `"PRIVATE"` or `"PUBLIC"` (default `"PRIVATE"`). Remote knowledge base / dataset visibility. Sinks may use it at target-provisioning time (e.g. OpenWebUI grants public read on a `PUBLIC` KB). |
+| `schedule_start` / `schedule_end` | Optional daily upload window as `"HH:MM"` strings — `None` when no window is configured. Gates adds/updates; **removals are never gated** (see §6.7). |
+| `pages_per_batch` | `int` 1–100 (default 10). Batching sinks group upserts into page-bounded batches of this size (see `flush()` in Section 7). |
 
 You also receive `db`, the `DatabaseManager`, for any custom bookkeeping — but for a garden-variety sink you will never touch it: the base wrapper methods (Section 7) handle all persistence.
 
@@ -243,7 +247,7 @@ Called when a new file appears in `/output/{plugin}/{sub}/` that the target does
 
 - Upload the file at `path` to the remote service.
 - **Return the `remote_datafile_id`** assigned by the remote instance. The engine persists it, so it can `update_datafile`/`remove_datafile` later.
-- If the upload fails partway, raise an exception — the engine will log it, mark the target subscription ERROR (once), and continue with the other files.
+- If the upload fails partway, raise an exception — the engine will log it, mark the target subscription ERROR (once, which triggers the notification email), and move on to the other Targets; the next recon retries the failed file.
 
 ### 6.2 `update_datafile(remote_datafile_id, path) -> str`
 
@@ -290,6 +294,8 @@ When the recon engine drives your sink, the user might **remove the subscription
 - All you do is call `self._check_cancel()` at the top of each remote operation and inside any long-running loop or polling loop.
 - When the user removes/disables the link or subscription, `_check_cancel()` raises `SinkCancelledError`. **Do NOT catch it** — let it propagate to the engine, which halts the remaining uploads and cleans up appropriately.
 - Without a callback installed (e.g. in unit tests), `_check_cancel()` is a no-op.
+
+**Upload-window gating.** If the Target has a `schedule_start`/`schedule_end` window, the engine calls `self._check_schedule()` before every **upsert** (add/update). Outside the window it raises `SinkCancelledError` with kind `"outside_schedule"` — which the engine treats as **deferral, not an error**: the link is reset to `ENABLED` with message `Outside upload window — deferred` and the files stay pending for the next recon. Removals are **never** gated — a file deleted from `/output/` is removed from the remote whenever recon runs. You do not call `_check_schedule()` yourself; the engine does. A sink with no window configured simply never raises it.
 
 This mirrors the plugin contract where `progress_callback` raises `SubscriptionCancelledError`.
 
@@ -360,8 +366,12 @@ An additional concrete helper is available for building deterministic remote fil
 |--------|--------------|
 | `remote_file_name(path)` | Returns a deterministic remote filename: `autokb_{target}_{basename}`, or when `include_path_in_filename` is enabled, `autokb_{target}_{rel_path_with_underscores}` so the full directory under `/output/` is embedded. See Section 9 for the flag. |
 | `_check_cancel()`  | See §6.7 — call at checkpoints in your six methods. The engine installs the cancel check; you only call this. |
+| `flush()`  | Sends any buffered remote operations. **No-op by default** — the base class keeps nothing buffered. A batching sink overrides it to send its remaining pending upsert batch. The engine calls `flush()` at the end of each Target's recon pass and again after Pass III healing, even on non-batching sinks (harmless no-op). |
+| `set_progress_callback(cb)` / `_report_progress(done, in_flight)` | Batching sinks use this to report upload progress. The engine installs `cb(done, in_flight)` before a recon pass; the sink fires `self._report_progress(done, in_flight)` on each batch flush (`done` = upserts already persisted, `in_flight` = size of the batch currently being sent). The engine turns it into the `Upserting {shown} of {planned} to remote sink...` status message (see Section 8). No-op when the callback was never set — non-batching sinks can ignore it. |
 
 You should **call these wrappers yourself only in tests**. In production the recon engine calls them. The point of the design: your six methods are pure remote I/O; everything local is handled for you.
+
+**Batching sinks override the wrappers.** A sink that batches (e.g. LightRAG's page-bounded upload batches) overrides `base_add_datafile`/`base_update_datafile` to **buffer** the upsert op instead of uploading immediately; the real remote write — and the DB rows the base wrappers would have written — happen from `flush()`. Buffered add/update ops must still count toward on-disk reconciliation exactly as the base wrappers would. `base_remove_datafile` may then first call `self.flush()` so a pending batch lands before a removal.
 
 ### `compute_file_hash(path) -> str`
 
@@ -384,16 +394,20 @@ For each subscription, the engine:
 4. For each Target (skipping `DISABLED`/`ERROR` links):
    - **Remote container already exists** — `remote_target_id` was set synchronously at target create/update time (see `manager._ensure_target_remote`). Recon never creates the remote container.
    - **Missing remote target** — if `remote_target_id` is null (e.g. an old target that predates the synchronous-creation feature), the link transitions to `ERROR` with a notification email so the user can re-provision via Update.
-   - **Pass I.1 — adds**: every file on disk with no tracked join row → `base_add_datafile()`.
-   - **Pass I.1 — updates**: every tracked file whose content hash on disk differs from the last synced hash → `base_update_datafile()`.
-   - **Pass I.2 — removals**: every tracked join row with no matching file on disk → `base_remove_datafile()`.
-   - Sets the link status back to `ENABLED` (was set to `IN_PROGRESS` at step 2) with a summary message (`Reconciled: +N added, ~N updated, -N removed`).
+   - **Pass I.a — removals**: every tracked join row with no matching file on disk → `base_remove_datafile()`. Removals run **first** so a pending upsert batch lands before a deletion (a batching sink's `base_remove_datafile` flushes first).
+   - **Pass I.b — adds**: every file on disk with no tracked join row → `base_add_datafile()`.
+   - **Pass I.b — updates**: every tracked file whose content hash on disk differs from the last synced hash → `base_update_datafile()`.
+   - **Upsert progress**: before the add/update pass, the engine estimates `planned` (adds + updates) and installs a progress callback on the sink. A batching sink fires it on each batch flush, and the engine writes the link's status message as `Upserting {shown} of {planned} to remote sink...` — where `shown = min(done + in_flight, planned)` (`done` = upserts already persisted, `in_flight` = the batch currently being sent). The link stays `IN_PROGRESS` throughout; it is **not** marked complete yet.
+   - **Flush**: at the end of the target's pass the engine calls `svc.flush()` so any buffered upsert batch that never crossed its size threshold is sent (no-op for non-batching sinks). The engine can **block** here until every file in the batch reaches a terminal state on the remote.
+   - **Link status is NOT set here** — see Pass III below.
 5. **Pass II** syncs `akb_datafile` stats (size/mtime/hash) from the filesystem and prunes rows for deleted files.
-6. **Orphan cleanup**: when the last subscription is unlinked from a Target, the engine calls `remove_target()` and deletes the target row.
+6. **Pass III — healing** (drift reconciliation): the engine re-reads the remote target and looks for tracked `target_datafile` rows whose remote copy is **missing** on the remote (external deletion, a cross-KB `DELETE`, a crash mid-pass). For each drifted file it writes the link's message as `Healing {datafile_id}...` and re-pushes it via `base_update_datafile()`. This only runs for sinks that expose a `_kb_files(kb_id)` method (see Section 9); sinks without it are skipped. After healing, the engine calls `svc.flush()` so any buffered heal upserts land (no-op for non-batching sinks).
+7. **Finalize link statuses**: **only now**, after the whole recon (blocking batches and healing) has finished, the engine sets each link back to `ENABLED` with the summary message `Reconciled: +{a} added, ~{u} updated, -{r} removed`. Healed files are **merged into the `~N updated` count** — there is no separate "healed" field in the message. Because finalization is deferred until after Pass III, the link never reports success early while the worker is still blocking on uploads.
+8. **Orphan cleanup**: when the last subscription is unlinked from a Target, the engine calls `remove_target()` and deletes the target row.
 
 ### Per-File Resilience
 
-The engine wraps **each** add/update/remove call in its own `try/except`. A failure on one file logs a warning (`sink_add_failed`, `sink_update_failed`, `sink_remove_failed`) and does **not** abort the rest of the recon. (Since `add_target()` is now called at target create/update time by the Manager — never by recon — its failures surface as API errors before any queue items are pushed.)
+Failures inside **Pass I** are logged and **abort that target's pass**: `_reconcile_pass1` logs (`sink_add_failed`, `sink_update_failed`, `sink_remove_failed`) and re-raises. The recon loop catches the exception, transitions the link to `ERROR` (which triggers the one-time notification email), and moves on to the next Target — the remaining Targets, Pass II, and Pass III for the subscription still run. This is why uploads must be **idempotent where documented and raise clean exceptions otherwise**: a failed link is not retried mid-pass; the next recon picks it up again. (Since `add_target()` is now called at target create/update time by the Manager — never by recon — its failures surface as API errors before any queue items are pushed.)
 
 ### Mid-Run Cancellation
 
@@ -403,6 +417,7 @@ If the user **removes the subscription from the Data Target**, **disables the li
 |-------|-----------|
 | **Link removed** (row deleted or `DELETED`) | Uploads are halted; files already uploaded are removed from the remote + their join rows are cleaned up; the link row is deleted. The target itself is kept (it may have other subscriptions). |
 | **Link disabled** | Uploads are halted; rows for files already uploaded are kept (they really are on the remote). The link stays `DISABLED`. The next recon finishes the job when re-enabled. |
+| **Outside upload window** (`"outside_schedule"`) | Upserts are deferred, NOT an error. The link is reset to `ENABLED` with message `Outside upload window — deferred`; files stay pending on the FS for the next recon when the window reopens. Removals are never gated. |
 | **Subscription deleted** | All target uploads are halted immediately; Pass II is skipped. The worker's subscription-cleanup cycle runs next and handles removal of all linked targets' remote files + rows. |
 | **Subscription disabled** | All target uploads are halted immediately; Pass II is skipped. No cleanup — files already on the remote persist for when the sub is re-enabled. |
 
@@ -432,13 +447,30 @@ def __init__(self, target_row, db):
 
 ### First-Class Target Flags
 
-Beyond `target_extra_params`, every Target row carries a **first-class boolean** that the base class reads automatically:
+Beyond `target_extra_params`, every Target row carries a set of **first-class fields** that the base class reads automatically:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `include_path_in_filename` | `bool` | `false` | When enabled, the **remote filename** includes the full directory structure under `/output/`. Instead of `autokb_{target}_{basename}`, the scheme becomes `autokb_{target}_{rel_dir_with_underscores}_{basename}`. See `BaseSink.remote_file_name()` below. |
+| `access_level` | `"PRIVATE"`/`"PUBLIC"` | `"PRIVATE"` | Destination visibility. The base class exposes it as `self.access_level`; a sink may use it when **provisioning** the remote container (e.g. OpenWebUI grants public read on a `PUBLIC` knowledge base). It is applied once at create time and not re-applied on later edits — changing it after the remote container exists has no effect. |
+| `schedule_start` / `schedule_end` | `"HH:MM"` or `""` | blank | Optional daily upload window. The base class parses it into `self._schedule_window`; the recon engine gates adds/updates through `self._check_schedule()` (§6.7). Removals are never gated. Overnight windows (`end <= start`) wrap midnight, e.g. `22:00` → `06:00`. |
+| `pages_per_batch` | `int` 1–100 | `10` | Batch size for sinks that group page-bounded upserts. The base class exposes it as `self.pages_per_batch`. Batching sinks read it to decide when `flush()` fires a batch (§7). |
 
-This field is toggled through the **checkbox** in the create/edit Target form (not via the JSON textarea). Every sink benefits from it immediately: `BaseSink.remote_file_name(path)` checks the flag before formatting the name.
+`include_path_in_filename` is toggled through the **checkbox**, `access_level` through a **select**, `schedule_start`/`schedule_end` through **time pickers**, and `pages_per_batch` through a **number input** in the create/edit Target form (not via the JSON textarea). The first three are creation-only in the UI; `pages_per_batch` remains editable on update.
+
+### `_kb_files()` — the Pass III healing hook
+
+A sink that can enumerate the documents in its remote container may define:
+
+```python
+def _kb_files(self, kb_id) -> list:
+    return [{"id": f["id"]} for f in ...]
+```
+
+- The recon engine calls it in **Pass III** with `self.remote_target_id`; the returned `[{"id": ...}]` list is compared against the locally-tracked remote ids to find drift (§8).
+- **Optional** — sinks without this method are skipped by Pass III. Sinks with it get automatic healing of externally-deleted files.
+- When enumerating, include documents in **all** processing states on the remote (processed *and* still pending), never only the completed set — otherwise an in-flight upload could be mistaken for a deleted file and wrongly "healed". LightRAG's `_kb_files` unions every status bucket for exactly this reason.
+- The method receives `kb_id` purely for signature compatibility in single-KB sinks; multi-KB sinks should scope the listing to that KB.
 
 ### Create-Target API Fields
 
@@ -451,6 +483,10 @@ The POST `/api/sinks/{service_id}/targets` endpoint accepts:
 | `api_key` | str | API key — encrypted at rest, decrypted before your `__init__`. |
 | `target_extra_params` | str/obj | Free-form JSON; becomes `self.target_extra_params`. |
 | `subscription_ids` | list | Subscriptions to link; each linked sub gets a `SINK_ONLY` enqueue so recon runs immediately. |
+| `include_path_in_filename` | bool | Creation-only — embeds the full `/output/` directory into remote filenames. |
+| `access_level` | str | Creation-only — `"PRIVATE"` (default) or `"PUBLIC"`. Applied once when the remote container is provisioned. |
+| `schedule_start` / `schedule_end` | str | Optional daily upload window as `"HH:MM"` — must be set together or both blank. |
+| `pages_per_batch` | int | 1–100 (default 10); the batching sink's page ceiling. |
 
 ---
 
@@ -461,7 +497,7 @@ The POST `/api/sinks/{service_id}/targets` endpoint accepts:
 When a remote operation fails, raise an exception (a `RuntimeError` with a short human-readable message is the convention). The engine:
 
 - logs the failure,
-- continues with the other files (per-file resilience), or marks the link `ERROR` for `add_target()` failures,
+- marks the link `ERROR` for that target (which aborts that target's Pass I — see §8 Per-File Resilience), or `ERROR` for `add_target()` failures,
 - sends one notification email on transition to `ERROR`.
 
 Do not return `None`/`""` from `add_datafile()` or `add_target()` as a way to signal failure — an empty remote id will corrupt tracking. Raise instead.
@@ -715,6 +751,14 @@ This sink demonstrates every concept in this guide:
 
 To adapt it to a real service (Open WebUI, Cognee, a WebDAV server, etc.), change the HTTP calls inside the six methods to match that service's API. The surrounding contract — what each method is for, what it returns, and when the engine calls it — stays identical.
 
+This sink is intentionally **non-batching**: every `base_add_datafile`/`base_update_datafile` call drives one immediate remote write, and it does not implement `_kb_files()`, so it gets no Pass III healing and reports no `Upserting {shown} of {planned} to remote sink...` progress. That is fully supported. The optional extensions described in Sections 7–9 are additive:
+
+- **Batching** (`flush()`, `pages_per_batch`) pays off when the remote service processes uploads asynchronously and groups of files are far cheaper to submit together (LightRAG is one such case). A batching sink buffers add/update ops in an override of `base_add_datafile`/`base_update_datafile`, does the real write — and the DB rows — from `flush()`, and fires `self._report_progress(done, in_flight)` per batch so the engine can show `Upserting {shown} of {planned} to remote sink...`.
+- **Pass III healing** (`_kb_files(kb_id)`) restores remote files deleted behind AutoKB's back; sinks without it are simply skipped.
+- **Upload windows** (`schedule_start`/`schedule_end`) and **access level** are Target-level fields the base class and engine handle for you; a sink only needs to consult `self.access_level` when provisioning the remote container, if its service has a public/private notion.
+
+Think of the walkthrough as the minimal core and Sections 7–9 as the lever kit you pull out when your remote service needs them.
+
 ---
 
 ## 14. File Placement
@@ -748,3 +792,9 @@ Before considering your sink complete, verify:
 - [ ] Remote calls use a timeout and a `_check`-style HTTP guard that surfaces a readable error
 - [ ] Any new dependencies are documented and conveyed to the Docker image maintainer
 - [ ] Icon file (if not using `default_icon.png`) is placed in `/assets/{yourSink}.png` or uploaded via Developer Lab (filename is auto-derived from the sink name)
+
+**Optional extensions** (see Sections 7–9):
+
+- [ ] If you batch upserts: override `flush()` to send remaining buffered ops, honor `self.pages_per_batch`, write the DB rows from `flush()` (not per call), and fire `self._report_progress(done, in_flight)` per batch so the engine shows `Upserting {shown} of {planned} to remote sink...`
+- [ ] If you want Pass III healing: implement `_kb_files(kb_id) -> [{"id": ...}]` enumerating **all** processing states on the remote (never only the processed set), so a pending doc is not mistaken for deleted
+- [ ] If your remote service has a public/private notion: consult `self.access_level` when provisioning the container in `add_target()`

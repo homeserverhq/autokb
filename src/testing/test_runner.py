@@ -2028,15 +2028,35 @@ class _MockSink(BaseSink):
 class _BatchMockSink(_MockSink):
     """Batching fake sink — mirrors LightRagSink's page-bounded upsert queue.
 
-    ``base_update_datafile`` only buffers the op; the intended remote write
-    (and its DB row) happens only from ``flush()``. Lets Pass III tests prove
-    the recon engine flushes a heal batch instead of dropping it.
+    ``base_add_datafile``/``base_update_datafile`` buffer ops; the intended
+    remote write (and its DB row) happens from ``flush()``. A batch is auto-
+    flushed once it exceeds ``_mini_page`` buffered ops (like LightRagSink's
+    page ceiling) and on explicit ``flush()``. Progress is reported per batch via
+    the base-class hook. Lets Pass III tests prove the recon engine flushes a
+    heal batch instead of dropping it.
     """
 
     def __init__(self, target_row, db):
         super().__init__(target_row, db)
         self._pending = []
         self.flush_calls = 0
+        self._mini_page = 2
+        self._completed_upserts = 0
+
+    def _enqueue(self, op):
+        self._pending.append(op)
+        if len(self._pending) > self._mini_page:
+            self.flush()
+
+    def base_add_datafile(self, sub_id, path, known_hash=None):
+        import os as _os
+        size = _os.path.getsize(path)
+        mtime = _os.path.getmtime(path)
+        h = known_hash if known_hash is not None else compute_file_hash(path)
+        df = self.db.get_or_create_datafile(sub_id, path, size, mtime, h)
+        if self.db.get_target_datafile(self.target_id, df.id):
+            return
+        self._enqueue(("add", df.id, h, None, path))
 
     def base_update_datafile(self, datafile_id, new_hash):
         t_df = self.db.get_target_datafile(self.target_id, datafile_id)
@@ -2045,15 +2065,25 @@ class _BatchMockSink(_MockSink):
         df = self.db.get_datafile(datafile_id)
         if df is None:
             return
-        self._pending.append((datafile_id, new_hash, t_df.remote_datafile_id, df.path))
+        self._enqueue(("update", datafile_id, new_hash, t_df.remote_datafile_id, df.path))
 
     def flush(self):
         self.flush_calls += 1
         ops, self._pending = self._pending, []
-        for datafile_id, new_hash, remote_id, path in ops:
-            new_remote = self.update_datafile(remote_id, path)
-            self.db.update_target_datafile_remote_id(self.target_id, datafile_id, new_remote)
-            self.db.update_target_datafile_hash(self.target_id, datafile_id, new_hash)
+        if not ops:
+            return
+        done = self._completed_upserts
+        self._report_progress(done, len(ops))
+        for kind, datafile_id, new_hash, remote_id, path in ops:
+            if kind == "add":
+                new_remote = self.add_datafile(path)
+                self.db.insert_target_datafile(self.target_id, datafile_id, new_remote, new_hash)
+            else:
+                new_remote = self.update_datafile(remote_id, path)
+                self.db.update_target_datafile_remote_id(self.target_id, datafile_id, new_remote)
+                self.db.update_target_datafile_hash(self.target_id, datafile_id, new_hash)
+        self._completed_upserts += len(ops)
+        self._report_progress(self._completed_upserts, 0)
 
 
 def _sink_create_fixtures(db):
@@ -3122,9 +3152,9 @@ def _dkb_test_pass3_heal_update(db, sub, ds):
     svc._kb_files = lambda kb: []  # remote lost the file
     links = db.list_targets_for_subscription(sub)
     with patch("worker.sink_recon._get_service", return_value=svc):
-        healed = _pass3_heal_remote(sub_row, links, db, None, None, _TLog(), [])
-    if healed != 1:
-        return False, f"expected 1 healed got {healed}"
+        healed_map = _pass3_heal_remote(sub_row, links, db, None, None, _TLog(), [])
+    if sum(healed_map.values()) != 1:
+        return False, f"expected 1 healed got {healed_map}"
     if not any(c[0] == "update_datafile" for c in svc.calls):
         return False, "update_datafile not invoked for drift"
     t_df2 = db.get_target_datafile(ds.id, df.id)
@@ -3147,6 +3177,7 @@ def _dkb_test_pass3_heal_flush_batch(db, sub, ds):
     svc.remote_target_id = "kb-1"
     db.set_target_remote_id(ds.id, "kb-1")
     svc.base_add_datafile(sub, path)
+    svc.flush()  # materialize the tracked add row (buffered until flush)
     df = db.get_datafile_by_path(path)
     if df is None:
         return False, "datafile not created"
@@ -3156,9 +3187,9 @@ def _dkb_test_pass3_heal_flush_batch(db, sub, ds):
     svc._kb_files = lambda kb: []  # remote lost the file
     links = db.list_targets_for_subscription(sub)
     with patch("worker.sink_recon._get_service", return_value=svc):
-        healed = _pass3_heal_remote(sub_row, links, db, None, None, _TLog(), [])
-    if healed != 1:
-        return False, f"expected 1 healed got {healed}"
+        healed_map = _pass3_heal_remote(sub_row, links, db, None, None, _TLog(), [])
+    if sum(healed_map.values()) != 1:
+        return False, f"expected 1 healed got {healed_map}"
     if svc.flush_calls < 1:
         return False, "batching sink was not flushed after Pass III"
     if svc._pending:
@@ -3169,6 +3200,92 @@ def _dkb_test_pass3_heal_flush_batch(db, sub, ds):
     if t_df2 is None or t_df2.remote_datafile_id != _MOCK_REMOTE_UPDATED:
         return False, "buffered heal never landed in the DB row"
     return True, "Pass III flushes batching sink heal OK"
+
+
+def _dkb_test_recon_progress_upserting(db, sub, ds):
+    """Recon on a batching sink emits 'Upserting X of Y to remote sink...'
+    progress per batch and only writes the final Reconciled message afterward."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    sub_row = db.get_subscription(sub)
+    sub_name = _get_sub_name(db, sub)
+    for i in range(5):
+        _write_output_file_test(sub_name, f"up{i}.md", f"# file {i}\n")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _BatchMockSink(ds_row, db)
+    svc.remote_target_id = "kb-1"
+    db.set_target_remote_id(ds.id, "kb-1")
+
+    orig = db.set_target_subscription_status
+    recorded = []
+
+    def wrap(target_id, sub_id_, status, message=None):
+        recorded.append((status, message))
+        return orig(target_id, sub_id_, status, message=message)
+
+    db.set_target_subscription_status = wrap
+    try:
+        with patch("worker.sink_recon._get_service", return_value=svc):
+            reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    finally:
+        db.set_target_subscription_status = orig
+
+    upserts = [m for st, m in recorded if m and m.startswith("Upserting ")]
+    if not upserts:
+        return False, "no 'Upserting X of Y to remote sink...' progress message"
+    if "of 5 to remote sink..." not in upserts[-1]:
+        return False, f"progress never reached 'of 5': {upserts[-1]}"
+    finals = [m for st, m in recorded if m and st == STATE_ENABLED]
+    if "Reconciled: +5 added, ~0 updated, -0 removed" not in finals:
+        return False, f"unexpected final message: {finals}"
+    link = db.get_target_subscription(ds.id, sub)
+    if link is None or link.status != STATE_ENABLED:
+        return False, f"link not ENABLED after recon, got {None if link is None else link.status}"
+    return True, "Upserting progress + final Reconciled OK"
+
+
+def _dkb_test_recon_heal_merge(db, sub, ds):
+    """Pass III 'Healing <id>...' is emitted, and the healed file is reported
+    as 'updated' (merged) in the final Reconciled message."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    sub_row = db.get_subscription(sub)
+    sub_name = _get_sub_name(db, sub)
+    path = _write_output_file_test(sub_name, "healup.md", "# heal merge\n")
+    ds_row = db.get_target(ds.id)
+    ds_row.api_key = db.decrypt_target_api_key(ds_row)
+    svc = _BatchMockSink(ds_row, db)
+    svc.remote_target_id = "kb-1"
+    db.set_target_remote_id(ds.id, "kb-1")
+    svc.base_add_datafile(sub, path)
+    svc.flush()  # tracked row exists so pass1 doesn't re-add it
+
+    orig = db.set_target_subscription_status
+    recorded = []
+
+    def wrap(target_id, sub_id_, status, message=None):
+        recorded.append((status, message))
+        return orig(target_id, sub_id_, status, message=message)
+
+    db.set_target_subscription_status = wrap
+    try:
+        with patch("worker.sink_recon._get_service", return_value=svc):
+            svc._kb_files = lambda kb: []  # remote lost the file -> heal
+            reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    finally:
+        db.set_target_subscription_status = orig
+
+    healing = [m for st, m in recorded if m and m.startswith("Healing ")]
+    if not healing:
+        return False, "no 'Healing <id>...' message during Pass III"
+    finals = [m for st, m in recorded if m and st == STATE_ENABLED]
+    if "Reconciled: +0 added, ~1 updated, -0 removed" not in finals:
+        return False, f"healed file not reported as updated: {finals}"
+    link = db.get_target_subscription(ds.id, sub)
+    if link is None or link.status != STATE_ENABLED:
+        return False, f"link not ENABLED after heal recon, got {None if link is None else link.status}"
+    return True, "Healing msg + heal-merged-into-updated OK"
 
 
 def _run_dkb_unit_tests():
@@ -3211,6 +3328,8 @@ def _run_dkb_unit_tests():
         ("DKB Delete — orphan best-effort deletes rows", lambda db, sub, ds: _dkb_test_delete_orphan_best_effort(db, sub, ds)),
         ("DKB Pass III — heal update path", lambda db, sub, ds: _dkb_test_pass3_heal_update(db, sub, ds)),
         ("DKB Pass III — heal flush on batching sink", lambda db, sub, ds: _dkb_test_pass3_heal_flush_batch(db, sub, ds)),
+        ("DKB Recon — Upserting progress + final message", lambda db, sub, ds: _dkb_test_recon_progress_upserting(db, sub, ds)),
+        ("DKB Recon — Healing msg + healed-into-updated", lambda db, sub, ds: _dkb_test_recon_heal_merge(db, sub, ds)),
     ]
 
     results = []

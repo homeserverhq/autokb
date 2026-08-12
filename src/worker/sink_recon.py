@@ -190,6 +190,10 @@ def reconcile_subscription_targets(
     remove_count = 0
     error_ds_names = []
     prog = 0
+    # per-link Pass I result summaries, finalized only after Pass III (so the
+    # link reflects the whole recon — including blocking batch upserts and any
+    # healing — instead of reporting "done" prematurely).
+    summaries = {}
 
     for ds_link in ds_links:
         ds_status = ds_link.status
@@ -248,15 +252,7 @@ def reconcile_subscription_targets(
             remove_count += pass1_count[2]
             prog += 1
             _hb(db, sub_id, queue, prog % 100)
-
-            # Set status ENABLED if it was ENQUEUED
-            if ds_status == STATE_ENQUEUED:
-                db.set_target_subscription_status(target_id, sub_id, STATE_ENABLED)
-
-            msg = f"Reconciled: +{pass1_count[0]} added, ~{pass1_count[1]} updated, -{pass1_count[2]} removed"
-            db.set_target_subscription_status(
-                target_id, sub_id, STATE_ENABLED, message=msg,
-            )
+            summaries[target_id] = pass1_count
 
         except SinkCancelledError as exc:
             # The link/sub was removed or disabled mid-recon — this is NOT an
@@ -266,6 +262,7 @@ def reconcile_subscription_targets(
                 sub_name, error_ds_names, queue,
             )
             if abort_all:
+                _finalize_link_statuses(db, sub_id, summaries, {}, log)
                 log.info(
                     "sink_recon_aborted",
                     sub_id=sub_id, name=sub_name, target_id=target_id, reason=exc.kind,
@@ -294,19 +291,39 @@ def reconcile_subscription_targets(
 
     # --- Pass III: heal remote drift — DB rows missing on the remote ---
     try:
-        healed_count = _pass3_heal_remote(
+        healed_map = _pass3_heal_remote(
             sub, ds_links, db, sink_registry, queue, log, error_ds_names,
         )
     except Exception as exc:
-        healed_count = 0
+        healed_map = {}
         log.error("sink_pass3_failed", sub_id=sub_id, error=str(exc))
+
+    healed_total = sum(healed_map.values())
+    _finalize_link_statuses(db, sub_id, summaries, healed_map, log)
 
     log.info(
         "sink_recon_complete",
         sub_id=sub_id, name=sub_name,
-        added=add_count, updated=update_count, removed=remove_count,
-        healed=healed_count, errors=len(error_ds_names),
+        added=add_count, updated=update_count + healed_total, removed=remove_count,
+        healed=healed_total, errors=len(error_ds_names),
     )
+
+
+def _finalize_link_statuses(db, sub_id, summaries, healed_map, log) -> None:
+    """Write each processed link back to ENABLED with its final Reconciled message.
+
+    Called only after the entire recon (including blocking batch upserts and any
+    Pass III healing) has finished, so the link never reports success early.
+    Healed files are reported as "updated" (merged count), per product intent.
+    """
+    for tid, counts in summaries.items():
+        add_n, upd_n, rem_n = counts
+        upd_n += healed_map.get(tid, 0)
+        msg = f"Reconciled: +{add_n} added, ~{upd_n} updated, -{rem_n} removed"
+        try:
+            db.set_target_subscription_status(tid, sub_id, STATE_ENABLED, message=msg)
+        except Exception as exc:  # noqa: BLE001
+            log.error("sink_finalize_failed", target_id=tid, error=str(exc))
 
 
 def _get_service(ds_row, db, sink_registry, log):
@@ -350,6 +367,27 @@ def _reconcile_pass1(
                 raise
 
     # Pass I.b — Add / update files that are on the FS.
+    planned = 0
+    for fpath in fs_files:
+        df = db.get_datafile_by_path(fpath)
+        ds_df = ds_df_by_datafile.get(df.id) if df else None
+        if df is None or ds_df is None:
+            planned += 1  # add
+        elif _file_matches_db(fpath, df):
+            if ds_df.hash != df.hash:
+                planned += 1  # update
+        else:
+            planned += 1  # remote hash drift -> update
+
+    if planned > 0:
+        def _progress(done, in_flight):
+            shown = min(done + in_flight, planned)
+            db.set_target_subscription_status(
+                target_id, sub_id, STATE_IN_PROGRESS,
+                message=f"Upserting {shown} of {planned} to remote sink...",
+            )
+        svc.set_progress_callback(_progress)
+
     for fpath, st in fs_files.items():
         svc._check_cancel()
         svc._check_schedule()
@@ -506,17 +544,17 @@ def _pass2_akb_datafiles(sub, db, output_dir, fs_files, log) -> None:
             db.update_datafile_stats(df.id, st.st_size, st.st_mtime, real_hash, checked_at)
 
 
-def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_names) -> int:
+def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_names) -> dict:
     """Pass III — reconcile our DB against the remote target.
 
     For every tracked datafile whose remote copy is missing on the remote
     (regardless of *why* it drifted — external deletion, a cross-KB ``DELETE``,
-    a crash mid-pass), re-push it so both sides agree again. Returns the
-    number of files healed.
+    a crash mid-pass), re-push it so both sides agree again. Returns a map of
+    ``{target_id: files_healed}``.
     """
     sub_id = sub.id
     sub_name = sub.name
-    healed = 0
+    healed_map = {}
 
     for ds_link in ds_links:
         if ds_link.status not in (STATE_ENABLED, STATE_IN_PROGRESS, STATE_ENQUEUED):
@@ -549,6 +587,7 @@ def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_na
             )
             continue
 
+        link_healed = 0
         for t_df in rows:
             svc._check_cancel()
             df = db.get_datafile(t_df.datafile_id)
@@ -563,8 +602,12 @@ def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_na
             try:
                 # Re-push the current content; the sink's duplicate-content
                 # recovery rewrites the remote to point at the fresh id.
+                db.set_target_subscription_status(
+                    target_id, sub_id, STATE_IN_PROGRESS,
+                    message=f"Healing {t_df.datafile_id}...",
+                )
                 svc.base_update_datafile(df.id, df.hash)
-                healed += 1
+                link_healed += 1
             except Exception as exc:
                 log.error("sink_pass3_heal_failed", datafile_id=df.id, target_id=target_id, error=str(exc))
                 _transition_ds_error(
@@ -572,11 +615,12 @@ def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_na
                     sub_name, ds_row.name, str(exc), error_ds_names,
                 )
                 break
+        healed_map[target_id] = link_healed
 
         # Send any heal upserts the sink buffered (no-op for the non-batching
         # sinks; LightRAG batches page-bounded upserts until flush()).
         svc.flush()
-    return healed
+    return healed_map
 
 
 def _invoke_remove(ds_link, target_id, ds_df, db, sink_registry, log, sub_name, error_ds_names):

@@ -82,6 +82,7 @@ class BaseSink(ABC):
         self._output_root = "/output"
         self.db = db
         self._cancel_check = None
+        self._progress_cb = None
         self._schedule_window = parse_schedule_window(
             getattr(target_row, "schedule_start", None),
             getattr(target_row, "schedule_end", None),
@@ -111,6 +112,26 @@ class BaseSink(ABC):
             kind = self._cancel_check()
             if kind:
                 raise SinkCancelledError(kind)
+
+    def set_progress_callback(self, cb) -> None:
+        """Install a progress callback for the recon engine's status updates.
+
+        ``cb`` is called as ``cb(done, in_flight)`` where ``done`` is the
+        number of upserts already persisted to the remote and ``in_flight``
+        is the size of the batch currently being sent. Batching sinks fire it
+        on each batch flush; the recon engine turns it into a human-readable
+        ``Upserting X of Y to remote sink...`` status message on the link.
+        No-op when never set.
+        """
+        self._progress_cb = cb
+
+    def _report_progress(self, done: int, in_flight: int) -> None:
+        """Notify the installed progress callback (best-effort)."""
+        if self._progress_cb is not None:
+            try:
+                self._progress_cb(done, in_flight)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _check_schedule(self) -> None:
         """Abort the recon pass when outside this target's upload window.

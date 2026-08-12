@@ -395,8 +395,10 @@ class LightRagSink(BaseSink):
         pages = op.get("pages", 1)
         if self._batch_ops and self._batch_pages + pages > self.pages_per_batch:
             self._flush_ops(self._batch_ops)
-            self._batch_ops = []
-            self._batch_pages = 0
+        self._batch_ops = []
+        self._batch_pages = 0
+        # Upserts persisted to the remote across the whole pass, for progress.
+        self._completed_upserts = 0
         self._batch_ops.append(op)
         self._batch_pages += pages
 
@@ -478,7 +480,14 @@ class LightRagSink(BaseSink):
                 track_id = self._do_upload(op["path"])
             staged.append((op, track_id))
 
+        # Report the batch as in-flight (done + this batch) before blocking,
+        # so the recon engine can update the link's status message.
+        self._report_progress(self._completed_upserts, len(staged))
+
         doc_ids = self._wait_for_batch([tid for _, tid in staged])
+
+        self._completed_upserts += len(staged)
+        self._report_progress(self._completed_upserts, 0)
 
         for op, track_id in staged:
             doc_id = doc_ids.get(track_id)

@@ -572,6 +572,10 @@ def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_na
                     sub_name, ds_row.name, str(exc), error_ds_names,
                 )
                 break
+
+        # Send any heal upserts the sink buffered (no-op for the non-batching
+        # sinks; LightRAG batches page-bounded upserts until flush()).
+        svc.flush()
     return healed
 
 

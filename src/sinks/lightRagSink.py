@@ -310,6 +310,39 @@ class LightRagSink(BaseSink):
                 f"{self.metadata['name']} clear documents returned status={status}"
             )
 
+    def _kb_files(self, kb_id: str | None = None) -> list:
+        """Enumerate the documents currently on the remote knowledge base.
+
+        Single-KB mode means the connected LightRAG instance is one shared
+        knowledge base, so ``kb_id`` is accepted purely for signature
+        compatibility with the recon engine's Pass III heal pass and ignored.
+        Returns ``[{"id": ...}]`` for every document in *all* processing
+        statuses, so a healing decision never mistakes a still-pending
+        document for a deleted one.
+        """
+        self._check_cancel()
+        resp = requests.get(
+            self._url("documents"),
+            headers=self._headers(),
+            timeout=self._TIMEOUT,
+        )
+        self._check(resp, "list documents")
+        data = resp.json()
+        statuses = data.get("statuses") if isinstance(data, dict) else None
+        if not isinstance(statuses, dict):
+            raise RuntimeError(
+                f"{self.metadata['name']} list documents returned an unexpected payload"
+            )
+        results = []
+        seen = set()
+        for docs in statuses.values():
+            if isinstance(docs, list):
+                for doc in docs:
+                    if isinstance(doc, dict) and doc.get("id") and doc["id"] not in seen:
+                        seen.add(doc["id"])
+                        results.append({"id": doc["id"]})
+        return results
+
     def _upload_file(self, path: str) -> str:
         """Upload *path* and return its document id, cleaning up on cancel."""
         self._check_cancel()

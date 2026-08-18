@@ -1,5 +1,4 @@
-"""HSHQ help plugin: reads *.json from a local dir and emits one markdown
-help file per entry (# Function Name / Description)."""
+"""HSHQ help plugin: extracts descriptions from Script-Server for each function."""
 
 import glob
 import hashlib
@@ -21,8 +20,7 @@ class hshqPlugin(BaseSubscription):
         "name": "hshqPlugin",
         "display_name": "HSHQ Help",
         "description": (
-            "Reads HSHQ *.json files from a local directory and writes one "
-            "markdown help file per entry (Function Name and Description)."
+            "Scans all functions in HSHQ Script-Server and extracts the function name and description to .md."
         ),
         "sub_type": "SCHEDULED",
     }

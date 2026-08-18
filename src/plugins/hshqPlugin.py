@@ -19,6 +19,7 @@ def _file_hash(path):
 class hshqPlugin(BaseSubscription):
     metadata = {
         "name": "hshqPlugin",
+        "display_name": "HSHQ Help",
         "description": (
             "Reads HSHQ *.json files from a local directory and writes one "
             "markdown help file per entry (Function Name and Description)."

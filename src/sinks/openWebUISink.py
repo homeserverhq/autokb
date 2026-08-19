@@ -17,7 +17,7 @@ import time
 
 import requests
 
-from utils.misc_utils import SinkCancelledError, sanitize_name
+from utils.misc_utils import SinkCancelledError, guess_content_type, sanitize_name
 from utils.sink_base import BaseSink
 
 
@@ -92,7 +92,7 @@ class OpenWebUISink(BaseSink):
         self._check_cancel()
         fname = self._remote_file_name(path)
         with open(path, "rb") as f:
-            files = {"file": (fname, f, "application/octet-stream")}
+            files = {"file": (fname, f, guess_content_type(path))}
             resp = requests.post(
                 self._url("files/"),
                 headers=self._headers(),

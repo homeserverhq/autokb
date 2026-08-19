@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import mimetypes
 import os
 import re
 import smtplib
@@ -596,6 +597,38 @@ def in_schedule_window(now: datetime, window: Tuple[int, int]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# guess_content_type
+# ---------------------------------------------------------------------------
+# Files we want OpenWebUI-style consumers to treat as text so their own
+# text loader is used instead of a binary/OCR extraction engine.
+_TEXTLIKE_EXTS = {
+    ".txt", ".text", ".log", ".md", ".markdown", ".rst", ".csv", ".tsv",
+    ".html", ".htm", ".xml", ".yaml", ".yml", ".toml", ".json", ".jsonl",
+    ".sql", ".sh", ".bash", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx",
+    ".java", ".go", ".rs", ".py", ".rb", ".php", ".pl", ".js", ".ts",
+    ".jsx", ".tsx", ".css", ".ini", ".conf", ".env",
+}
+_TEXT_OVERRIDES = {".md": "text/markdown", ".markdown": "text/markdown"}
+
+
+def guess_content_type(path: str) -> str:
+    """Best-effort MIME type for *path* for upload purposes.
+
+    Text-like extensions are guaranteed a ``text/*`` type so consumers use a
+    text loader; everything else is resolved via stdlib ``mimetypes`` with an
+    ``application/octet-stream`` fallback. The extension is read from the
+    original *path* (not any sanitized remote name).
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _TEXT_OVERRIDES:
+        return _TEXT_OVERRIDES[ext]
+    if ext in _TEXTLIKE_EXTS:
+        return "text/plain"
+    guessed, _ = mimetypes.guess_type(path)
+    return guessed or "application/octet-stream"
+
+
+# ---------------------------------------------------------------------------
 # SubscriptionCancelledError
 # ---------------------------------------------------------------------------
 class SubscriptionCancelledError(Exception):
@@ -633,6 +666,7 @@ class SinkCancelledError(Exception):
 __all__ = [
     "get_logger",
     "sanitize_name",
+    "guess_content_type",
     "plugin_id_from_metadata",
     "resolve_service_icon",
     "PasswordCipher",

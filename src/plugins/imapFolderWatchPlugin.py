@@ -38,7 +38,7 @@ class imapFolderWatchPlugin(BaseSubscription):
         self._password = ""
         self._folder = "INBOX"
         self._monitor_subfolders = True
-        self._chunking_enabled = True
+        self._chunking_enabled = False
         self._sep = "/"
 
     def get_schema(self):
@@ -58,7 +58,7 @@ class imapFolderWatchPlugin(BaseSubscription):
                 },
                 "chunking_enabled": {
                     "type": "boolean",
-                    "default": True,
+                    "default": False,
                     "description": "Chunk emails by token budget (~490 tokens per file). Disable to write the full email as a single document.",
                 },
             },
@@ -73,7 +73,7 @@ class imapFolderWatchPlugin(BaseSubscription):
         self._password = config["password"]
         self._folder = config.get("folder", "INBOX")
         self._monitor_subfolders = bool(config.get("monitor_subfolders", True))
-        self._chunking_enabled = bool(config.get("chunking_enabled", True))
+        self._chunking_enabled = bool(config.get("chunking_enabled", False))
 
     async def monitor(self, config, cancel_token):
         self._apply_config(config)

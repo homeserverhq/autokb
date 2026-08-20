@@ -67,7 +67,7 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
                 },
                 "chunking_enabled": {
                     "type": "boolean",
-                    "default": True,
+                    "default": False,
                     "description": "Chunk page content through Docling (~490 tokens per file). Disable for one file per page.",
                 },
                 "docling_url": {
@@ -89,7 +89,7 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
         url = config["url"]
         max_depth = config.get("max_depth", 10)
         max_pages = config.get("max_pages", 0)
-        chunking_enabled = config.get("chunking_enabled", True)
+        chunking_enabled = config.get("chunking_enabled", False)
         dl_url = (config.get("docling_url") or os.environ.get("DOCLING_URL") or "http://docling-app:5001").rstrip("/")
         dl_key = config.get("docling_api_key") or os.environ.get("DOCLING_API_KEY") or ""
 

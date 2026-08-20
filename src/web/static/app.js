@@ -985,7 +985,7 @@
         input = `<input type="${inputType}" name="${key}" value="${escapeHtml(resolvedValue ?? '')}" ${isPassword ? 'autocomplete="new-password"' : ''} />`;
       }
       div.innerHTML = `
-        <label>${humanizeKey(key)}${isRequired ? ' *' : ''} ${isPassword ? '<small>(password)</small>' : ''}</label>
+        <label>${humanizeKey(key)}${isRequired ? ' *' : ''}${spec.ui_hint ? ` - ${escapeHtml(spec.ui_hint)}` : ''} ${isPassword ? '<small>(password)</small>' : ''}</label>
         ${input}
       `;
       fields.appendChild(div);

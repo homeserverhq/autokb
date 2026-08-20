@@ -50,15 +50,12 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                     "minimum": 1,
                     "description": "Paperless storage path ID to watch",
                 },
-                "owner_username": {
+                "document_filter": {
                     "type": "string",
                     "default": "",
-                    "description": (
-                        "Optional: only process documents owned by this "
-                        "username. Required for storage paths that use "
-                        "{{owner_username}} in their template (e.g. "
-                        "PersonalProcessed). Leave empty for shared paths."
-                    ),
+                    "format": "textarea",
+                    "description": "Extra filter params appended to the /api/documents/ call to narrow results. Leave blank to return all documents in the storage path.",
+                    "ui_hint": "Example: owner__id=7&document_type__id=2&tags__id__in=3,5",
                 },
                 "paperless_url": {
                     "type": "string",
@@ -122,7 +119,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         dl_url = (config.get("docling_url") or os.environ.get("DOCLING_URL") or "http://docling-app:5001").rstrip("/")
         dl_key = config.get("docling_api_key") or os.environ.get("DOCLING_API_KEY") or ""
         sp_id = config["storage_path_id"]
-        owner_username = config.get("owner_username", "").strip()
+        document_filter = config.get("document_filter", "")
         chunking_enabled = config.get("chunking_enabled", False)
         use_paperless_content = bool(config.get("use_paperless_content", True))
 
@@ -131,26 +128,14 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         self.log.info(
             "plugin_start",
             storage_path_id=sp_id,
-            owner_username=owner_username or "(none)",
+            document_filter=document_filter or "(none)",
         )
 
-        # 1. Resolve owner username to ID if provided
-        owner_id = None
-        if owner_username:
-            progress_callback(2, message="Resolving owner...")
-            try:
-                owner_id = self._resolve_owner(pl_url, pl_headers, owner_username)
-                self.log.info("owner_resolved", username=owner_username, id=owner_id)
-            except Exception as exc:
-                self.log.error("owner_resolve_failed", username=owner_username, error=str(exc))
-                progress_callback(100, message=f"Failed to resolve owner: {exc}")
-                raise
-
-        # 2. Query Paperless for documents in the storage path
+        # 1. Query Paperless for documents in the storage path
         progress_callback(5, message="Querying Paperless...")
         try:
             documents = self._query_documents(
-                pl_url, pl_headers, sp_id, owner_id
+                pl_url, pl_headers, sp_id, document_filter
             )
         except Exception as exc:
             self.log.error("paperless_query_failed", error=str(exc))
@@ -312,23 +297,13 @@ class ePaperlessDoclingPlugin(BaseSubscription):
     # Paperless helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _resolve_owner(base_url, headers, username):
-        resp = requests.get(
-            f"{base_url}/api/users/?username__iexact={username}",
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data["count"] == 0:
-            raise ValueError(f"User '{username}' not found")
-        return data["results"][0]["id"]
-
-    @staticmethod
-    def _query_documents(base_url, headers, storage_path_id, owner_id=None):
+    def _query_documents(base_url, headers, storage_path_id, document_filter=""):
+        from urllib.parse import parse_qsl
         params = {"storage_path__id": storage_path_id}
-        if owner_id is not None:
-            params["owner__id"] = owner_id
+        if document_filter:
+            params.update(
+                {k: v for k, v in parse_qsl(document_filter) if k != "storage_path__id"}
+            )
         all_results = []
         url = f"{base_url}/api/documents/"
         while url:

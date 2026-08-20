@@ -463,7 +463,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
                 },
                 "chunking_enabled": {
                     "type": "boolean",
-                    "default": True,
+                    "default": False,
                     "description": "Chunk transcripts by token budget (~490 tokens per file). Disable to write each video's full transcript as a single document.",
                 },
             },
@@ -668,7 +668,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
         language = config.get("language", "en").strip() or "en"
         api_key = config.get("api_key", "").strip() or None
         max_videos = int(config.get("max_videos", 0))
-        chunking_enabled = bool(config.get("chunking_enabled", True))
+        chunking_enabled = bool(config.get("chunking_enabled", False))
 
         if not channel_input:
             raise ValueError("channel_id is required")

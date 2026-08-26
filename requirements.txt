@@ -52,6 +52,7 @@ websockets
 aiodns
 paramiko
 asyncssh
+phonenumbers
 rich
 psutil
 click

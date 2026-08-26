@@ -88,14 +88,18 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                     "default": False,
                     "description": "Chunk output (~490 tokens per file). Disable for one markdown file per document.",
                 },
-                "use_paperless_content": {
-                    "type": "boolean",
-                    "default": True,
+                "processing_mode": {
+                    "type": "string",
+                    "enum": ["Paperless Content", "Parse With Docling", "Raw PDF"],
+                    "default": "Paperless Content",
                     "description": (
-                        "Reuse Paperless's own OCR content instead of re-parsing "
-                        "with Docling. Fetches the document's content field first; "
-                        "if non-empty, no PDF download or re-OCR happens. Falls "
-                        "back to normal Docling parsing when content is empty."
+                        "Paperless Content: reuse Paperless's own OCR content "
+                        "instead of re-parsing with Docling (fetches the content "
+                        "field first, falls back to Docling when empty). "
+                        "Parse With Docling: download the PDF and re-parse it "
+                        "with Docling. "
+                        "Raw PDF: download the stored PDF and write it as the "
+                        "output instead of markdown."
                     ),
                 },
             },
@@ -121,7 +125,9 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         sp_id = config["storage_path_id"]
         document_filter = config.get("document_filter", "")
         chunking_enabled = config.get("chunking_enabled", False)
-        use_paperless_content = bool(config.get("use_paperless_content", True))
+        processing_mode = config.get("processing_mode", "Paperless Content")
+        use_paperless_content = processing_mode == "Paperless Content"
+        raw_pdf = processing_mode == "Raw PDF"
 
         pl_headers = {"Authorization": f"Token {pl_token}"}
 
@@ -163,18 +169,20 @@ class ePaperlessDoclingPlugin(BaseSubscription):
 
         # 4. Build disk index from output directory
         output_dir = self.get_destination_path()
-        disk_index = {}  # doc_id -> {"prefix": str, "chunked": bool}
+        disk_index = {}  # doc_id -> {"prefix": str, "chunked": bool, "ext": str}
+        disk_name_re = re.compile(r"^(\d+)\.([a-f0-9]{16})(?:-(\d+))?\.(md|pdf)$")
         if os.path.isdir(output_dir):
             for fname in os.listdir(output_dir):
-                if not fname.endswith(".md"):
-                    continue
-                match = re.match(r"^(\d+)\.([a-f0-9]{16})-\d+\.md$", fname)
+                match = disk_name_re.match(fname)
                 if match:
-                    disk_index[int(match.group(1))] = {"prefix": match.group(2), "chunked": True}
-                    continue
-                match = re.match(r"^(\d+)\.([a-f0-9]{16})\.md$", fname)
-                if match:
-                    disk_index[int(match.group(1))] = {"prefix": match.group(2), "chunked": False}
+                    disk_index[int(match.group(1))] = {
+                        "prefix": match.group(2),
+                        "chunked": match.group(3) is not None,
+                        "ext": match.group(4),
+                    }
+
+        expected_chunked = chunking_enabled
+        expected_ext = "pdf" if raw_pdf else "md"
 
         # 5. Three-way set comparison
         api_ids = set(api_index.keys())
@@ -188,7 +196,10 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         for doc_id in api_ids & disk_ids:
             disk_entry = disk_index[doc_id]
             checksum_matches = api_index[doc_id]["checksum"].startswith(disk_entry["prefix"])
-            pattern_matches = disk_entry["chunked"] == chunking_enabled
+            pattern_matches = (
+                disk_entry["chunked"] == expected_chunked
+                and disk_entry["ext"] == expected_ext
+            )
             if checksum_matches and pattern_matches:
                 to_skip.add(doc_id)
             else:
@@ -216,28 +227,37 @@ class ePaperlessDoclingPlugin(BaseSubscription):
             progress_callback(pct, message=f"Processing {original_name}")
 
             try:
-                if use_paperless_content:
-                    content_text = self._fetch_content(pl_url, pl_headers, doc_id)
-                else:
-                    content_text = ""
-                if content_text:
-                    chunks = self._chunks_from_content(
-                        dl_url, dl_key, content_text, original_name,
-                        chunking_enabled, progress_callback, pct,
-                    )
-                else:
+                if raw_pdf:
                     pdf_bytes = self._download_document(
                         pl_url, pl_headers, doc_id
                     )
-                    chunks = self._process_with_docling(
-                        dl_url, dl_key, pdf_bytes, original_name, chunking_enabled, progress_callback, pct
-                    )
-                for chunk in chunks:
-                    suffix = f"-{chunk['chunk_index']:03d}" if chunking_enabled else ""
-                    tmp = f"/tmp/{doc_id}.{checksum_prefix}{suffix}.md"
-                    with open(tmp, "w", encoding="utf-8") as f:
-                        f.write(f"Original file: {original_name}\n\n{chunk['text']}")
+                    tmp = f"/tmp/{doc_id}.{checksum_prefix}.pdf"
+                    with open(tmp, "wb") as f:
+                        f.write(pdf_bytes)
                     self.move_to_destination(tmp)
+                else:
+                    if use_paperless_content:
+                        content_text = self._fetch_content(pl_url, pl_headers, doc_id)
+                    else:
+                        content_text = ""
+                    if content_text:
+                        chunks = self._chunks_from_content(
+                            dl_url, dl_key, content_text, original_name,
+                            chunking_enabled, progress_callback, pct,
+                        )
+                    else:
+                        pdf_bytes = self._download_document(
+                            pl_url, pl_headers, doc_id
+                        )
+                        chunks = self._process_with_docling(
+                            dl_url, dl_key, pdf_bytes, original_name, chunking_enabled, progress_callback, pct
+                        )
+                    for chunk in chunks:
+                        suffix = f"-{chunk['chunk_index']:03d}" if chunking_enabled else ""
+                        tmp = f"/tmp/{doc_id}.{checksum_prefix}{suffix}.md"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write(f"Original file: {original_name}\n\n{chunk['text']}")
+                        self.move_to_destination(tmp)
 
                 # Delete stale files if this is an update
                 if doc_id in to_update:
@@ -270,9 +290,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         if os.path.isdir(output_dir):
             stray_count = 0
             for fname in os.listdir(output_dir):
-                if not fname.endswith(".md"):
-                    continue
-                match = re.match(r"^(\d+)\.([a-f0-9]{16})(?:-\d+)?\.md$", fname)
+                match = disk_name_re.match(fname)
                 if match and int(match.group(1)) not in api_ids:
                     os.remove(os.path.join(output_dir, fname))
                     stray_count += 1

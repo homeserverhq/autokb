@@ -296,8 +296,9 @@ def _is_connectivity(exc):
 class nextcloudTwentyContactSyncPlugin(BaseSubscription):
     metadata = {
         "name": "nextcloudTwentyContactSyncPlugin",
+        "display_name": "Nextcloud / Twenty Contact Sync",
         "description": (
-            "Reconciles contacts between a Twenty CRM People and a Nextcloud "
+            "Reconciles contacts between Twenty CRM People and a Nextcloud "
             "Global address book, using AutoKB files as the source of truth. "
             "Writes corrections back to both sources over the network. "
             "Schedule this subscription on a cron interval."

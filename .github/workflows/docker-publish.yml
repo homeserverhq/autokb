@@ -34,8 +34,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}-app
           tags: |
             type=ref,event=tag
-            type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=match,pattern=^v(\d+),group=1,prefix=v,priority=500
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
@@ -76,8 +75,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}-mcp
           tags: |
             type=ref,event=tag
-            type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=match,pattern=^v(\d+),group=1,prefix=v,priority=500
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
 

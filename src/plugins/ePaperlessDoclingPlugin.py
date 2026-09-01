@@ -8,6 +8,7 @@ import time
 import requests
 import tiktoken
 
+from utils.misc_utils import SubscriptionCancelledError, send_smtp_notification
 from utils.plugin_base import BaseSubscription
 
 _DOCLING_OPTIONS = {
@@ -116,6 +117,14 @@ class ePaperlessDoclingPlugin(BaseSubscription):
     # getData
     # ------------------------------------------------------------------
     def getData(self, config, progress_callback):
+        try:
+            self._run(config, progress_callback)
+        except SubscriptionCancelledError:
+            raise
+        except Exception as exc:
+            self._halt_run(exc, progress_callback)
+
+    def _run(self, config, progress_callback):
         progress_callback(0, message="Starting...")
 
         pl_url = (config.get("paperless_url") or os.environ.get("PAPERLESS_URL") or "http://paperless-app:8000").rstrip("/")
@@ -139,14 +148,9 @@ class ePaperlessDoclingPlugin(BaseSubscription):
 
         # 1. Query Paperless for documents in the storage path
         progress_callback(5, message="Querying Paperless...")
-        try:
-            documents = self._query_documents(
-                pl_url, pl_headers, sp_id, document_filter
-            )
-        except Exception as exc:
-            self.log.error("paperless_query_failed", error=str(exc))
-            progress_callback(100, message=f"Paperless query failed: {exc}")
-            raise
+        documents = self._query_documents(
+            pl_url, pl_headers, sp_id, document_filter
+        )
 
         if not documents:
             progress_callback(100, message="No documents found")
@@ -215,7 +219,6 @@ class ePaperlessDoclingPlugin(BaseSubscription):
 
         total_work = len(to_add) + len(to_update) + len(to_delete) + len(to_skip)
         done_work = 0
-        failed = 0
 
         # 6. Process adds and updates
         for doc_id in sorted(to_add | to_update):
@@ -264,14 +267,11 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                     for fname in os.listdir(output_dir):
                         if re.match(rf"^{doc_id}\.", fname):
                             os.remove(os.path.join(output_dir, fname))
-            except (requests.HTTPError, DoclingAuthError) as exc:
-                # Docling (or any HTTP) failure is fatal — surface as an error
-                # instead of silently counting the document as skipped.
-                self.log.error("doc_http_error", doc_id=doc_id, error=str(exc))
-                raise
             except Exception as exc:
-                self.log.warning("doc_skipped", doc_id=doc_id, error=str(exc))
-                failed += 1
+                # Any per-document failure aborts the run: the wrapper emails
+                # once and the subscription stays enabled for the next run.
+                self.log.error("doc_processing_failed", doc_id=doc_id, file=original_name, error=str(exc))
+                raise
 
             done_work += 1
 
@@ -305,11 +305,32 @@ class ePaperlessDoclingPlugin(BaseSubscription):
             f"{len(to_delete)} deleted",
             f"{len(to_skip)} unchanged",
         ]
-        if failed:
-            msg_parts.append(f"{failed} failed")
 
         progress_callback(100, message=", ".join(msg_parts))
-        self.log.info("plugin_complete", **{k: v for k, v in (("added", len(to_add)), ("updated", len(to_update)), ("deleted", len(to_delete)), ("skipped", len(to_skip)), ("failed", failed))})
+        self.log.info("plugin_complete", **{k: v for k, v in (("added", len(to_add)), ("updated", len(to_update)), ("deleted", len(to_delete)), ("skipped", len(to_skip)))})
+
+    def _halt_run(self, exc, progress_callback):
+        """Halt the current run after a failure.
+
+        Logs the failure, sends a single SMTP notification, and reports 100%
+        progress so the run ends cleanly without transitioning the subscription
+        to ERROR — the next scheduled run will retry.
+        """
+        self.log.error("run_aborted", error=f"{type(exc).__name__}: {exc}")
+        subject = f"[AutoKB] {self.metadata.get('display_name', 'Paperless Docling Parser')} run aborted"
+        body = (
+            f"Subscription {self._subscription_name!r} aborted during execution.\n\n"
+            f"Error ({type(exc).__name__}): {exc}\n\n"
+            "No further documents were processed and no changes were made. "
+            "The subscription remains enabled and will retry on its next scheduled run."
+        )
+        try:
+            sent = send_smtp_notification(subject=subject, body=body)
+        except Exception:
+            sent = False
+        if not sent:
+            self.log.warning("notification_send_failed", error="smtp")
+        progress_callback(100, message=f"Run aborted (emailed): {exc}")
 
     # ------------------------------------------------------------------
     # Paperless helpers

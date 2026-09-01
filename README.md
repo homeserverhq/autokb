@@ -13,6 +13,7 @@ AutoKB connects to diverse data sources through a hot-swappable plugin architect
 
 - **Pluggable Architecture** — Data sources are single Python files. Drop a new plugin into `/src/plugins/` and it is hot-swapped into the running system within ~2 seconds. No restart, no config change, no deployment pipeline.
 - **Data Destinations (Sinks)** — Hot-swappable destination connectors in `/src/sinks/` sync plugin output to remote Knowledge Bases / datasets (Data Targets) — e.g. Open WebUI Knowledge Bases. A reconciliation engine diffs `/output/` against remote state after every run.
+- **Built-In Seeding** — On startup, the built-in plugins/sinks baked into the image (`/src/builtin_plugins/`, `/src/builtin_sinks/`) are copied into the live (host-mounted) `/src/plugins/` and `/src/sinks/` directories **only if they don't already exist**. Same-name user files are never overwritten, so upgrades can ship new built-ins without clobbering customizations.
 - **Dual Interface** — Full-featured dark-mode Web UI (SPA with SSE live updates) for human operators, plus an MCP (Model Context Protocol) server that lets AI assistants act as remote administrators.
 - **Two-Tier Queue with Aggressive Collapsing** — Redis-backed P-Queue / S-Queue design ensures the **One Worker per Subscription** invariant while handling high-frequency event bursts. Duplicate triggers are collapsed before execution.
 - **Process-Level Isolation** — Each `getData()` call runs in a dedicated child subprocess with heartbeat monitoring, cancellation support, and timeout enforcement. A crash in one plugin never affects another.
@@ -259,17 +260,13 @@ Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sendin
 ├── src/
 │   ├── manager/                 # FastAPI app, scheduler, routes, registry, alembic migrations
 │   ├── worker/                  # Multiprocessing pool, execution engine, sink reconciliation
-│   ├── plugins/                 # Built-in and custom data source plugins
-│   ├── sinks/                   # Destination connectors (Data Destinations)
+│   ├── builtin_plugins/         # Built-in data source plugins (seeded into plugins/ at startup)
+│   ├── builtin_sinks/           # Built-in destination connectors (seeded into sinks/ at startup)
+│   ├── plugins/                 # Live data source plugins (host-mounted; seeded, never overwritten)
+│   ├── sinks/                   # Live destination connectors (host-mounted; seeded, never overwritten)
 │   ├── web/                     # aiohttp SPA with dark-mode UI
 │   ├── utils/                   # Shared components (DB, queue, crypto, schema, sink base/registry)
 │   └── testing/                 # Automated test suite + 26 test plugins + test sinks
-└── mcp/
-    ├── Dockerfile               # MCP-specific image
-    ├── pyproject.toml           # MCP dependencies
-    └── src/
-        ├── main.py              # FastMCP server, middleware, tool definitions
-        └── client.py            # Authenticated API client
 ```
 
 ---

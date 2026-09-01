@@ -42,6 +42,8 @@ from utils.sink_registry import SinkRegistry
 from utils.misc_utils import get_logger
 from utils.queue_utils import QueueManager, wait_for_redis
 from utils.registry import PluginRegistry
+from utils.seed_builtins import seed_builtins
+from utils.sink_registry import SinkRegistry
 from worker.execution_engine import execute_subscription, ExecutionResult, _send_smtp_for_worker
 from worker.sink_recon import reconcile_subscription_targets
 
@@ -65,6 +67,11 @@ def _main() -> None:
     queue = QueueManager(REDIS_URL)
 
     db = _wait_for_db(log)
+
+    try:
+        seed_builtins(log)
+    except Exception as exc:  # noqa: BLE001
+        log.error("builtin_seed_failed", action="startup", result=str(exc))
 
     registry = PluginRegistry(plugins_dir="/src/plugins", component="plugin_loader", log_file=LOG_FILE)
     registry.reload_all()

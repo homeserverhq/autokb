@@ -81,6 +81,7 @@ from utils.misc_utils import (
 )
 from utils.queue_utils import QueueManager, wait_for_redis
 from utils.registry import PluginRegistry
+from utils.seed_builtins import seed_builtins
 from utils.sink_registry import SinkRegistry
 
 from .registry import ManagerPluginRegistry
@@ -226,6 +227,12 @@ def _schedule_sse_broadcast(event: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # -- seed built-in plugins/sinks into the live (mounted) directories --
+    try:
+        seed_builtins(LOG)
+    except Exception as exc:  # noqa: BLE001
+        LOG.error("builtin_seed_failed", action="startup", result=str(exc))
+
     # -- record the running event loop so sync endpoints can schedule
     #    coroutines on it via run_coroutine_threadsafe --
     STATE["event_loop"] = asyncio.get_running_loop()

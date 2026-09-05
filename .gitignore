@@ -40,3 +40,6 @@ docker-compose-local.yml
 stack-local.env
 MCPServerSpecifications-AutoKB.txt
 testIssues.md
+
+REMEDIATION.md
+testing-env.md

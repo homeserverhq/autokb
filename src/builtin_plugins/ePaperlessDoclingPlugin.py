@@ -8,7 +8,6 @@ import time
 import requests
 import tiktoken
 
-from utils.docling import HEARTBEAT_INTERVAL, DoclingAuthError, poll_docling_task
 from utils.misc_utils import SubscriptionCancelledError, send_smtp_notification
 from utils.plugin_base import BaseSubscription
 
@@ -24,6 +23,11 @@ _DOCLING_OPTIONS = {
     "chunking_merge_peers": True,
 }
 _CHUNKING_MAX_TOKENS = 490
+_HEARTBEAT_INTERVAL = 20
+
+
+class DoclingAuthError(RuntimeError):
+    """Fatal Docling authentication/authorization failure."""
 
 
 class ePaperlessDoclingPlugin(BaseSubscription):
@@ -411,7 +415,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         task_id = resp.json()["task_id"]
 
         self.log.info("docling_convert_submitted", task_id=task_id, filename=filename)
-        poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct, self.log)
+        self._poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct)
 
         resp = requests.get(
             f"{base_url}/v1/result/{task_id}", headers=dl_headers, timeout=30,
@@ -479,7 +483,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         task_id = resp.json()["task_id"]
 
         self.log.info("docling_chunk_submitted", task_id=task_id, filename=filename)
-        poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct, self.log)
+        self._poll_docling_task(base_url, dl_headers, task_id, progress_callback, current_pct)
 
         resp = requests.get(
             f"{base_url}/v1/result/{task_id}", headers=dl_headers, timeout=30,
@@ -491,3 +495,32 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         if not chunks:
             raise RuntimeError("Docling returned empty chunks")
         return chunks
+
+    def _poll_docling_task(self, base_url, headers, task_id, progress_callback, current_pct):
+        poll_url = f"{base_url}/v1/status/poll/{task_id}"
+        last_heartbeat = time.time()
+
+        while True:
+            try:
+                resp = requests.get(
+                    poll_url, params={"wait": 30}, headers=headers, timeout=35
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except requests.RequestException as exc:
+                self.log.error("docling_poll_error", task_id=task_id, error=str(exc))
+                raise
+
+            status = data["task_status"]
+
+            now = time.time()
+            if now - last_heartbeat >= _HEARTBEAT_INTERVAL:
+                progress_callback(current_pct)
+                last_heartbeat = now
+
+            if status == "success":
+                return data
+            elif status == "failure":
+                err_msg = data.get("error_message", "Unknown error")
+                self.log.error("docling_job_failed", task_id=task_id, error=err_msg)
+                raise RuntimeError(f"Docling failed: {err_msg}")

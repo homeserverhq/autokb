@@ -1016,7 +1016,20 @@ def test_zombie() -> Tuple[bool, str]:
     try:
         trigger_sub(sub["id"])
         wait_for_status(sub["id"], lambda s: s == "IN_PROGRESS", timeout=15)
-        time.sleep(0.5)
+        # Deterministic gate: wait until the child is actually executing
+        # getData (its started.marker appears in the /output dir, which is a
+        # shared mount) before setting DISABLED. DB progress/last_heartbeat are
+        # both written by the claim itself, so they cannot tell "claimed" from
+        # "child started"; a fixed sleep loses the race on slow CI runners and
+        # the child then exits cooperatively with no watcher kill (no event).
+        marker = os.path.join("/output", "zombiePlugin", sub["name"], "started.marker")
+        deadline = time.time() + 15
+        while True:
+            if os.path.exists(marker):
+                break
+            if time.time() > deadline:
+                return False, "child never reached getData (no started.marker)"
+            time.sleep(0.5)
         set_status(sub["id"], "DISABLED")
         # The zombie keeps running. The plugin's progress_callback never
         # calls the DB to detect DISABLED, so the only way to stop it is the

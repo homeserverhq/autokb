@@ -10,6 +10,7 @@ user-initiated DISABLED status is preserved (NOT overwritten to ERROR);
 the force-kill is recorded as an EventLog entry with exit_code=2.
 """
 
+import os
 import time
 
 from utils.plugin_base import BaseSubscription
@@ -28,6 +29,15 @@ class zombiePlugin(BaseSubscription):
         return {"type": "object", "properties": {"label": {"type": "string"}}}
 
     def getData(self, config, progress_callback):
+        # Signal "child is now executing getData" by writing a marker file into
+        # the shared /output dir BEFORE sleeping. The test waits for this
+        # marker to deterministically set DISABLED after the child has started
+        # (DB progress/last_heartbeat are both set by the claim, so they can't
+        # distinguish "claimed" from "started"). This file is NOT content.
+        dest = self.get_destination_path()
+        os.makedirs(dest, exist_ok=True)
+        with open(os.path.join(dest, "started.marker"), "w") as f:
+            f.write("started")
         # Deliberately do NOT call progress_callback. The only heartbeat
         # ever sent is the initial one issued by the worker before
         # getData runs. After HEARTBEAT_TIMEOUT the watcher kills us.

@@ -6,10 +6,11 @@ target — multiprocessing's spawn would have sys.path issues importing
 ``worker.execution_engine`` since the worker entry point is a script
 run with ``python /src/worker/worker.py``.
 
-Args are passed as JSON on the command line (the only argv[1] we accept
-is a base64-encoded JSON blob containing the call arguments).
+The run payload (the base64-free JSON blob with the decrypted config) is
+delivered over an inherited pipe file descriptor named by the
+``AUTOKB_CFG_FD`` environment variable — never on the command line, so
+credentials never appear in ``/proc/<pid>/cmdline`` or ``ps``.
 """
-import base64
 import json
 import os
 import sys
@@ -35,9 +36,29 @@ _bootstrap()
 from worker.execution_engine import _child_main  # noqa: E402
 
 
+def _read_fd_blob(fd: int, max_bytes: int = 16 * 1024 * 1024) -> bytes:
+    """Read all bytes from ``fd`` until EOF, enforcing a size cap."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError("Run payload exceeds the maximum allowed size")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def main() -> None:
-    raw = sys.argv[1]
-    args = json.loads(base64.b64decode(raw).decode("utf-8"))
+    fd = int(os.environ["AUTOKB_CFG_FD"])
+    try:
+        raw = _read_fd_blob(fd)
+    finally:
+        os.close(fd)
+    args = json.loads(raw.decode("utf-8"))
+    del raw
     _child_main(
         file_path=args["file_path"],
         config=args["config"],

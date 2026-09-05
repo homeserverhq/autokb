@@ -23,7 +23,7 @@ from utils.constants import (
 from utils.database import DatabaseManager
 from utils.sink_registry import SinkRegistry
 from utils.sink_base import compute_file_hash
-from utils.misc_utils import SinkCancelledError, get_logger
+from utils.misc_utils import DecryptionError, SinkCancelledError, get_logger
 
 
 LOG_FILE = "/logs/worker.log"
@@ -332,7 +332,11 @@ def _get_service(ds_row, db, sink_registry, log):
     if svc_row is None:
         log.warning("sink_service_not_found", target_id=ds_row.id, service_id=ds_row.service_id)
         return None
-    api_key = db.decrypt_target_api_key(ds_row)
+    try:
+        api_key = db.decrypt_target_api_key(ds_row)
+    except DecryptionError as exc:
+        log.error("sink_key_decrypt_failed", target_id=ds_row.id, service_id=ds_row.service_id, error=str(exc))
+        return None
     # We need to pass decrypted api_key to the service instance.
     # Temporarily patch the row's api_key attribute.
     import copy

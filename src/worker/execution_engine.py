@@ -17,7 +17,6 @@ Why subprocess + heartbeat file (and not ``multiprocessing.Process``):
     * The spec only requires process isolation — subprocess satisfies it.
 """
 
-import base64
 import json
 import os
 import subprocess
@@ -58,6 +57,7 @@ from utils.constants import (
 )
 from utils.database import DatabaseManager, Subscription
 from utils.misc_utils import (
+    DecryptionError,
     PasswordCipher,
     SubscriptionCancelledError,
     get_logger,
@@ -101,7 +101,11 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
     """
     # 1. Decrypt config + validate against schema
     cipher = PasswordCipher()
-    config = db.decrypt_config(sub, rec.password_fields)
+    try:
+        config = db.decrypt_config(sub, rec.password_fields)
+    except DecryptionError as exc:
+        log.warning("config_decryption_failed", sub_id=sub.id, name=sub.name, action="decrypt", result=str(exc))
+        return ExecutionResult(outcome="load_error", exit_string=str(exc))
     try:
         validate_config_against_schema(config, rec.augmented_schema, rec.password_fields, enforce_required_password=False)
     except ValueError as exc:
@@ -119,7 +123,10 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
             pass
 
     # 3. Spawn child subprocess
-    args_blob = base64.b64encode(json.dumps({
+    # The decrypted run payload (which contains credentials) is passed over
+    # an inherited pipe fd — never on the command line, where it would be
+    # visible to any same-host process via /proc/<pid>/cmdline and `ps`.
+    run_payload = json.dumps({
         "file_path": rec.file_path,
         "config": config,
         "sub_id": sub.id,
@@ -128,19 +135,37 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
         "password_field_names": rec.password_fields,
         "hb_path": hb_path,
         "err_path": err_path,
-    }).encode("utf-8")).decode("ascii")
-    child_cmd = [sys.executable, "-B", "-m", "worker._child_runner", args_blob]
+    }).encode("utf-8")
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, True)
+    child_env = {
+        **os.environ,
+        "PYTHONPATH": "/src",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "KB_NO_STDOUT_LOG": "1",
+        "AUTOKB_CFG_FD": str(read_fd),
+    }
     try:
         proc = subprocess.Popen(
-            child_cmd,
+            [sys.executable, "-B", "-m", "worker._child_runner"],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd="/",
-            env={**os.environ, "PYTHONPATH": "/src", "PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1", "KB_NO_STDOUT_LOG": "1"},
+            env=child_env,
+            pass_fds=(read_fd,),
         )
     except Exception as exc:
+        os.close(read_fd)
+        os.close(write_fd)
         log.error("child_spawn_failed", sub_id=sub.id, name=sub.name, action="spawn", result=str(exc))
         return ExecutionResult(outcome="load_error", exit_string=f"Failed to spawn child: {exc}")
+    os.close(read_fd)  # the child now owns the read end
+    try:
+        os.write(write_fd, run_payload)
+    finally:
+        os.close(write_fd)  # closing the write end signals EOF to the child
     log.debug("child_spawned", sub_id=sub.id, name=sub.name, action="spawn", result=f"pid={proc.pid}")
 
     # 4. Watcher thread for heartbeat timeout

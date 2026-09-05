@@ -174,6 +174,66 @@ def resolve_service_icon(cls: Any, metadata: Dict[str, Any],
 # ---------------------------------------------------------------------------
 # Fernet-style symmetric encryption (uses base64 + AES via cryptography)
 # ---------------------------------------------------------------------------
+class DecryptionError(Exception):
+    """Raised when a stored secret cannot be decrypted.
+
+    Fail-closed: a ciphertext we cannot verify is never handed downstream as
+    if it were the real secret. Check ENCRYPTION_KEY / ENCRYPTION_SALT.
+    """
+
+
+# No-key fallback derivation parameters. Existing ciphertext predates the
+# per-deployment salt and the higher iteration count, so we keep the legacy
+# (100k, public salt) derivation available ONLY for decrypting old tokens.
+_LEGACY_FERNET_SALT = b"autokb-fernet-salt-v1"
+_LEGACY_KDF_ITERATIONS = 100_000
+_KDF_ITERATIONS = 600_000
+_TOKEN_PREFIX = "encv1:"
+
+
+_LEGACY_SALT_WARNED = False
+
+
+def _warn_legacy_salt_once(message: str) -> None:
+    global _LEGACY_SALT_WARNED
+    if _LEGACY_SALT_WARNED:
+        return
+    _LEGACY_SALT_WARNED = True
+    # Route through Python logging (file/stdout-handlers), never raw stderr:
+    # a child process's stderr is captured by the parent and used to derive
+    # the failure message on non-zero exit, so warning noise there corrupts it.
+    logging.getLogger("autokb.misc_utils").warning(message)
+
+
+def _resolve_fernet_salt() -> bytes:
+    """Return the KDF salt for NEW tokens.
+
+    Prefers a per-deployment ``ENCRYPTION_SALT`` (base64url-encoded bytes).
+    Falls back to the documented legacy salt with a one-time warning — it is
+    public/constant, so use a unique random ``ENCRYPTION_SALT`` with any
+    passphrase-grade ``ENCRYPTION_KEY``.
+    """
+    salt_env = os.environ.get("ENCRYPTION_SALT", "")
+    if salt_env:
+        try:
+            padded = salt_env + "=" * (-len(salt_env) % 4)
+            salt = base64.urlsafe_b64decode(padded.encode("ascii"))
+        except Exception as exc:
+            raise ValueError("ENCRYPTION_SALT must be base64url-encoded bytes") from exc
+        if len(salt) < 16:
+            _warn_legacy_salt_once(
+                "[misc_utils] WARNING: ENCRYPTION_SALT is shorter than 16 bytes; "
+                "use a longer random value."
+            )
+        return salt
+    _warn_legacy_salt_once(
+        "[misc_utils] WARNING: ENCRYPTION_SALT is not set; using the (public) "
+        "default salt for PBKDF2. Set a unique ENCRYPTION_SALT for deployments "
+        "using a passphrase-grade ENCRYPTION_KEY."
+    )
+    return _LEGACY_FERNET_SALT
+
+
 class PasswordCipher:
     """Lightweight Fernet-compatible wrapper.
 
@@ -181,40 +241,90 @@ class PasswordCipher:
     base64url-encoded 32-byte value provided via the ``ENCRYPTION_KEY``
     env var. The key string is expected to be a base64url 32-byte value
     (44 chars). If it isn't, we attempt to derive a valid Fernet key from
-    it deterministically.
+    it deterministically (PBKDF2-HMAC-SHA256; 600k iterations; salt from
+    ``ENCRYPTION_SALT``, falling back to the documented legacy salt).
+
+    New ciphertext is tagged ``encv1:`` and can only be read back with the
+    current parameters. Untagged (legacy) ciphertext written with the old
+    100k-iteration derivation is still decryptable for migration, so bumping
+    these parameters does not invalidate stored secrets.
+
+    Key derivation is LAZY — the (expensive) PBKDF2 work only happens on the
+    first encrypt/decrypt call. Many processes (notably every execution child)
+    construct a ``DatabaseManager`` purely for DB reads/heartbeats and never
+    touch a secret, so deferring the KDF keeps their startup fast and keeps
+    KDF warnings out of captured stderr.
     """
 
     def __init__(self, key: Optional[str] = None):
+        key = key or os.environ.get("ENCRYPTION_KEY", "")
+        if not key:
+            raise ValueError("ENCRYPTION_KEY env var must be set")
+        self._key = key
+        self._fernet: Any = None
+        self._legacy_fernet: Any = None
+
+    def _ensure_built(self) -> None:
+        if self._fernet is not None:
+            return
+        from cryptography.fernet import Fernet
+        self._fernet_key = self._derive_fernet_key(self._key, _KDF_ITERATIONS, _resolve_fernet_salt())
+        self._fernet = Fernet(self._fernet_key)
+        # Legacy decrypt-only cipher for tokens written before the PBKDF2
+        # iteration bump / per-deployment salt support.
+        self._legacy_fernet = None
+        legacy_key = self._derive_fernet_key(self._key, _LEGACY_KDF_ITERATIONS, _LEGACY_FERNET_SALT)
+        if legacy_key != self._fernet_key:
+            self._legacy_fernet = Fernet(legacy_key)
+
+    @staticmethod
+    def _derive_fernet_key(key: str, iterations: int, salt: bytes) -> bytes:
+        """Return a Fernet key (bytes) for ``key``.
+
+        A valid Fernet key (44-char base64url -> 32 bytes) is used directly
+        and bypasses the KDF. Anything else is deterministically derived via
+        PBKDF2-HMAC-SHA256 over the given salt/iteration count.
+        """
         from cryptography.fernet import Fernet
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-        key = key or os.environ.get("ENCRYPTION_KEY", "")
-        if not key:
-            raise ValueError("ENCRYPTION_KEY env var must be set")
-
-        # If key is already valid Fernet format (44-char base64url -> 32 bytes), use it.
+        raw = key.encode("ascii") if isinstance(key, str) else key
         try:
-            self._fernet = Fernet(key.encode() if isinstance(key, str) else key)
-            return
+            Fernet(raw)  # validates the format; if OK it is the key itself
+            return raw
         except Exception:
             pass
-
-        # Derive a 32-byte key from the supplied string using PBKDF2.
-        salt = b"autokb-fernet-salt-v1"
-        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100_000)
-        derived = base64.urlsafe_b64encode(kdf.derive(key.encode()))
-        self._fernet = Fernet(derived)
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iterations)
+        return base64.urlsafe_b64encode(kdf.derive(key.encode()))
 
     def encrypt(self, plaintext: str) -> str:
         if plaintext is None:
             return None
-        return self._fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
+        self._ensure_built()
+        return _TOKEN_PREFIX + self._fernet.encrypt(plaintext.encode("utf-8")).decode("ascii")
 
     def decrypt(self, token: str) -> str:
         if token is None:
             return None
-        return self._fernet.decrypt(token.encode("ascii")).decode("utf-8")
+        self._ensure_built()
+        value = token
+        if token.startswith(_TOKEN_PREFIX):
+            value = token[len(_TOKEN_PREFIX):]
+            try:
+                return self._fernet.decrypt(value.encode("ascii")).decode("utf-8")
+            except Exception as exc:
+                raise DecryptionError(f"Failed to decrypt secret (corrupt or wrong ENCRYPTION_KEY)") from exc
+        # Untagged legacy token: try current params, then the legacy derivation.
+        try:
+            return self._fernet.decrypt(value.encode("ascii")).decode("utf-8")
+        except Exception:
+            if self._legacy_fernet is not None:
+                try:
+                    return self._legacy_fernet.decrypt(value.encode("ascii")).decode("utf-8")
+                except Exception as exc:
+                    raise DecryptionError(f"Failed to decrypt secret (corrupt or wrong ENCRYPTION_KEY)") from exc
+            raise DecryptionError(f"Failed to decrypt secret (corrupt or wrong ENCRYPTION_KEY)")
 
 
 # ---------------------------------------------------------------------------
@@ -288,17 +398,17 @@ def encrypt_password_fields(config: Dict[str, Any], password_fields: List[str], 
 
 
 def decrypt_password_fields(config: Dict[str, Any], password_fields: List[str], cipher: PasswordCipher) -> Dict[str, Any]:
-    """Decrypt password-format fields, leaving other fields untouched."""
+    """Decrypt password-format fields, leaving other fields untouched.
+
+    Fail-closed: if a stored secret cannot be decrypted, raises
+    :class:`DecryptionError` rather than passing ciphertext downstream.
+    """
     if not config:
         return config
     out: Dict[str, Any] = {}
     for k, v in config.items():
         if k in password_fields and isinstance(v, str) and v:
-            try:
-                out[k] = cipher.decrypt(v)
-            except Exception:
-                # If decryption fails (e.g. plain text during dev), pass through
-                out[k] = v
+            out[k] = cipher.decrypt(v)
         else:
             out[k] = v
     return out

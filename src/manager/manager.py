@@ -70,6 +70,7 @@ MAX_PLUGIN_NAME_LEN = 32
 MAX_DISPLAY_NAME_LEN = 64
 from utils.database import DatabaseManager
 from utils.misc_utils import (
+    DecryptionError,
     PasswordCipher,
     collect_password_field_names,
     encrypt_password_fields,
@@ -1896,7 +1897,10 @@ def _ensure_target_remote(ds_row, db, sink_registry, log) -> None:
     svc_row = db.get_sink(ds_row.service_id)
     if svc_row is None:
         raise HTTPException(status_code=404, detail="Sink not found")
-    api_key = db.decrypt_target_api_key(ds_row)
+    try:
+        api_key = db.decrypt_target_api_key(ds_row)
+    except DecryptionError as exc:
+        raise HTTPException(status_code=500, detail=f"Target API key decryption failed: {exc}") from exc
     # Patch the decrypted api_key onto a copy of the row so the sink instance
     # (which reads ``target_row.api_key``) gets the real key.
     import copy

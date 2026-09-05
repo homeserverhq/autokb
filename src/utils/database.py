@@ -47,6 +47,7 @@ from .constants import (
     EXIT_TIMEOUT,
 )
 from .misc_utils import (
+    DecryptionError,
     PasswordCipher,
     collect_password_field_names,
     encrypt_password_fields,
@@ -968,10 +969,7 @@ class DatabaseManager:
     def decrypt_target_api_key(self, t: Target) -> str:
         if not t.api_key:
             return ""
-        try:
-            return self._cipher.decrypt(t.api_key)
-        except Exception:
-            return t.api_key  # fallback: pass through
+        return self._cipher.decrypt(t.api_key)
 
     # ----- helpers -----
     def decrypt_config(self, sub: Subscription, password_field_names: List[str]) -> Dict[str, Any]:

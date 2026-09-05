@@ -36,6 +36,7 @@ from utils.constants import (
 )
 from utils.database import DatabaseManager, EventLog, Subscription
 from utils.misc_utils import (
+    DecryptionError,
     cron_due,
     get_logger,
     is_valid_cron,
@@ -242,7 +243,11 @@ class TriggerCoordinator:
             self._log.error("monitor_instantiate_failed", sub_id=sub_id, error=str(exc))
             return
 
-        config = self._db.decrypt_config(sub, rec.password_fields)
+        try:
+            config = self._db.decrypt_config(sub, rec.password_fields)
+        except DecryptionError as exc:
+            self._log.error("monitor_decrypt_failed", sub_id=sub_id, error=str(exc))
+            return
         # Cron fallback: also run periodically
         cron = sub.cron
 

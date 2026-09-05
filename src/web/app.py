@@ -6,9 +6,12 @@ The web UI container is the primary front-facing access point. It:
 * Proxies ``/api/*`` requests to the Manager at ``AUTOKB_MANAGER_URL``,
   injecting the ``AUTOKB_BACKEND_API_KEY`` header.
 * Handles ``/auth/*`` (login/logout) locally.
-* Validates the MCP Bearer token for proxied requests.
+* Authenticates all inbound requests (browser session cookie or a Bearer
+  token). This is also the auth boundary for the MCP server, which relays
+  the client's ``Authorization`` header verbatim.
 
-Auth is session-based for the browser; the MCP server authenticates via
+Auth is session-based for the browser; API clients (including the MCP
+server, which is a pure transparent relay with no key awareness) present
 ``Authorization: Bearer <AUTOKB_API_KEY>``.
 """
 
@@ -35,9 +38,37 @@ BACKEND_API_KEY = os.environ.get("AUTOKB_BACKEND_API_KEY", "")
 WEBHOOK_API_KEY = os.environ.get("AUTOKB_WEBHOOK_API_KEY", "")
 MANAGER_URL = os.environ.get("AUTOKB_MANAGER_URL", "http://autokb-manager:80")
 WEBUI_PORT = int(os.environ.get("WEBUI_PORT", "80"))
+COOKIE_SECURE = os.environ.get("AUTOKB_USE_HTTPS", "0") == "1"
 
 LOG_FILE = "/logs/web.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+
+def _assert_secrets_configured() -> None:
+    """Refuse to boot with empty secrets. A default-empty environment
+    otherwise turns 'Bearer ' (empty token) into valid authentication and
+    leaves a passwordless admin sitting on the network."""
+    missing = []
+    if not ADMIN_PASSWORD:
+        missing.append("AUTOKB_ADMIN_PASSWORD")
+    if not API_KEY:
+        missing.append("AUTOKB_API_KEY")
+    if not BACKEND_API_KEY:
+        missing.append("AUTOKB_BACKEND_API_KEY")
+    if missing:
+        print(
+            "[web] FATAL: refusing to start: the following required secrets are not configured: "
+            + ", ".join(missing),
+            file=sys.stderr,
+        )
+        print(
+            "[web] Set them (e.g. in stack.env / docker-compose environment) and restart.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+_assert_secrets_configured()
 
 
 def _log(msg: str, **fields: Any) -> None:
@@ -57,6 +88,8 @@ def _log(msg: str, **fields: Any) -> None:
 # Session helpers
 # ---------------------------------------------------------------------------
 def _make_token(username: str) -> str:
+    if not API_KEY:
+        raise RuntimeError("AUTOKB_API_KEY not configured; cannot mint session tokens")
     payload = f"{username}:{int(time.time())}"
     sig = hmac.new(API_KEY.encode(), payload.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{payload}:{sig}"
@@ -80,6 +113,27 @@ def _verify_token(token: str) -> Optional[str]:
     return username
 
 
+def _bearer_token(request: web.Request) -> Optional[str]:
+    """Return the non-empty Bearer token from the request, or None.
+
+    A bare ``Authorization: Bearer `` (empty token) is treated as absent
+    (returned as None) so an unset API key can never be 'matched' by an
+    empty value.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        if token:
+            return token
+    return None
+
+
+def _token_matches(token: Optional[str], expected: str) -> bool:
+    """Constant-time comparison that rejects empty tokens and empty expected
+    values, closing the 'empty == empty' authentication bypass."""
+    return token is not None and bool(token) and bool(expected) and hmac.compare_digest(token, expected)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -93,10 +147,7 @@ async def _is_authed(request: web.Request) -> bool:
     session_token = request.cookies.get("autokb_session")
     if session_token and _verify_token(session_token):
         return True
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer ") and auth_header[7:] == API_KEY:
-        return True
-    return False
+    return _token_matches(_bearer_token(request), API_KEY)
 
 
 async def handle_index(request: web.Request) -> web.Response:
@@ -138,9 +189,10 @@ async def handle_auth_login(request: web.Request) -> web.Response:
     token = _make_token(username)
     resp = web.json_response({"ok": True, "username": username})
     # Cookie
-    resp.set_cookie("autokb_session", token, httponly=True, samesite="Lax", path="/", max_age=24 * 3600)
-    # Also expose via Authorization for the SPA
-    resp.headers["X-Session-Token"] = token
+    resp.set_cookie(
+        "autokb_session", token, httponly=True, samesite="Lax", path="/",
+        max_age=24 * 3600, secure=COOKIE_SECURE,
+    )
     return resp
 
 
@@ -153,13 +205,11 @@ async def handle_auth_logout(request: web.Request) -> web.Response:
 async def handle_auth_check(request: web.Request) -> web.Response:
     # Check cookie or Bearer token
     session_token = request.cookies.get("autokb_session")
-    auth_header = request.headers.get("Authorization", "")
     if session_token and _verify_token(session_token):
         username = _verify_token(session_token)
         return web.json_response({"authenticated": True, "username": username, "auth_type": "session"})
-    if auth_header.startswith("Bearer "):
-        if auth_header[7:] == API_KEY:
-            return web.json_response({"authenticated": True, "username": "mcp", "auth_type": "bearer"})
+    if _token_matches(_bearer_token(request), API_KEY):
+        return web.json_response({"authenticated": True, "username": "mcp", "auth_type": "bearer"})
     return web.json_response({"authenticated": False}, status=401)
 
 
@@ -174,13 +224,13 @@ async def handle_api_proxy(request: web.Request) -> web.Response:
     """
     # Authentication
     session_token = request.cookies.get("autokb_session")
-    auth_header = request.headers.get("Authorization", "")
+    token = _bearer_token(request)
     authed = False
     if session_token and _verify_token(session_token):
         authed = True
-    if not authed and auth_header.startswith("Bearer ") and auth_header[7:] == API_KEY:
+    if not authed and _token_matches(token, API_KEY):
         authed = True
-    if not authed and auth_header.startswith("Bearer ") and auth_header[7:] == WEBHOOK_API_KEY:
+    if not authed and _token_matches(token, WEBHOOK_API_KEY):
         if request.rel_url.path.startswith("/api/subscriptions/") and request.rel_url.path.endswith("/trigger"):
             authed = True
     if not authed:
@@ -244,11 +294,10 @@ async def handle_sse_proxy(request: web.Request) -> web.StreamResponse:
     """
     # Auth
     session_token = request.cookies.get("autokb_session")
-    auth_header = request.headers.get("Authorization", "")
     authed = False
     if session_token and _verify_token(session_token):
         authed = True
-    if not authed and auth_header.startswith("Bearer ") and auth_header[7:] == API_KEY:
+    if not authed and _token_matches(_bearer_token(request), API_KEY):
         authed = True
     if not authed:
         return web.json_response({"error": "Authentication required"}, status=401)

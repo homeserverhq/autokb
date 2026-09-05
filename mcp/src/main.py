@@ -21,14 +21,19 @@ CronExpr = Annotated[Optional[str], AfterValidator(_validate_cron_expr)]
 
 from .client import AutoKBClient
 
-# Context variable to store the current user's token
+# Context variable to store the current user's token. The MCP server is a
+# PURE authenticated relay: it forwards whatever Bearer token the client sent
+# (verbatim) to the AutoKB backend, and forwards nothing when the client sent
+# nothing. It never invents, reads, or falls back to any server-side key.
 _current_user_token: ContextVar[Optional[str]] = ContextVar(
     "current_user_token", default=None
 )
 
 
 class AuthMiddleware:
-    """ASGI middleware to extract Authorization header and set context variable."""
+    """ASGI middleware to extract the Authorization header and set the context
+    variable. This ONLY mirrors the inbound token for relaying; it does not
+    authenticate, verify, or default to any configured key."""
 
     def __init__(self, app):
         self.app = app
@@ -39,7 +44,7 @@ class AuthMiddleware:
             auth_header = headers.get(b"authorization", b"").decode()
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
-                _current_user_token.set(token)
+                _current_user_token.set(token if token else None)
         await self.app(scope, receive, send)
 
 
@@ -55,13 +60,6 @@ def get_client() -> AutoKBClient:
     if _client is None:
         _client = AutoKBClient()
     return _client
-
-
-def get_user_token() -> Optional[str]:
-    token = _current_user_token.get()
-    if token:
-        return token
-    return os.getenv("AUTOKB_API_KEY")
 
 
 # =============================================================================
@@ -185,7 +183,7 @@ async def create_subscription(
         config=params.config,
         cron=params.cron,
         description=params.description,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -212,7 +210,7 @@ async def edit_subscription(
         sub_id=params.sub_id,
         config=params.config,
         cron=params.cron,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -231,7 +229,7 @@ async def delete_subscription(
     params = DeleteSubscriptionParam(sub_id=sub_id)
     return await get_client().delete_subscription(
         sub_id=params.sub_id,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -250,7 +248,7 @@ async def trigger_manual_update(
     params = TriggerManualUpdateParam(sub_id=sub_id)
     return await get_client().trigger_manual_update(
         sub_id=params.sub_id,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -273,7 +271,7 @@ async def set_subscription_status(
     return await get_client().set_subscription_status(
         sub_id=params.sub_id,
         status=params.status,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -292,7 +290,7 @@ async def list_subscriptions(
     params = ListSubscriptionsParam(plugin_id=plugin_id)
     raw = await get_client().list_subscriptions(
         plugin_id=params.plugin_id,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
     return {"items": json_to_toon(raw)}
 
@@ -312,7 +310,7 @@ async def get_subscription_status(
     params = GetSubscriptionStatusParam(sub_id=sub_id)
     return await get_client().get_subscription_status(
         sub_id=params.sub_id,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -328,7 +326,7 @@ async def list_plugins(
     ctx: Context = None,
 ) -> dict[str, Any]:
     """List all available data source plugins and their metadata."""
-    raw = await get_client().list_plugins(api_key=get_user_token())
+    raw = await get_client().list_plugins(api_key=_current_user_token.get())
     return {"items": json_to_toon(raw)}
 
 
@@ -347,7 +345,7 @@ async def get_plugin_details(
     params = GetPluginDetailsParam(plugin_id=plugin_id)
     return await get_client().get_plugin_details(
         plugin_id=params.plugin_id,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -366,7 +364,7 @@ async def get_plugin_schema(
     params = GetPluginSchemaParam(plugin_id=plugin_id)
     return await get_client().get_plugin_schema(
         plugin_id=params.plugin_id,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -382,7 +380,7 @@ async def get_system_health(
     ctx: Context = None,
 ) -> dict[str, Any]:
     """Checks connectivity to Redis, PostgreSQL, and the Manager API."""
-    return await get_client().get_system_health(api_key=get_user_token())
+    return await get_client().get_system_health(api_key=_current_user_token.get())
 
 
 # =============================================================================
@@ -415,7 +413,7 @@ async def create_bible_subscription(
         config={"version": params.version},
         cron=params.cron,
         description=None,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -457,7 +455,7 @@ async def create_youtube_subscription(
         config=config,
         cron=params.cron,
         description=None,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -506,7 +504,7 @@ async def create_imap_subscription(
         config=config,
         cron=params.cron,
         description=None,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -545,7 +543,7 @@ async def create_crawl4ai_subscription(
         config=config,
         cron=params.cron,
         description=None,
-        api_key=get_user_token(),
+        api_key=_current_user_token.get(),
     )
 
 
@@ -562,7 +560,7 @@ async def get_bible_versions(
         language: Language name to filter by (e.g. "English", "Spanish", "French").
     """
     params = GetBibleVersionsParam(language=language)
-    raw = await get_client().get_bible_versions(api_key=get_user_token())
+    raw = await get_client().get_bible_versions(api_key=_current_user_token.get())
     if params.language and raw.get("groups"):
         lang_versions = set(raw["groups"].get(params.language, []))
         raw["versions"] = [v for v in raw["versions"] if v in lang_versions]

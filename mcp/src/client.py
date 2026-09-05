@@ -1,7 +1,9 @@
 """AutoKB API client with authentication passthrough.
 
-This client forwards the user's Bearer token to AutoKB,
-ensuring all operations respect the user's permissions.
+This client is a PURE relay for credentials: it only forwards the
+``api_key`` explicitly given to each method call (which the MCP server takes
+verbatim from the inbound ``Authorization`` header). It has no awareness of
+any server-side key and never falls back to an environment variable.
 """
 
 import os
@@ -19,7 +21,6 @@ class AutoKBClient:
         api_key: Optional[str] = None,
     ):
         self.base_url = (base_url or os.getenv("AUTOKB_BASE_URL", "")).rstrip("/")
-        self.api_key = api_key or os.getenv("AUTOKB_API_KEY", "")
 
         if not self.base_url:
             raise ValueError(
@@ -27,12 +28,11 @@ class AutoKBClient:
             )
 
     def _get_headers(self, api_key: Optional[str] = None) -> dict[str, str]:
-        token = api_key or self.api_key
         headers = {
             "Content-Type": "application/json",
         }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
     async def request(

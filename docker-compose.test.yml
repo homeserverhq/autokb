@@ -1,0 +1,104 @@
+services:
+  autokb-db:
+    image: mirror.gcr.io/postgres:15.0-bullseye
+    container_name: autokb-test-db
+    hostname: autokb-db
+    restart: unless-stopped
+    env_file: stack.env
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256mb
+    networks:
+      - int-autokb-net
+    volumes:
+      - /tmp/autokb-test/db:/var/lib/postgresql/data
+
+  autokb-manager:
+    image: hshq/autokb-app:v1
+    container_name: autokb-test-manager
+    hostname: autokb-manager
+    restart: unless-stopped
+    env_file: stack.env
+    environment:
+      AUTOKB_HEARTBEAT_TIMEOUT: ${AUTOKB_HEARTBEAT_TIMEOUT:-5}
+      AUTOKB_MONITOR_ERROR_SLEEP: ${AUTOKB_MONITOR_ERROR_SLEEP:-2}
+      AUTOKB_LOCK_TTL: ${AUTOKB_LOCK_TTL:-60}
+      AUTOKB_DEBOUNCE_PHASE_SECONDS: ${AUTOKB_DEBOUNCE_PHASE_SECONDS:-1}
+      SMTP_PORT: ${SMTP_PORT:-25}
+    command: python /src/manager/manager.py
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+    volumes:
+      - /tmp/autokb-test/output:/output
+      - /tmp/autokb-test/assets:/assets
+      - /tmp/autokb-test/plugins:/src/plugins
+      - /tmp/autokb-test/sinks:/src/sinks
+      - /tmp/autokb-test/logs:/logs
+
+  autokb-worker:
+    image: hshq/autokb-app:v1
+    container_name: autokb-test-worker
+    hostname: autokb-worker
+    restart: unless-stopped
+    env_file: stack.env
+    environment:
+      AUTOKB_HEARTBEAT_TIMEOUT: ${AUTOKB_HEARTBEAT_TIMEOUT:-5}
+      AUTOKB_MONITOR_ERROR_SLEEP: ${AUTOKB_MONITOR_ERROR_SLEEP:-2}
+      AUTOKB_LOCK_TTL: ${AUTOKB_LOCK_TTL:-60}
+      AUTOKB_DEBOUNCE_PHASE_SECONDS: ${AUTOKB_DEBOUNCE_PHASE_SECONDS:-1}
+    command: python /src/worker/worker.py
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+    volumes:
+      - /tmp/autokb-test/output:/output
+      - /tmp/autokb-test/plugins:/src/plugins
+      - /tmp/autokb-test/sinks:/src/sinks
+      - /tmp/autokb-test/logs:/logs
+
+  autokb-web:
+    image: hshq/autokb-app:v1
+    container_name: autokb-test-web
+    hostname: autokb-web
+    restart: unless-stopped
+    env_file: stack.env
+    command: gunicorn web.app:app --bind 0.0.0.0:80 --worker-class aiohttp.worker.GunicornWebWorker
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+    volumes:
+      - /tmp/autokb-test/assets:/assets
+      - /tmp/autokb-test/logs:/logs
+
+  autokb-mcp:
+    image: hshq/autokb-mcp:v1
+    container_name: autokb-test-mcp
+    hostname: autokb-mcp
+    restart: unless-stopped
+    # Pure auth passthrough — no API key is passed to the MCP container.
+    environment:
+      AUTOKB_BASE_URL: http://autokb-web:80
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - int-autokb-net
+    volumes:
+      - /tmp/autokb-test/logs:/logs
+
+  autokb-redis:
+    image: mirror.gcr.io/valkey/valkey:alpine3.23
+    container_name: autokb-test-redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: redis-server
+    networks:
+      - int-autokb-net
+
+networks:
+  int-autokb-net:
+    driver: bridge

@@ -10,6 +10,7 @@ Wires together:
 """
 
 import asyncio
+import hmac
 import json
 import os
 import sys
@@ -98,6 +99,13 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://autokb:autokb@autokb
 REDIS_URL = os.environ.get("REDIS_URL", "redis://autokb-redis:6379/0")
 BACKEND_API_KEY = os.environ.get("AUTOKB_BACKEND_API_KEY", "")
 
+if not BACKEND_API_KEY:
+    print(
+        "[manager] WARNING: AUTOKB_BACKEND_API_KEY is not set; "
+        "all /api/* routes will be refused (HTTP 503) until it is configured.",
+        flush=True,
+    )
+
 SMTP_CONFIG = {
     "smtp_host": os.environ.get("SMTP_HOST", ""),
     "smtp_port": int(os.environ.get("SMTP_PORT", "25")),
@@ -121,9 +129,9 @@ STATE: Dict[str, Any] = {}
 # ---------------------------------------------------------------------------
 def require_backend_key(request: Request) -> None:
     if not BACKEND_API_KEY:
-        return
+        raise HTTPException(status_code=503, detail="Backend API key is not configured")
     provided = request.headers.get("X-Api-Key", "")
-    if provided != BACKEND_API_KEY:
+    if not provided or not hmac.compare_digest(provided, BACKEND_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid backend API key")
 
 

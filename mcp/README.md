@@ -7,14 +7,23 @@ A Model Context Protocol (MCP) server that acts as a proxy between AI assistants
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `AUTOKB_BASE_URL` | Yes | — | AutoKB web service URL (e.g. `http://autokb-web:80`) |
-| `AUTOKB_API_KEY` | No | — | AutoKB API key for authentication (fallback if no Bearer token) |
 | `MCP_PORT` | No | `80` | Port for the MCP server to listen on |
+
+The MCP server has **no awareness of any API key**. It must never receive one
+via environment, config, or fallback.
 
 ## Authentication
 
-The server extracts the `Authorization: Bearer <token>` header from incoming MCP HTTP requests and forwards it to `AUTOKB_BASE_URL`. This identity passthrough ensures all AI assistant actions respect user-level permissions.
+The MCP server is a **pure transparent relay**. It extracts the
+`Authorization: Bearer <token>` header from incoming MCP HTTP requests and
+forwards it verbatim to `AUTOKB_BASE_URL`. If the client sends no token,
+nothing is forwarded — the server never invents, reads, or falls back to any
+server-side key.
 
-Currently a single-user system — the Bearer token must match `AUTOKB_API_KEY`.
+Authentication and authorization are the **backend's responsibility**: the
+AutoKB web layer validates the token and rejects unauthenticated requests
+(HTTP 401). Operators configure the accepted key on the backend only, not on
+this MCP server.
 
 ## Connection Instructions
 

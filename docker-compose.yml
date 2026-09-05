@@ -70,7 +70,11 @@ services:
     container_name: autokb-mcp
     hostname: autokb-mcp
     restart: unless-stopped
-    env_file: stack.env
+    # The MCP server is a pure auth passthrough: it must NOT receive any API
+    # key. It only needs to know where the web/backend lives. Auth is handled
+    # entirely by the web layer, which rejects unauthenticated requests.
+    environment:
+      AUTOKB_BASE_URL: http://autokb-web:80
     security_opt:
       - no-new-privileges:true
     networks:

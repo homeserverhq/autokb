@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install unit-test dependencies
+        run: pip install --no-cache-dir structlog cryptography
+
+      - name: Run unit tests (no containers)
+        env:
+          ENCRYPTION_KEY: ci-unit-test-key-000000000000000000
+        run: python src/testing/unit_tests/run_all.py
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build app image
+        run: docker build -t hshq/autokb-app:v1 -f Dockerfile .
+
+      - name: Build MCP image
+        run: docker build -t hshq/autokb-mcp:v1 -f mcp/Dockerfile mcp
+
+      - name: Bring up the test stack
+        run: |
+          docker compose -p autokb-test -f docker-compose.test.yml up -d --force-recreate
+          for i in $(seq 1 40); do
+            if docker exec autokb-test-manager curl -sf http://localhost:80/api/health >/dev/null 2>&1; then
+              echo "manager healthy"; break
+            fi
+            sleep 3
+          done
+
+      - name: Run the E2E harness (unfiltered)
+        run: docker exec autokb-test-manager python -u /src/testing/test_runner.py confirm --reset
+
+      - name: Tear down
+        if: always()
+        run: docker compose -p autokb-test -f docker-compose.test.yml down

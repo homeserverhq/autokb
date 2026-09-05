@@ -15,10 +15,9 @@ import json
 import os
 import sys
 import time
-import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Type
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 # Ensure /src is on sys.path so sibling package imports work when this
 # module is invoked as a script (`python /src/manager/manager.py`).
@@ -35,14 +34,12 @@ if _PARENT not in sys.path:
 if __name__ == "__main__" and __package__ in (None, ""):
     __package__ = "manager"
 
-import asyncpg
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from utils.constants import (
     ACCESS_PRIVATE,
     ACCESS_PUBLIC,
-    AUTOKB_RESERVED_NAMES,
     DEBOUNCE_SECONDS,
     NOTIFY_CHANNEL,
     P_QUEUE_KEY,
@@ -51,28 +48,38 @@ from utils.constants import (
     STATE_ENABLED,
     STATE_ERROR,
     STATE_IN_PROGRESS,
-    SSE_KEEPALIVE_SECONDS,
     SUB_TYPE_EVENT_BASED,
     SUB_TYPE_SCHEDULED,
     TRIGGERABLE_STATES,
-    WATCHDOG_INTERVAL,
-    WATCHDOG_TIMEOUT_S,
 )
 
-# Maximum length of a plugin name in characters. Enforced at the Dev Lab
-# endpoints (validate + save) to keep plugin grid cards from overflowing.
-MAX_PLUGIN_NAME_LEN = 32
-MAX_DISPLAY_NAME_LEN = 64
+from manager.devlab import (  # noqa: E402
+    MAX_DISPLAY_NAME_LEN,
+    MAX_PLUGIN_NAME_LEN,
+    _find_plugin_class_in_module,
+    _find_sink_class_in_module,
+    _require_display_name,
+    _set_metadata_display_name_in_source,
+    _validate_plugin_code,
+    _validate_sink_code,
+)
+from manager.services import run_notify_bridge, run_watchdog, sse_generator  # noqa: E402
+from manager.validation import (  # noqa: E402
+    _ensure_target_remote,
+    _validate_access_level,
+    _validate_pages_per_batch,
+    _validate_schedule_times,
+    _validate_subscription_name,
+    _validate_target_name,
+)
+
 from utils.database import DatabaseManager
 from utils.misc_utils import (
-    DecryptionError,
     collect_password_field_names,
     encrypt_password_fields,
     get_logger,
     is_valid_cron,
-    sanitize_name,
     schema_hash,
-    send_smtp_notification,
     validate_config_against_schema,
 )
 from utils.queue_utils import QueueManager, wait_for_redis
@@ -275,11 +282,15 @@ async def lifespan(app: FastAPI):
     STATE["coord_task"] = coord_task
 
     # -- start asyncpg LISTEN bridge --
-    listen_task = asyncio.create_task(_listen_bridge())
+    listen_task = asyncio.create_task(
+        run_notify_bridge(DATABASE_URL, NOTIFY_CHANNEL, LOG, _handle_notify)
+    )
     STATE["listen_task"] = listen_task
 
     # -- start watchdog --
-    watchdog_task = asyncio.create_task(_watchdog_loop())
+    watchdog_task = asyncio.create_task(
+        run_watchdog(STATE["db"], STATE["queue"], LOG, SMTP_CONFIG)
+    )
     STATE["watchdog_task"] = watchdog_task
 
     # -- start file watcher --
@@ -321,29 +332,6 @@ def _wait_for_db() -> DatabaseManager:
 # ---------------------------------------------------------------------------
 # LISTEN/NOTIFY bridge (asyncpg)
 # ---------------------------------------------------------------------------
-async def _listen_bridge() -> None:
-    """Connect to Postgres via asyncpg and forward pg_notify to SSE clients."""
-    backoff = 1.0
-    while True:
-        try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            await conn.add_listener(NOTIFY_CHANNEL, lambda _c, _pid, _ch, payload: asyncio.create_task(
-                _handle_notify(payload)
-            ))
-            LOG.info("listening_started", action="asyncpg_listen", result="ok", channel=NOTIFY_CHANNEL)
-            backoff = 1.0
-            # Keep the connection alive
-            while True:
-                await asyncio.sleep(60)
-                await conn.execute("SELECT 1")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            LOG.warning("listen_disconnected", action="asyncpg_listen", result=str(exc))
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
-
-
 async def _handle_notify(payload: str) -> None:
     """Forward a pg_notify payload to SSE clients — either subscription or target."""
     db: DatabaseManager = STATE["db"]
@@ -441,57 +429,6 @@ def _serialise_target(t, subs, db) -> Dict[str, Any]:
             for s in subs
         ],
     }
-
-
-# ---------------------------------------------------------------------------
-# Watchdog — force-release stale locks
-# ---------------------------------------------------------------------------
-async def _watchdog_loop() -> None:
-    db: DatabaseManager = STATE["db"]
-    queue: QueueManager = STATE["queue"]
-    while True:
-        try:
-            await asyncio.sleep(WATCHDOG_INTERVAL)
-            stale = db.list_stale_in_progress(WATCHDOG_TIMEOUT_S)
-            for row in stale:
-                sub_id = row[0]
-                sub = db.get_subscription(sub_id)
-                if not sub:
-                    continue
-                LOG.warning(
-                    "watchdog_force_releasing",
-                    sub_id=sub_id,
-                    name=sub.name,
-                    action="watchdog",
-                    result="releasing_lock",
-                )
-                queue.force_release_lock(sub_id)
-                rc = db.update_status(
-                    sub_id, STATE_ERROR, last_error="Watchdog: no heartbeat", guard="success_to_enabled"
-                )
-                if rc:
-                    LOG.warning(
-                        "watchdog_marked_error",
-                        sub_id=sub_id,
-                        name=sub.name,
-                        action="watchdog",
-                        result="error",
-                    )
-                    try:
-                        send_smtp_notification(
-                            subject=f"[AutoKB] Watchdog: {sub.name}",
-                            body=(
-                                f"Watchdog force-released lock for subscription {sub.name!r} (id={sub_id}).\n"
-                                "No heartbeat was received within the watchdog timeout."
-                            ),
-                            **SMTP_CONFIG,
-                        )
-                    except Exception:
-                        pass
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            LOG.error("watchdog_error", action="watchdog", result=str(exc), traceback=traceback.format_exc())
 
 
 # ---------------------------------------------------------------------------
@@ -1092,287 +1029,6 @@ def api_dev_lab_save(body: Dict[str, Any] = Body(...)):
     return {"ok": True, "path": target_path, "mode": mode, "plugin_id": sanitized}
 
 
-def _find_plugin_class_in_module(module: Any) -> Optional[Type[Any]]:
-    """Return the single BaseSubscription subclass defined in ``module``."""
-    from utils.plugin_loading import find_plugin_subclass
-    return find_plugin_subclass(module)
-
-
-def _require_display_name(body: Dict[str, Any]) -> str:
-    dn = (body.get("display_name") or "").strip()
-    if not dn:
-        raise HTTPException(status_code=400, detail="Display name is required")
-    if len(dn) > MAX_DISPLAY_NAME_LEN:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Display name too long: {len(dn)} chars (max {MAX_DISPLAY_NAME_LEN})",
-        )
-    if any(ord(c) < 32 for c in dn):
-        raise HTTPException(status_code=400, detail="Display name cannot contain control characters")
-    return dn
-
-
-def _set_metadata_display_name_in_source(code: str, display_name: str,
-                                          base_class_marker: str = "BaseSubscription") -> str:
-    """Set or add a ``display_name`` key in the class-level ``metadata`` dict."""
-    import ast
-    new_value_repr = f'"{display_name}"'
-    try:
-        tree = ast.parse(code, filename="<dev_lab>")
-    except SyntaxError:
-        return code
-    target_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
-                if base_class_marker in bn:
-                    target_class = node
-                    break
-        if target_class is not None:
-            break
-    if target_class is None:
-        return code
-    metadata_assign = None
-    for node in target_class.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "metadata" for t in node.targets
-        ):
-            if isinstance(node.value, ast.Dict):
-                metadata_assign = node
-                break
-    if metadata_assign is None:
-        return code
-    dict_node = metadata_assign.value
-    # Try to replace an existing display_name value.
-    for i, key in enumerate(dict_node.keys):
-        if key is None:
-            continue
-        key_str = None
-        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-            key_str = key.value
-        elif hasattr(ast, "unparse"):
-            try:
-                key_str = ast.unparse(key)
-            except Exception:
-                pass
-        if key_str == "display_name":
-            val = dict_node.values[i]
-            if isinstance(val, ast.Constant) and hasattr(val, "end_lineno") and val.end_lineno is not None:
-                start_line = val.lineno - 1
-                start_col = val.col_offset
-                end_line = val.end_lineno - 1
-                end_col = val.end_col_offset
-                lines = code.splitlines(keepends=True)
-                if start_line == end_line:
-                    line = lines[start_line]
-                    lines[start_line] = line[:start_col] + new_value_repr + line[end_col:]
-                else:
-                    first_part = lines[start_line][:start_col] + new_value_repr
-                    last_part = lines[end_line][end_col:]
-                    lines[start_line] = first_part + last_part
-                    del lines[start_line + 1:end_line + 1]
-                return "".join(lines)
-            return code
-    # Insert after the "name" entry.
-    name_end = None
-    for i, key in enumerate(dict_node.keys):
-        if key is None:
-            continue
-        key_str = None
-        if isinstance(key, ast.Constant) and isinstance(key.value, str):
-            key_str = key.value
-        elif hasattr(ast, "unparse"):
-            try:
-                key_str = ast.unparse(key)
-            except Exception:
-                pass
-        if key_str == "name":
-            val = dict_node.values[i]
-            if isinstance(val, ast.Constant) and hasattr(val, "end_lineno") and val.end_lineno is not None:
-                name_end = (val.end_lineno - 1, val.end_col_offset)
-            break
-    if name_end is None:
-        return code
-    line_no, col = name_end
-    lines = code.splitlines(keepends=True)
-    name_line = lines[line_no]
-    indent = name_line[: len(name_line) - len(name_line.lstrip())]
-    lines[line_no] = (
-        lines[line_no][:col] + ",\n" + indent + f'"display_name": {new_value_repr}' + lines[line_no][col:]
-    )
-    return "".join(lines)
-
-
-def _validate_plugin_code(code: str, plugin_name: str) -> Dict[str, Any]:
-    """Run a static validation pass against the supplied code."""
-    try:
-        sanitized = sanitize_name(plugin_name)
-    except ValueError as exc:
-        return {"ok": False, "error": f"Invalid plugin name: {exc}"}
-    if sanitized != plugin_name:
-        return {"ok": False, "error": f"Plugin name must already be sanitized; got {plugin_name!r}"}
-
-    import ast
-    try:
-        tree = ast.parse(code, filename=f"{plugin_name}.py")
-    except SyntaxError as exc:
-        return {"ok": False, "error": f"Syntax error: {exc}"}
-
-    # Find a class with a BaseSubscription parent
-    found_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
-                if "BaseSubscription" in bn:
-                    found_class = node
-                    break
-        if found_class:
-            break
-    if found_class is None:
-        return {"ok": False, "error": "No class inheriting from BaseSubscription found"}
-
-    # Check required methods/attributes
-    has_getData = any(isinstance(n, ast.FunctionDef) and n.name == "getData" for n in ast.walk(found_class))
-    has_get_schema = any(isinstance(n, ast.FunctionDef) and n.name == "get_schema" for n in ast.walk(found_class))
-    if not has_getData:
-        return {"ok": False, "error": "Missing getData() method"}
-    if not has_get_schema:
-        return {"ok": False, "error": "Missing get_schema() method"}
-
-    # metadata
-    has_metadata = any(
-        isinstance(n, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "metadata" for t in n.targets
-        )
-        for n in found_class.body
-    )
-    if not has_metadata:
-        return {"ok": False, "error": "Missing class-level 'metadata' attribute"}
-
-    if sanitized in AUTOKB_RESERVED_NAMES:
-        return {"ok": False, "error": f"Plugin name '{plugin_name}' is reserved and cannot be used."}
-
-    return {"ok": True, "plugin_id": sanitized}
-
-
-_SINK_ABSTRACT_METHODS = [
-    "add_datafile",
-    "update_datafile",
-    "remove_datafile",
-    "add_target",
-    "remove_target",
-    "clear_target",
-]
-
-
-def _find_sink_class_in_module(module: Any) -> Optional[Type[Any]]:
-    """Return the single BaseSink subclass defined in ``module``."""
-    from utils.sink_base import BaseSink
-    import inspect as _inspect
-    found = None
-    for _, obj in _inspect.getmembers(module, _inspect.isclass):
-        if obj is BaseSink:
-            continue
-        if issubclass(obj, BaseSink) and obj.__module__ == module.__name__:
-            found = obj
-            break
-    return found
-
-
-def _validate_sink_code(code: str, service_name: str) -> Dict[str, Any]:
-    """Run a static validation pass against Sink service code.
-
-    Mirrors ``_validate_plugin_code`` but for ``BaseSink`` subclasses:
-    the class must define the ``metadata`` dict (with a ``name`` key) and
-    implement all six abstract remote-operation methods. The service name
-    must already be sanitized (it becomes the ``*Sink.py`` file stem).
-    """
-    try:
-        sanitized = sanitize_name(service_name)
-    except ValueError as exc:
-        return {"ok": False, "error": f"Invalid Sink service name: {exc}"}
-    if sanitized != service_name:
-        return {"ok": False, "error": f"Sink service name must already be sanitized; got {service_name!r}"}
-
-    import ast
-    try:
-        tree = ast.parse(code, filename=f"{service_name}.py")
-    except SyntaxError as exc:
-        return {"ok": False, "error": f"Syntax error: {exc}"}
-
-    found_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                bn = ast.unparse(base) if hasattr(ast, "unparse") else getattr(base, "id", "")
-                if "BaseSink" in bn:
-                    found_class = node
-                    break
-        if found_class:
-            break
-    if found_class is None:
-        return {"ok": False, "error": "No class inheriting from BaseSink found"}
-
-    for method in _SINK_ABSTRACT_METHODS:
-        has_method = any(
-            isinstance(n, ast.FunctionDef) and n.name == method for n in ast.walk(found_class)
-        )
-        if not has_method:
-            return {"ok": False, "error": f"Missing {method}() method"}
-
-    has_metadata = any(
-        isinstance(n, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "metadata" for t in n.targets
-        )
-        for n in found_class.body
-    )
-    if not has_metadata:
-        return {"ok": False, "error": "Missing class-level 'metadata' attribute"}
-
-    # The registry requires sanitize_name(metadata["name"]) == file stem,
-    # so the code's metadata name must sanitize to the provided name.
-    meta_name = None
-    for node in found_class.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "metadata" for t in node.targets
-        ):
-            if isinstance(node.value, ast.Dict):
-                for i, key in enumerate(node.value.keys):
-                    if key is None:
-                        continue
-                    key_str = None
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                        key_str = key.value
-                    elif hasattr(ast, "unparse"):
-                        try:
-                            key_str = ast.unparse(key)
-                        except Exception:
-                            pass
-                    if key_str == "name":
-                        val = node.value.values[i]
-                        if isinstance(val, ast.Constant) and isinstance(val.value, str):
-                            meta_name = val.value
-                        break
-            break
-    if not meta_name:
-        return {"ok": False, "error": "Missing metadata['name'] string in Sink service class"}
-    try:
-        if sanitize_name(meta_name) != sanitized:
-            return {
-                "ok": False,
-                "error": (
-                    f"metadata['name'] ({meta_name!r}) must sanitize to the service name "
-                    f"{sanitized!r}"
-                ),
-            }
-    except ValueError:
-        return {"ok": False, "error": f"metadata['name'] {meta_name!r} is not a valid name"}
-
-    return {"ok": True, "service_name": sanitized}
-
-
 # ---------------------------------------------------------------------------
 # Plugin management
 # ---------------------------------------------------------------------------
@@ -1420,48 +1076,13 @@ async def api_events():
 
     async def gen():
         try:
-            async for chunk in _sse_generator_with_queue(client_queue):
+            async for chunk in sse_generator(STATE["db"], STATE["registry"], client_queue, _serialise_subscription):
                 yield chunk
         finally:
             sse_clients.discard(client_queue)
             LOG.debug("sse_client_disconnected", action="sse", result="ok", total_clients=len(sse_clients))
 
     return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-async def _sse_generator_with_queue(client_queue: asyncio.Queue):
-    db: DatabaseManager = STATE["db"]
-    reg: ManagerPluginRegistry = STATE["registry"]
-    # Send the initial snapshot so the client is fully synchronized. Items are
-    # yielded directly (never enqueued up front into the bounded per-client
-    # queue): the old code awaited put() on a maxsize=1000 queue BEFORE the
-    # consumer loop started, so >1000 subscriptions deadlocked the feed.
-    snapshot = []
-    for sub in db.list_subscriptions(include_deleted=False):
-        rec = reg.get(sub.plugin_id)
-        password_fields = rec.password_fields if rec else []
-        d = _serialise_subscription(sub, password_fields)
-        d["plugin_display_name"] = rec.display_name if rec else sub.plugin_id
-        snapshot.append({"type": "subscription_update", "data": d})
-    # Sentinel so the client can detect the snapshot is complete.
-    snapshot.append({"type": "snapshot_complete"})
-    last_keepalive = time.time()
-    for ev in snapshot:
-        yield f"data: {json.dumps(ev)}\n\n"
-        last_keepalive = time.time()
-    try:
-        while True:
-            try:
-                ev = await asyncio.wait_for(client_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                if time.time() - last_keepalive > SSE_KEEPALIVE_SECONDS:
-                    yield ":keepalive\n\n"
-                    last_keepalive = time.time()
-                continue
-            yield f"data: {json.dumps(ev)}\n\n"
-            last_keepalive = time.time()
-    except asyncio.CancelledError:
-        return
 
 
 # ---------------------------------------------------------------------------
@@ -1701,183 +1322,6 @@ def api_target_detail(target_id: str):
     data = _serialise_target(t, subs, db)
     data["subscriptions"] = enriched
     return data
-
-
-_TARGET_NAME_MAX_LEN = 255
-_SUBSCRIPTION_NAME_MAX_LEN = 255
-
-
-def _validate_target_name(name: str) -> str:
-    """Validate a Data Target name using the canonical-form check.
-
-    The name is accepted only if it is already in canonical form
-    (``sanitize_name(name) == name``) — i.e. sanitization changes nothing.
-    The provided name is never converted or coalesced; invalid names are
-    rejected outright with a clear error.
-    """
-    if not isinstance(name, str) or not name.strip():
-        raise HTTPException(status_code=400, detail="Target name is required")
-    name = name.strip()
-    if len(name) > _TARGET_NAME_MAX_LEN:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Target name is too long ({len(name)} chars; max {_TARGET_NAME_MAX_LEN})",
-        )
-    try:
-        if sanitize_name(name) != name:
-            raise ValueError(name)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Target name {name!r} is invalid. Use only letters, numbers, "
-                "periods, and hyphens — no spaces or symbols, no '..', and no "
-                "leading or trailing period."
-            ),
-        )
-    return name
-
-
-def _validate_schedule_times(start, end) -> None:
-    """Validate an optional daily upload window (``"HH:MM"``, 24-hour).
-
-    Both empty → no scheduling (OK). Exactly one set, unparseable, out-of-range,
-    or equal bounds → 400. Times are interpreted in the host's local timezone.
-    """
-    def _clean(v) -> str:
-        if v is None:
-            return ""
-        if not isinstance(v, str):
-            raise HTTPException(status_code=400, detail="schedule_start/schedule_end must be strings")
-        return v.strip()
-
-    s, e = _clean(start), _clean(end)
-    if not s and not e:
-        return
-    if not s or not e:
-        raise HTTPException(
-            status_code=400,
-            detail="schedule_start and schedule_end must both be set, or both left blank",
-        )
-    try:
-        sh, sm_ = s.split(":", 1)
-        eh, em_ = e.split(":", 1)
-        shh, smm = int(sh), int(sm_)
-        ehh, emm = int(eh), int(em_)
-    except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status_code=400, detail="Schedule times must be HH:MM (24-hour)")
-    if not (0 <= shh <= 23 and 0 <= smm <= 59 and 0 <= ehh <= 23 and 0 <= emm <= 59):
-        raise HTTPException(status_code=400, detail="Schedule times must be HH:MM (24-hour)")
-    if shh * 60 + smm == ehh * 60 + emm:
-        raise HTTPException(status_code=400, detail="Schedule start and end must differ")
-
-
-def _validate_pages_per_batch(value) -> int:
-    """Validate an optional ``pages_per_batch`` (int in [1, 100], default 10).
-
-    None → 10. Non-integer, boolean, or out-of-range → 400.
-    """
-    if value is None:
-        return 10
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise HTTPException(
-            status_code=400,
-            detail="pages_per_batch must be an integer between 1 and 100",
-        )
-    if not (1 <= value <= 100):
-        raise HTTPException(
-            status_code=400,
-            detail="pages_per_batch must be between 1 and 100",
-        )
-    return value
-
-
-def _validate_access_level(value) -> str:
-    """Validate an optional ``access_level`` (PRIVATE or PUBLIC, default PRIVATE).
-
-    None → PRIVATE. Anything else outside the two allowed values → 400.
-    """
-    if value is None:
-        return ACCESS_PRIVATE
-    if value not in (ACCESS_PRIVATE, ACCESS_PUBLIC):
-        raise HTTPException(
-            status_code=400,
-            detail="access_level must be either PRIVATE or PUBLIC",
-        )
-    return value
-
-
-def _validate_subscription_name(name: str) -> str:
-    """Validate a subscription name using the canonical-form check.
-
-    Mirrors ``_validate_target_name`` but periods are not allowed —
-    subscription names accept only letters, numbers, and hyphens.
-    The provided name is never converted or coalesced; invalid names are
-    rejected outright with a clear error.
-    """
-    if not isinstance(name, str) or not name.strip():
-        raise HTTPException(status_code=400, detail="Subscription name is required")
-    name = name.strip()
-    if len(name) > _SUBSCRIPTION_NAME_MAX_LEN:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Subscription name is too long ({len(name)} chars; max {_SUBSCRIPTION_NAME_MAX_LEN})",
-        )
-    if "." in name:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Subscription name {name!r} is invalid. Use only letters, "
-                "numbers, and hyphens — no periods, spaces, or symbols."
-            ),
-        )
-    try:
-        if sanitize_name(name) != name:
-            raise ValueError(name)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Subscription name {name!r} is invalid. Use only letters, "
-                "numbers, and hyphens — no periods, spaces, or symbols."
-            ),
-        )
-    return name
-
-
-def _ensure_target_remote(ds_row, db, sink_registry, log) -> None:
-    """Synchronously ensure the remote target resource exists.
-
-    Called at target create/update time, BEFORE any queue items are pushed,
-    so the remote resource (e.g. the OpenWebUI Knowledge Base) is guaranteed
-    to exist before the worker reconciles. The recon engine must never create
-    the remote target — it only reads ``remote_target_id`` from the DB.
-    """
-    if sink_registry is None:
-        raise HTTPException(status_code=502, detail="Sink registry is not loaded")
-    svc_row = db.get_sink(ds_row.service_id)
-    if svc_row is None:
-        raise HTTPException(status_code=404, detail="Sink not found")
-    try:
-        api_key = db.decrypt_target_api_key(ds_row)
-    except DecryptionError as exc:
-        raise HTTPException(status_code=500, detail=f"Target API key decryption failed: {exc}") from exc
-    # Patch the decrypted api_key onto a copy of the row so the sink instance
-    # (which reads ``target_row.api_key``) gets the real key.
-    import copy
-    patched = copy.copy(ds_row)
-    patched.api_key = api_key
-    svc = sink_registry.load_service_for_recon(svc_row.name, patched, db)
-    if svc is None:
-        raise HTTPException(status_code=502, detail=f"Sink service {svc_row.name!r} is not available")
-    if svc.remote_target_id:
-        return
-    try:
-        svc.base_add_target()
-    except Exception as exc:  # noqa: BLE001
-        log.error("target_remote_create_failed", target_id=ds_row.id,
-                  service=svc_row.name, error=str(exc))
-        raise HTTPException(status_code=502, detail=f"Failed to create remote target: {exc}")
 
 
 @app.post("/api/sinks/{service_id}/targets")

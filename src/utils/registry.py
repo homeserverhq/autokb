@@ -1,7 +1,6 @@
 """Plugin registry — discovery, validation, and reload logic."""
 
 import importlib.util
-import inspect
 import json
 import os
 import sys
@@ -28,6 +27,7 @@ from .misc_utils import (
     schema_hash,
 )
 from .plugin_base import BaseSubscription
+from .plugin_loading import find_plugin_subclass
 
 
 @dataclass
@@ -182,13 +182,7 @@ class PluginRegistry:
         spec.loader.exec_module(module)
 
         # Locate the BaseSubscription subclass.
-        cls = None
-        for _, obj in inspect.getmembers(module, inspect.isclass):
-            if obj is BaseSubscription:
-                continue
-            if issubclass(obj, BaseSubscription) and obj.__module__ == module.__name__:
-                cls = obj
-                break
+        cls = find_plugin_subclass(module)
         if cls is None:
             raise ValueError(f"No BaseSubscription subclass found in {path}")
 
@@ -248,26 +242,4 @@ class PluginRegistry:
             password_fields=password_fields,
         )
 
-    # ----- load a plugin fresh for a single execution (no sys.modules cache) -----
-    def load_plugin_for_execution(self, plugin_id: str) -> Optional[Type[BaseSubscription]]:
-        """Return the plugin class for a fresh load (used by the Worker)."""
-        rec = self._records.get(plugin_id)
-        if rec is None:
-            return None
-        path = rec.file_path
-        spec = importlib.util.spec_from_file_location(f"_plugin_exec_{plugin_id}", path)
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        # Do NOT add to sys.modules so subsequent reloads don't return the
-        # cached class.
-        spec.loader.exec_module(module)
-        for _, obj in inspect.getmembers(module, inspect.isclass):
-            if obj is BaseSubscription:
-                continue
-            if issubclass(obj, BaseSubscription) and obj.__module__ == module.__name__:
-                return obj
-        return None
-
-
-__all__ = ["PluginRegistry", "PluginRecord"]
+    __all__ = ["PluginRegistry", "PluginRecord"]

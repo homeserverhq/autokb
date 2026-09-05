@@ -377,13 +377,6 @@ def collect_password_field_names(schema: Dict[str, Any]) -> List[str]:
     return out
 
 
-def strip_password_fields(config: Dict[str, Any], password_fields: List[str]) -> Dict[str, Any]:
-    """Return a shallow copy of ``config`` with password fields removed."""
-    if not config:
-        return config
-    return {k: v for k, v in config.items() if k not in password_fields}
-
-
 def encrypt_password_fields(config: Dict[str, Any], password_fields: List[str], cipher: PasswordCipher) -> Dict[str, Any]:
     """Encrypt any password-format fields present in ``config``."""
     if not config:
@@ -833,7 +826,6 @@ __all__ = [
     "augment_schema",
     "ensure_extra_params",
     "collect_password_field_names",
-    "strip_password_fields",
     "encrypt_password_fields",
     "decrypt_password_fields",
     "validate_config_against_schema",

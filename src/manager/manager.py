@@ -39,17 +39,11 @@ import asyncpg
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import text
-
 from utils.constants import (
     ACCESS_PRIVATE,
     ACCESS_PUBLIC,
     AUTOKB_RESERVED_NAMES,
     DEBOUNCE_SECONDS,
-    DELETE_PUSH_CHANNEL,
-    ENQUEUEABLE_STATES,
-    EXIT_SCHEMA_VALIDATION,
-    HEARTBEAT_TIMEOUT,
     NOTIFY_CHANNEL,
     P_QUEUE_KEY,
     STATE_DELETED,
@@ -72,7 +66,6 @@ MAX_DISPLAY_NAME_LEN = 64
 from utils.database import DatabaseManager
 from utils.misc_utils import (
     DecryptionError,
-    PasswordCipher,
     collect_password_field_names,
     encrypt_password_fields,
     get_logger,
@@ -567,34 +560,6 @@ async def _file_watcher() -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             LOG.error("file_watcher_error", action="file_watcher", result=str(exc))
-
-
-# ---------------------------------------------------------------------------
-# Dynamic plugin custom routes — handled at request time
-# ---------------------------------------------------------------------------
-async def _handle_plugin_custom_route(request: Request):
-    """Look up the plugin's custom routes and dispatch."""
-    path = request.url.path
-    # Strip /api/plugins/{plugin_id} prefix
-    parts = path.split("/", 4)
-    if len(parts) < 5:
-        raise HTTPException(status_code=404, detail="Not found")
-    plugin_id = parts[3]
-    sub_path = "/" + parts[4] if len(parts) > 4 else "/"
-    method = request.method
-    reg: ManagerPluginRegistry = STATE["registry"]
-    rec = reg.get(plugin_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail=f"Plugin {plugin_id!r} not found")
-    for route in rec.cls().get_custom_routes() or []:
-        if route.path == sub_path and (route.method or "GET").upper() == method:
-            handler = route.handler
-            value = handler()
-            import asyncio as _asyncio
-            if _asyncio.iscoroutine(value):
-                value = await value
-            return JSONResponse(content=value)
-    raise HTTPException(status_code=404, detail="No matching custom route")
 
 
 # ---------------------------------------------------------------------------
@@ -1129,16 +1094,8 @@ def api_dev_lab_save(body: Dict[str, Any] = Body(...)):
 
 def _find_plugin_class_in_module(module: Any) -> Optional[Type[Any]]:
     """Return the single BaseSubscription subclass defined in ``module``."""
-    from utils.plugin_base import BaseSubscription
-    import inspect as _inspect
-    found = None
-    for _, obj in _inspect.getmembers(module, _inspect.isclass):
-        if obj is BaseSubscription:
-            continue
-        if issubclass(obj, BaseSubscription) and obj.__module__ == module.__name__:
-            found = obj
-            break
-    return found
+    from utils.plugin_loading import find_plugin_subclass
+    return find_plugin_subclass(module)
 
 
 def _require_display_name(body: Dict[str, Any]) -> str:

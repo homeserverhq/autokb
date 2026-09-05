@@ -98,19 +98,46 @@ class SinkRegistry:
         for entry in sorted(os.listdir(self._sinks_dir)):
             if entry.startswith(".") or not entry.endswith("Sink.py"):
                 continue
+            if os.path.isdir(os.path.join(self._sinks_dir, entry)):
+                continue  # a directory named XSink.py is not a sink
             out.append(entry)
         return out
 
-    def reload_all(self) -> None:
-        self._records = {}
+    def reload_all(self) -> Dict[str, str]:
+        """Reload all services from disk, retaining previous records on failure.
+
+        Mirrors ``PluginRegistry.reload_all``: returns a ``{file: error}`` map
+        for files that failed to load, keeps the previous record for a failed
+        service so live subscriptions keep working, and drops services whose
+        primary-dir file was removed. Records lazy-loaded from the on-disk
+        fallback dir are retained while their backing file still exists, so a
+        reload can never silently make a working service vanish from the API.
+        """
+        errors: Dict[str, str] = {}
+        new_records: Dict[str, SinkServiceRecord] = {}
         for fname in self.scan_files():
             path = os.path.join(self._sinks_dir, fname)
             try:
                 record = self._load_file(path)
-                self._records[record.service_name] = record
+                new_records[record.service_name] = record
                 self._log.info("sink_service_loaded", service=record.service_name, file=fname)
             except Exception as exc:
+                errors[fname] = str(exc)
                 self._log.error("sink_load_failed", file=fname, error=str(exc))
+                for prior in self._records.values():
+                    if prior.file_path == path:
+                        new_records[prior.service_name] = prior
+                        break
+        # Retain prior records (incl. lazy-loaded fallback ones) whose file
+        # still exists on disk but is not part of the primary scan.
+        new_paths = {r.file_path for r in new_records.values()}
+        for name, prior in self._records.items():
+            if name in new_records or prior.file_path in new_paths:
+                continue
+            if os.path.isfile(prior.file_path):
+                new_records[name] = prior
+        self._records = new_records
+        return errors
 
     def _load_file(self, path: str) -> "SinkServiceRecord":
         stem = os.path.splitext(os.path.basename(path))[0]
@@ -146,6 +173,10 @@ class SinkRegistry:
                 f"Sink file stem {raw_service_name!r} != sanitized metadata.name {sname!r}"
             )
 
+        from .constants import AUTOKB_RESERVED_NAMES
+        if svc_name in AUTOKB_RESERVED_NAMES:
+            raise ValueError(f"Sink service {svc_name!r} name is reserved by AUTOKB_RESERVED_DSN")
+
         return SinkServiceRecord(
             service_name=svc_name,
             cls=cls,
@@ -159,10 +190,6 @@ class SinkRegistry:
         if rec is None:
             return None
         return rec.cls(target_row, db)
-
-    def lookup_service_name(self, db_service_name: str) -> str:
-        """Map a ``sink.name`` (from DB) to the class metadata name."""
-        return db_service_name
 
 
 __all__ = ["SinkRegistry", "SinkServiceRecord"]

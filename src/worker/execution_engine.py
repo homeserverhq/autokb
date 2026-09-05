@@ -64,7 +64,6 @@ from utils.misc_utils import (
     validate_config_against_schema,
 )
 from utils.registry import PluginRecord
-from utils.plugin_base import BaseSubscription
 
 
 LOG_FILE = "/logs/worker.log"
@@ -428,23 +427,6 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
     return ExecutionResult(outcome="error", exit_string=exit_string, traceback=tb_text)
 
 
-def registry_load_class_for_execution(rec: PluginRecord):
-    """Re-load the plugin class fresh from disk for a single execution."""
-    import importlib.util
-    import inspect
-    spec = importlib.util.spec_from_file_location(f"_plugin_exec_{rec.plugin_id}", rec.file_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load spec for {rec.file_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    for _, obj in inspect.getmembers(module, inspect.isclass):
-        if obj is BaseSubscription:
-            continue
-        if issubclass(obj, BaseSubscription) and obj.__module__ == module.__name__:
-            return obj
-    raise RuntimeError(f"No BaseSubscription subclass in {rec.file_path}")
-
-
 DATABASE_URL_FOR_CHILD = os.environ.get("DATABASE_URL", "postgresql://autokb:autokb@autokb-db:5432/autokb")
 
 
@@ -458,24 +440,11 @@ def _child_main(file_path: str, config: Dict[str, Any], sub_id: str, sub_name: s
     backwards compatibility.
     """
     log = get_logger(f"worker-child", LOG_FILE)
-    # Load the plugin class fresh from disk
+    # Load the plugin class fresh from disk (shared loader, no sys.modules)
     cls = None
     try:
-        import importlib.util
-        import inspect
-        spec = importlib.util.spec_from_file_location(f"_plugin_exec_{os.path.basename(file_path)}", file_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Could not load spec for {file_path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        for _, obj in inspect.getmembers(module, inspect.isclass):
-            if obj is BaseSubscription:
-                continue
-            if issubclass(obj, BaseSubscription) and obj.__module__ == module.__name__:
-                cls = obj
-                break
-        if cls is None:
-            raise RuntimeError(f"No BaseSubscription subclass in {file_path}")
+        from utils.plugin_loading import load_plugin_class
+        cls = load_plugin_class(file_path)
         instance = cls()
     except Exception as exc:  # noqa: BLE001
         _emit_exception_to_file(err_path, exc)

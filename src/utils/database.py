@@ -2,7 +2,6 @@
 
 import json
 import os
-import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -81,7 +80,6 @@ class Subscription(Base):
     sub_type = Column(String(32), nullable=False, default="SCHEDULED")
     cron = Column(String(255), nullable=True)
     description = Column(Text, nullable=True)
-    password_schema_hash = Column(String(128), nullable=True)
 
     __table_args__ = (UniqueConstraint("plugin_id", "name", name="uq_subscriptions_plugin_id_name"),)
 
@@ -184,7 +182,6 @@ class DatabaseManager:
         self._scoped = scoped_session(self._session_factory)
         self._log = get_logger(component, log_file)
         self._cipher = PasswordCipher()
-        self._lock = threading.RLock()
 
     @contextmanager
     def get_session(self) -> Iterable[Session]:
@@ -470,20 +467,6 @@ class DatabaseManager:
             res = s.execute(
                 text(sql),
                 {"st": new_status, "sid": sub_id, "err": last_error},
-            )
-            if res.rowcount:
-                s.execute(text(f"SELECT pg_notify('{NOTIFY_CHANNEL}', :sid)"), {"sid": sub_id})
-            return res.rowcount
-
-    def update_status_and_heartbeat(self, sub_id: str, new_status: str) -> int:
-        with self.get_session() as s:
-            res = s.execute(
-                text(
-                    "UPDATE subscriptions SET status = :st, last_heartbeat = NOW(), "
-                    "last_updated = NOW() WHERE id = :sid "
-                    "AND status NOT IN ('DELETED', 'DISABLED')"
-                ),
-                {"st": new_status, "sid": sub_id},
             )
             if res.rowcount:
                 s.execute(text(f"SELECT pg_notify('{NOTIFY_CHANNEL}', :sid)"), {"sid": sub_id})
@@ -887,12 +870,6 @@ class DatabaseManager:
         with self.get_session() as s:
             s.query(AKBDatafile).filter(AKBDatafile.id == datafile_id).update(
                 {"last_checked": checked_at if checked_at is not None else datetime.now(tz=tz.utc)}
-            )
-
-    def set_datafiles_last_checked_batch(self, sub_id: str, checked_at) -> None:
-        with self.get_session() as s:
-            s.query(AKBDatafile).filter(AKBDatafile.subscription_id == sub_id).update(
-                {"last_checked": checked_at}
             )
 
     def delete_datafile(self, datafile_id: str) -> None:

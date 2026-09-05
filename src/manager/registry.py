@@ -2,24 +2,17 @@
 
 The Manager runs a hot-swap file watcher that rebuilds the registry on
 change. This module also exposes the breaking-change side effects
-(disable affected subscriptions, send SMTP) and the dynamic route
-mounting.
+(disable affected subscriptions, send SMTP).
 """
 
-import asyncio
-import os
-import shutil
-import threading
-import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 from utils.constants import STATE_DELETED, STATE_DISABLED
 from utils.database import DatabaseManager
 from utils.misc_utils import get_logger, send_smtp_notification
-from utils.registry import PluginRecord, PluginRegistry
+from utils.registry import PluginRegistry
 
 
 class ManagerPluginRegistry(PluginRegistry):
@@ -28,7 +21,6 @@ class ManagerPluginRegistry(PluginRegistry):
     Adds:
       * reference to the DatabaseManager (for hash tracking + breaking
         change disable);
-      * reference to the FastAPI app (for hot-swap route re-mounting);
       * hook callbacks for SMTP notifications on breaking changes.
     """
 
@@ -40,8 +32,6 @@ class ManagerPluginRegistry(PluginRegistry):
         self._db = db
         self._app = app
         self._smtp_config = smtp_config or {}
-        self._routes_mounted: List[str] = []
-        self._mount_lock = threading.RLock()
 
     @property
     def db(self) -> DatabaseManager:
@@ -60,9 +50,9 @@ class ManagerPluginRegistry(PluginRegistry):
             disable_subscriptions_callback=self._on_breaking_change,
             send_smtp_callback=self._send_smtp,
         )
-        # Persist the new hashes and remount custom routes
+        # Persist the new hashes (custom routes are dispatched by the
+        # catch-all /api/plugins/{plugin_id}/{path:path} route, not mounted).
         self._persist_hashes()
-        self._remount_routes()
         return errors
 
     def _on_breaking_change(self, plugin_id: str) -> None:
@@ -102,16 +92,6 @@ class ManagerPluginRegistry(PluginRegistry):
             except Exception as exc:  # noqa: BLE001
                 self._log.error("plugin_state_persist_failed", plugin_id=rec.plugin_id, error=str(exc))
 
-    def _remount_routes(self) -> None:
-        """Re-mount custom plugin routes under ``/api/plugins/{plugin_id}/*``.
-
-        We use a dynamic catch-all route in manager.py (``/api/plugins/{id}/{path:path}``)
-        that looks up the plugin's custom routes at request time, so we don't
-        need to register/unregister routes here.
-        """
-        # No-op: the catch-all in manager.py handles dispatch.
-        pass
-
     def list_metadata(self) -> List[Dict[str, Any]]:
         out = []
         for rec in self.list_records():
@@ -124,13 +104,3 @@ class ManagerPluginRegistry(PluginRegistry):
                 "sub_type": rec.sub_type,
             })
         return out
-
-
-# Patch DatabaseManager to expose ``query_plugin_state_all`` for the manager
-# registry without altering the main file too much.
-def _patch_db() -> None:
-    """No-op placeholder kept for backward compatibility."""
-    pass
-
-
-_patch_db()

@@ -1445,10 +1445,14 @@ def _wipe_test_state() -> None:
     """
     _log("--reset: wiping subscriptions, event log, and test artifacts...")
 
-    # 1. Delete all subscriptions
+    # 1. Delete only test-created subscriptions (never user data). Test runs use
+    # the TEST_SUB_PREFIX (akbtest-); the mini harness uses "mini" names.
     try:
         subs = api_get("/api/subscriptions")
         for sub in subs:
+            name = sub.get("name", "") or ""
+            if not (name.startswith(TEST_SUB_PREFIX) or "mini" in name):
+                continue
             try:
                 requests.delete(
                     f"{MANAGER_URL}/api/subscriptions/{sub['id']}",
@@ -3396,9 +3400,11 @@ def _cleanup_test_plugins() -> None:
     """Remove test plugin files from /src/plugins/ and deregister them via API.
     This runs BEFORE the leak check so the leak check can verify a clean state.
     """
-    real_plugins = {"crawl4AIWebScraperPlugin", "eBiblePlugin",
-                    "ePaperlessDoclingPlugin", "imapFolderWatchPlugin",
-                    "youTubeTranscriptionPlugin"}
+    real_plugins = {
+        os.path.splitext(fn)[0]
+        for fn in os.listdir("/src/builtin_plugins")
+        if fn.endswith(".py")
+    }
 
     # Remove test plugin files from /src/plugins/ (same way _sync_test_plugins added them)
     plugins_dir = "/src/plugins"
@@ -3466,9 +3472,19 @@ def _purge_test_artifacts(leaked: Optional[List[str]] = None) -> None:
     passed, each leftover is appended to it so the caller can decide
     whether to fail (the leak check at the end of a run does this).
     """
-    real_plugins = {"crawl4AIWebScraperPlugin", "eBiblePlugin",
-                    "ePaperlessDoclingPlugin", "imapFolderWatchPlugin",
-                    "youTubeTranscriptionPlugin"}
+    # Real builtin plugins + sinks ship in the image; derive the allowlist
+    # from what is actually present so a newly added builtin is never treated
+    # as a test artifact (and a removed one stops being "real").
+    real_plugins = {
+        os.path.splitext(fn)[0]
+        for fn in os.listdir("/src/builtin_plugins")
+        if fn.endswith(".py")
+    }
+    real_sinks = {
+        os.path.splitext(fn)[0]
+        for fn in os.listdir("/src/builtin_sinks")
+        if fn.endswith(".py")
+    }
     db2 = _sink_db()
     try:
         with db2.get_session() as s:

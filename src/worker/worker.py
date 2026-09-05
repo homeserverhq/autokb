@@ -55,6 +55,10 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://autokb:autokb@autokb
 REDIS_URL = os.environ.get("REDIS_URL", "redis://autokb-redis:6379/0")
 WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "4"))
 
+# How often each worker promotes orphaned S-queue items back to the primary
+# queue (they have no direct consumer; see QueueManager.promote_orphans).
+ORPHAN_SWEEP_SECONDS = int(os.environ.get("AUTOKB_ORPHAN_SWEEP_SECONDS", "30"))
+
 
 def _main() -> None:
     log = get_logger("worker", LOG_FILE)
@@ -137,9 +141,19 @@ def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
     sink_registry.reload_all()
 
     iteration = 0
+    last_sweep = 0.0
     while True:
         iteration += 1
         try:
+            now = time.time()
+            if now - last_sweep >= ORPHAN_SWEEP_SECONDS:
+                last_sweep = now
+                try:
+                    n = queue.promote_orphans()
+                    if n:
+                        log.debug("orphans_promoted", action="sweep", result=f"n={n}")
+                except Exception:
+                    pass
             item = queue.pop_primary(timeout=5)
             if item is None:
                 continue
@@ -152,7 +166,7 @@ def _worker_loop(worker_idx: int, parent_db: DatabaseManager,
             op = OPERATION_FULL if has_full else OPERATION_SINK_ONLY
             queue.drain_all(sub_id)
 
-            if not queue.acquire_lock(sub_id, blocking=True):
+            if queue.acquire_lock(sub_id, blocking=True) is None:
                 queue.push_secondary(sub_id, operation=op)
                 log.debug("lock_busy_secondary", sub_id=sub_id, action="lock", result="busy")
                 continue
@@ -222,7 +236,14 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
 
         rc = db.mark_execution_start(sub_id)
         if rc == 0:
-            log.debug("claim_failed", sub_id=sub_id, name=sub.name, action="claim", result="lost_race")
+            # Claim lost: the sub may have been reset to ENABLED by a previous
+            # completion between the queue push and this claim. Re-enqueue it;
+            # if it is genuinely not runnable (DELETED/DISABLED/ERROR) the
+            # drained item is correctly consumed (nothing to preserve).
+            db.ensure_enqueued(sub_id)
+            rc = db.mark_execution_start(sub_id)
+        if rc == 0:
+            log.debug("claim_failed", sub_id=sub_id, name=sub.name, action="claim", result="not_runnable")
             return
         sub = db.get_subscription(sub_id)
         if sub is None:

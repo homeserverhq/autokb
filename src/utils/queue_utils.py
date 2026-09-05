@@ -2,6 +2,7 @@
 
 import json
 import os
+import secrets
 import socket
 import time
 from contextlib import contextmanager
@@ -76,6 +77,41 @@ def _decode_item(raw: str) -> Optional[Dict[str, str]]:
         return None
 
 
+# Atomically remove every occurrence of a sub_id from a queue list. Uses a Lua
+# script so a concurrent producer push can neither be read-then-lost nor wipe
+# out items added by another process mid-drain (the classic lrange→delete→
+# re-push race). Items for OTHER subscriptions are preserved in order.
+_REMOVE_FOR_SUB_SCRIPT = """
+local removed = 0
+local keep = {}
+for _, raw in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
+    local ok, parsed = pcall(cjson.decode, raw)
+    if ok and parsed and parsed['sub_id'] == ARGV[1] then
+        removed = removed + 1
+    else
+        table.insert(keep, raw)
+    end
+end
+if removed > 0 then
+    redis.call('DEL', KEYS[1])
+    for _, raw in ipairs(keep) do
+        redis.call('RPUSH', KEYS[1], raw)
+    end
+end
+return removed
+"""
+
+# Compare-and-delete for the safety lock: only the process holding <token> may
+# release the lock, so a stale/duplicate holder can never drop another holder's
+# lock out from under it (lock fencing).
+_RELEASE_LOCK_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+
 class QueueManager:
     """Wrapper around Redis for the two-tier queue and safety locks.
 
@@ -85,6 +121,9 @@ class QueueManager:
     def __init__(self, url: str):
         self.url = url
         self._client = _new_client(url)
+        # Per-sub lock tokens for this process's acquisitions, used for
+        # fenced (compare-and-delete) releases and tokenized refreshes.
+        self._lock_tokens: Dict[str, str] = {}
 
     @property
     def client(self) -> redis.Redis:
@@ -110,26 +149,40 @@ class QueueManager:
         return parsed
 
     def drain_all(self, sub_id: str) -> int:
-        """Remove all occurrences of a sub_id from both queues. Returns count removed."""
-        n = self._remove_all_for_sub(P_QUEUE_KEY, sub_id)
-        n += self._remove_all_for_sub(S_QUEUE_KEY, sub_id)
+        """Atomically remove all occurrences of ``sub_id`` from both queues.
+
+        Returns the number of items removed. Atomic (Lua) so a concurrent push
+        can never be dropped between a read and a delete, and never wipes out
+        other subscriptions' items.
+        """
+        n = int(self._client.eval(_REMOVE_FOR_SUB_SCRIPT, 1, P_QUEUE_KEY, sub_id))
+        n += int(self._client.eval(_REMOVE_FOR_SUB_SCRIPT, 1, S_QUEUE_KEY, sub_id))
         return n
 
-    def _remove_all_for_sub(self, key: str, sub_id: str) -> int:
-        removed = 0
-        items = self._client.lrange(key, 0, -1)
-        keep = []
-        for raw in items:
+    def promote_orphans(self) -> int:
+        """Move S-queue items whose safety lock is no longer held back to the
+        primary queue so some worker consumes them.
+
+        The S-queue has no consumer of its own; items land there when the lock
+        is busy, and a narrow race can leave one behind after the last run
+        finished. ``promote_orphans`` is safe to call concurrently from every
+        worker (``LREM`` is atomic, so each item is promoted exactly once).
+        """
+        promoted = 0
+        for raw in self._client.lrange(S_QUEUE_KEY, 0, -1):
             parsed = _decode_item(raw)
-            if parsed is None or parsed.get("sub_id") == sub_id:
-                removed += 1
-            else:
-                keep.append(raw)
-        if removed:
-            self._client.delete(key)
-            for raw in keep:
-                self._client.lpush(key, raw)
-        return removed
+            if parsed is None:
+                self._client.lrem(S_QUEUE_KEY, 1, raw)
+                promoted += 1
+                continue
+            sub_id = parsed.get("sub_id")
+            if not sub_id:
+                continue
+            if not self._client.exists(self._lock_key(sub_id)):
+                if self._client.lrem(S_QUEUE_KEY, 1, raw):
+                    self._client.lpush(P_QUEUE_KEY, raw)
+                    promoted += 1
+        return promoted
 
     def any_full_for(self, sub_id: str) -> bool:
         """Return True if any queued item for *sub_id* has operation=FULL."""
@@ -151,38 +204,59 @@ class QueueManager:
     def queue_depth(self, key: str) -> int:
         return self._client.llen(key)
 
-    def push_secondary_if_locked(self, sub_id: str, operation: str = OPERATION_FULL) -> bool:
-        """Push to the S-Queue if the safety lock is held by someone else."""
-        if not self.acquire_lock(sub_id, blocking=False):
-            self.push_secondary(sub_id, operation=operation)
-            return True
-        return False
-
     # ----- lock operations -----
     def _lock_key(self, sub_id: str) -> str:
         return f"{LOCK_KEY_PREFIX}{sub_id}"
 
-    def acquire_lock(self, sub_id: str, *, blocking: bool = True, ttl: int = LOCK_TTL) -> bool:
+    def acquire_lock(self, sub_id: str, *, blocking: bool = True, ttl: int = LOCK_TTL) -> Optional[str]:
+        """Acquire the safety lock for ``sub_id``.
+
+        Returns the acquisition token on success (used for fenced release /
+        refresh) or ``None`` if the lock could not be acquired. The value
+        stored in Redis is the unique token, so an unreachable stale holder can
+        never release a lock that a newer holder re-acquired.
+        """
         key = self._lock_key(sub_id)
+        token = secrets.token_hex(16)
         if blocking:
             for _ in range(50):
-                if self._client.set(key, "1", nx=True, ex=ttl):
-                    return True
+                if self._client.set(key, token, nx=True, ex=ttl):
+                    self._lock_tokens[sub_id] = token
+                    return token
                 time.sleep(0.1)
-            return False
-        return bool(self._client.set(key, "1", nx=True, ex=ttl))
+            return None
+        if self._client.set(key, token, nx=True, ex=ttl):
+            self._lock_tokens[sub_id] = token
+            return token
+        return None
 
     def refresh_lock(self, sub_id: str, ttl: int = LOCK_TTL) -> bool:
+        """Refresh the TTL of a lock this process owns (tokenized)."""
+        token = self._lock_tokens.get(sub_id)
+        if token is None:
+            return False
+        if self._client.get(self._lock_key(sub_id)) != token:
+            return False
         return bool(self._client.expire(self._lock_key(sub_id), ttl))
 
-    def release_lock(self, sub_id: str) -> None:
-        self._client.delete(self._lock_key(sub_id))
+    def release_lock(self, sub_id: str) -> bool:
+        """Release the lock only if this process still holds it (fenced)."""
+        token = self._lock_tokens.pop(sub_id, None)
+        if token is None:
+            return False
+        return bool(self._client.eval(_RELEASE_LOCK_SCRIPT, 1, self._lock_key(sub_id), token))
 
     def lock_held(self, sub_id: str) -> bool:
         return bool(self._client.exists(self._lock_key(sub_id)))
 
     def force_release_lock(self, sub_id: str) -> None:
-        self.release_lock(sub_id)
+        """Escalate and drop a lock regardless of holder (watchdog path).
+
+        Only used when the owning worker is believed dead; distinct from the
+        fenced ``release_lock`` so normal shutdown can never clobber a lock
+        re-acquired by someone else.
+        """
+        self._client.delete(self._lock_key(sub_id))
 
 
 __all__ = ["QueueManager", "wait_for_redis"]

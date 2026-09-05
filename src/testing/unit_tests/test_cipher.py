@@ -6,7 +6,7 @@ Runnable directly: ``ENCRYPTION_KEY=... python /src/testing/unit_tests/test_ciph
 import os
 import sys
 
-sys.path.insert(0, "/src")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from utils.misc_utils import DecryptionError, PasswordCipher
 
@@ -25,12 +25,15 @@ def test_legacy_compat():
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     import base64
 
-    c = PasswordCipher()
+    key_str = os.environ["ENCRYPTION_KEY"]
+    c = PasswordCipher()  # derived from key_str (600k, resolved salt)
+    # Simulate a token written by the OLD derivation: same key, 100k
+    # iterations, public default salt.
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(), length=32,
         salt=b"autokb-fernet-salt-v1", iterations=100_000,
     )
-    legacy_key = base64.urlsafe_b64encode(kdf.derive(b"encryptionkey"))
+    legacy_key = base64.urlsafe_b64encode(kdf.derive(key_str.encode()))
     old_token = Fernet(legacy_key).encrypt(b"legacy-secret").decode()
     assert c.decrypt(old_token) == "legacy-secret"
 

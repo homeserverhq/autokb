@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, "/src")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from utils.plugin_loading import find_plugin_subclass, load_plugin_class, load_plugin_module
 

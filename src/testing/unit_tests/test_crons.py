@@ -3,9 +3,10 @@
 Runnable directly: ``python /src/testing/unit_tests/test_crons.py``.
 """
 
+import os
 import sys
 
-sys.path.insert(0, "/src")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from utils.constants import LOG_LEVEL  # noqa: F401  (import-time env defaults)
 from utils.misc_utils import cron_due, is_valid_cron

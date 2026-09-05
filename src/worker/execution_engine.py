@@ -172,8 +172,18 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
     stop_event = threading.Event()
     killed_by_watcher = threading.Event()
 
-    def _kill_child(reason: str) -> None:
-        """Terminate the child process and perform post-kill housekeeping."""
+    def _kill_child(reason: str, is_user_cancel: bool = False) -> None:
+        """Terminate the child process and perform post-kill housekeeping.
+
+        ``is_user_cancel=True`` when the watcher observed a user-initiated
+        DISABLED/DELETED status: the child is force-killed (it ignored the
+        cooperative cancellation) but NO EventLog / SMTP heartbeat-timeout
+        alert is produced — that is reserved for genuine heartbeat timeouts.
+        """
+        if proc.poll() is not None:
+            # Child already exited (e.g. between this tick and the kill) —
+            # let the normal return-code path handle it; never double-report.
+            return
         killed_by_watcher.set()
         log.warning(
             "execution_timed_out",
@@ -190,6 +200,17 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
                 proc.kill()
             except Exception:
                 pass
+        if is_user_cancel:
+            # Force-killed an uncooperative run after a user DISABLED/DELETED.
+            # The force-kill IS recorded (exit_code=2, per spec §5.2) but no
+            # "Heartbeat timeout" SMTP alert is sent — the user initiated the
+            # cancellation, so alerting them about it is false noise. The
+            # user-preserved status is left untouched.
+            try:
+                db.record_execution(sub.id, 2, reason)
+            except Exception:
+                pass
+            return
         # Mark ERROR — but only if the status is not DISABLED nor
         # DELETED, to respect any concurrent user action (spec §5.2).
         try:
@@ -242,7 +263,7 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
                 try:
                     cur_sub = db.get_subscription(sub.id)
                     if cur_sub is not None and cur_sub.status in (STATE_DISABLED, STATE_DELETED):
-                        _kill_child(f"cancelled_by_user status={cur_sub.status}")
+                        _kill_child(f"cancelled_by_user status={cur_sub.status}", is_user_cancel=True)
                         return
                 except Exception:
                     pass

@@ -57,6 +57,7 @@ from utils.constants import (
     STATE_ENABLED,
     STATE_ERROR,
     STATE_IN_PROGRESS,
+    SSE_KEEPALIVE_SECONDS,
     SUB_TYPE_EVENT_BASED,
     SUB_TYPE_SCHEDULED,
     TRIGGERABLE_STATES,
@@ -1474,26 +1475,29 @@ async def api_events():
 async def _sse_generator_with_queue(client_queue: asyncio.Queue):
     db: DatabaseManager = STATE["db"]
     reg: ManagerPluginRegistry = STATE["registry"]
-    # Send initial snapshot so the client is fully synchronized.
+    # Send the initial snapshot so the client is fully synchronized. Items are
+    # yielded directly (never enqueued up front into the bounded per-client
+    # queue): the old code awaited put() on a maxsize=1000 queue BEFORE the
+    # consumer loop started, so >1000 subscriptions deadlocked the feed.
+    snapshot = []
     for sub in db.list_subscriptions(include_deleted=False):
         rec = reg.get(sub.plugin_id)
         password_fields = rec.password_fields if rec else []
         d = _serialise_subscription(sub, password_fields)
         d["plugin_display_name"] = rec.display_name if rec else sub.plugin_id
-        await client_queue.put({
-            "type": "subscription_update",
-            "data": d,
-        })
-    # Also include a sentinel so the client can detect the snapshot is
-    # complete (useful for the dashboard plugin-counts).
-    await client_queue.put({"type": "snapshot_complete"})
+        snapshot.append({"type": "subscription_update", "data": d})
+    # Sentinel so the client can detect the snapshot is complete.
+    snapshot.append({"type": "snapshot_complete"})
     last_keepalive = time.time()
+    for ev in snapshot:
+        yield f"data: {json.dumps(ev)}\n\n"
+        last_keepalive = time.time()
     try:
         while True:
             try:
                 ev = await asyncio.wait_for(client_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
-                if time.time() - last_keepalive > 30:
+                if time.time() - last_keepalive > SSE_KEEPALIVE_SECONDS:
                     yield ":keepalive\n\n"
                     last_keepalive = time.time()
                 continue

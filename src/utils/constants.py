@@ -41,7 +41,9 @@ MAX_STARTUP_RETRIES = int(os.environ.get("MAX_STARTUP_RETRIES", "100"))
 # ---------------------------------------------------------------------------
 WATCHDOG_TIMEOUT_S = HEARTBEAT_TIMEOUT * 3
 """Computed watchdog timeout. Used by the Manager to detect stale
-IN_PROGRESS/ENQUEUED subscriptions."""
+IN_PROGRESS subscriptions (stuck executions whose worker died). ENQUEUED
+rows are intentionally not flagged — they are waiting on a free worker and
+have no heartbeat by construction."""
 
 # ---------------------------------------------------------------------------
 # Sink operation types (queue items)

@@ -35,6 +35,10 @@ class OpenWebUISink(BaseSink):
     }
     default_api_url = "http://openwebui-app:8080"
     api_key_env_var = "OPENWEBUI_API_KEY"
+    # OpenWebUI keeps every uploaded file in ONE global file repo and links it
+    # into per-target knowledge bases, so a file can be referenced by several
+    # targets at once. Removal must never delete a still-shared file.
+    shared_file_store = True
 
     def __init__(self, target_row, db):
         super().__init__(target_row, db)

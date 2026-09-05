@@ -51,7 +51,26 @@ def _read_fd_blob(fd: int, max_bytes: int = 16 * 1024 * 1024) -> bytes:
     return b"".join(chunks)
 
 
+def _prune_on_parent_death() -> None:
+    """Best-effort orphan prevention: die if the supervising worker dies.
+
+    Installs Linux ``prctl(PR_SET_PDEATHSIG, SIGKILL)`` so the kernel kills
+    this child the moment its parent (the worker L1 process) exits — even if
+    the parent was hard-killed (SIGKILL) with no chance to clean up. Without
+    this, a dead worker leaves a runaway child that can race a legitimate
+    later run once the safety lock lapses.
+    """
+    try:
+        import ctypes
+        import signal
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, signal.SIGKILL)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _prune_on_parent_death()
     fd = int(os.environ["AUTOKB_CFG_FD"])
     try:
         raw = _read_fd_blob(fd)

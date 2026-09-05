@@ -29,6 +29,7 @@ from utils.misc_utils import DecryptionError, SinkCancelledError, get_logger
 LOG_FILE = "/logs/worker.log"
 _MTIME_TOLERANCE = 0.001  # 1 ms
 _SINK_HEARTBEAT_INTERVAL = 15.0  # seconds between heartbeat/lock refreshes during long passes
+_MAX_CONSECUTIVE_FILE_FAILURES = 5  # per-file remote failures before a target flips to ERROR
 
 
 def _make_cancel_check(db: DatabaseManager, sub_id: str, target_id: str, queue, state: Dict[str, int]):
@@ -262,7 +263,7 @@ def reconcile_subscription_targets(
                 sub_name, error_ds_names, queue,
             )
             if abort_all:
-                _finalize_link_statuses(db, sub_id, summaries, {}, log)
+                _finalize_link_statuses(db, sub_id, summaries, {}, error_ds_names, log)
                 log.info(
                     "sink_recon_aborted",
                     sub_id=sub_id, name=sub_name, target_id=target_id, reason=exc.kind,
@@ -299,7 +300,7 @@ def reconcile_subscription_targets(
         log.error("sink_pass3_failed", sub_id=sub_id, error=str(exc))
 
     healed_total = sum(healed_map.values())
-    _finalize_link_statuses(db, sub_id, summaries, healed_map, log)
+    _finalize_link_statuses(db, sub_id, summaries, healed_map, error_ds_names, log)
 
     log.info(
         "sink_recon_complete",
@@ -309,14 +310,20 @@ def reconcile_subscription_targets(
     )
 
 
-def _finalize_link_statuses(db, sub_id, summaries, healed_map, log) -> None:
+def _finalize_link_statuses(db, sub_id, summaries, healed_map, error_ds_names, log) -> None:
     """Write each processed link back to ENABLED with its final Reconciled message.
 
     Called only after the entire recon (including blocking batch upserts and any
     Pass III healing) has finished, so the link never reports success early.
     Healed files are reported as "updated" (merged count), per product intent.
+
+    Links that errored earlier in this pass (tracked in ``error_ds_names``) are
+    left in ERROR so the failure stays visible and the next recon retries them;
+    the error is never masked by the final "Reconciled" status.
     """
     for tid, counts in summaries.items():
+        if f"{tid}_{sub_id}" in error_ds_names:
+            continue  # leave ERROR links untouched
         add_n, upd_n, rem_n = counts
         upd_n += healed_map.get(tid, 0)
         msg = f"Reconciled: +{add_n} added, ~{upd_n} updated, -{rem_n} removed"
@@ -351,10 +358,18 @@ def _get_service(ds_row, db, sink_registry, log):
 def _reconcile_pass1(
     fs_files, ds_link, target_id, sub_id, db, svc, queue, log, state=None,
 ) -> tuple:
-    """Pass I.1 (FS→target) and I.2 (target→FS removal)."""
+    """Pass I.1 (FS→target) and I.2 (target→FS removal).
+
+    Per-file remote failures are tolerated: a flaky file doesn't abort the
+    whole target pass or flip the link to ERROR. Only after
+    ``_MAX_CONSECUTIVE_FILE_FAILURES`` consecutive failures (a persistent
+    problem, not a blip) does the pass abort so the outer handler marks the
+    link ERROR and notifies. Cancellation is never swallowed.
+    """
     add_count = 0
     update_count = 0
     remove_count = 0
+    fail_streak = 0
     ds_df_rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
     ds_df_by_datafile = {r.datafile_id: r for r in ds_df_rows}
 
@@ -366,9 +381,14 @@ def _reconcile_pass1(
             try:
                 svc.base_remove_datafile(ds_df.datafile_id)
                 remove_count += 1
-            except Exception as exc:
-                log.error("sink_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
+                fail_streak = 0
+            except SinkCancelledError:
                 raise
+            except Exception as exc:
+                fail_streak += 1
+                log.error("sink_remove_failed", datafile_id=ds_df.datafile_id, error=str(exc))
+                if fail_streak >= _MAX_CONSECUTIVE_FILE_FAILURES:
+                    raise
 
     # Pass I.b — Add / update files that are on the FS.
     planned = 0
@@ -409,9 +429,14 @@ def _reconcile_pass1(
                 else:
                     svc.base_add_datafile(sub_id, fpath)
                 add_count += 1
-            except Exception as exc:
-                log.error("sink_add_failed", path=fpath, error=str(exc))
+                fail_streak = 0
+            except SinkCancelledError:
                 raise
+            except Exception as exc:
+                fail_streak += 1
+                log.error("sink_add_failed", path=fpath, error=str(exc))
+                if fail_streak >= _MAX_CONSECUTIVE_FILE_FAILURES:
+                    raise
             continue
 
         if _file_matches_db(fpath, df):
@@ -419,9 +444,14 @@ def _reconcile_pass1(
                 try:
                     svc.base_update_datafile(df.id, df.hash)
                     update_count += 1
-                except Exception as exc:
-                    log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    fail_streak = 0
+                except SinkCancelledError:
                     raise
+                except Exception as exc:
+                    fail_streak += 1
+                    log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    if fail_streak >= _MAX_CONSECUTIVE_FILE_FAILURES:
+                        raise
             continue
 
         try:
@@ -435,16 +465,26 @@ def _reconcile_pass1(
                 try:
                     svc.base_update_datafile(df.id, df.hash)
                     update_count += 1
-                except Exception as exc:
-                    log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    fail_streak = 0
+                except SinkCancelledError:
                     raise
+                except Exception as exc:
+                    fail_streak += 1
+                    log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
+                    if fail_streak >= _MAX_CONSECUTIVE_FILE_FAILURES:
+                        raise
         else:
             try:
                 svc.base_update_datafile(df.id, real_hash)
                 update_count += 1
-            except Exception as exc:
-                log.error("sink_update_failed", datafile_id=df.id, hash=real_hash, error=str(exc))
+                fail_streak = 0
+            except SinkCancelledError:
                 raise
+            except Exception as exc:
+                fail_streak += 1
+                log.error("sink_update_failed", datafile_id=df.id, hash=real_hash, error=str(exc))
+                if fail_streak >= _MAX_CONSECUTIVE_FILE_FAILURES:
+                    raise
 
     # Flush any batched upsert that never crossed its size threshold (and any
     # leftover after the removal loop). No-op for sinks that do not batch.

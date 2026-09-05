@@ -64,6 +64,12 @@ class BaseSink(ABC):
     default_api_url: str = ""
     api_key_env_var: Optional[str] = None
 
+    # Set True when a sink keeps every uploaded file in ONE shared remote
+    # store and links it into per-target collections (e.g. OpenWebUI's global
+    # file repo). For such sinks, base_remove_datafile must not delete the
+    # underlying remote file while another target still references it.
+    shared_file_store: bool = False
+
     def __init__(self, target_row: Any, db: Any):
         """*target_row* is an ORM row with attributes:
         ``id, service_id, name, api_url, api_key, remote_target_id, target_extra_params, include_path_in_filename, access_level``
@@ -277,9 +283,20 @@ class BaseSink(ABC):
         self.db.update_target_datafile_hash(self.target_id, datafile_id, new_hash)
 
     def base_remove_datafile(self, datafile_id: str) -> None:
-        """Remove a file from the remote target and delete the join row."""
+        """Remove a file from the remote target and delete the join row.
+
+        For sinks that share one file store across targets (OpenWebUI), the
+        underlying remote file is only deleted when no other target still
+        references this datafile; otherwise just this link's join row is
+        removed and the file stays in the shared store for the other target.
+        """
         t_df = self.db.get_target_datafile(self.target_id, datafile_id)
         if not t_df:
+            return
+        if getattr(self, "shared_file_store", False) and self.db.count_other_target_datafiles(
+            self.target_id, datafile_id
+        ):
+            self.db.delete_target_datafile(self.target_id, datafile_id)
             return
         self.remove_datafile(t_df.remote_datafile_id)
         self.db.delete_target_datafile(self.target_id, datafile_id)

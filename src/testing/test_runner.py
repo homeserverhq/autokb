@@ -2643,7 +2643,11 @@ def _dkb_test_recon_error(db, sub, ds):
     svc.add_datafile = MagicMock(side_effect=RuntimeError("API failure"))
     svc.add_target = MagicMock()
     sub_row = db.get_subscription(sub)
-    _write_output_file_test(sub_row.name, "error_test.md", "will fail")
+    # Exceed the per-file fault-tolerance threshold (6 files > 5 consecutive
+    # failures) so the persistent failure transitions the link to ERROR.
+    paths = []
+    for i in range(6):
+        paths.append(_write_output_file_test(sub_row.name, f"error_test_{i}.md", "will fail"))
     with patch("worker.sink_recon._get_service") as mock_get:
         from worker.sink_recon import reconcile_subscription_targets
         mock_get.return_value = svc
@@ -2651,12 +2655,12 @@ def _dkb_test_recon_error(db, sub, ds):
         reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
         links = db.list_target_subscriptions(ds.id)
         if links[0].status != STATE_ERROR:
-            return False, "link should transition to ERROR after per-file error"
+            return False, "link should transition to ERROR after persistent per-file errors"
     with db.get_session() as s:
-        leaked_path = f"/output/test_plugin/test_sub/error_test.md"
-        df = s.query(AKBDatafile).filter(AKBDatafile.path == leaked_path).first()
-        if df:
-            s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
+        for p in paths:
+            df = s.query(AKBDatafile).filter(AKBDatafile.path == p).first()
+            if df:
+                s.query(AKBDatafile).filter(AKBDatafile.id == df.id).delete()
     return True, "OK"
 
 

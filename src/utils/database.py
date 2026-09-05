@@ -292,11 +292,17 @@ class DatabaseManager:
             )
 
     def list_stale_in_progress(self, timeout_s: int) -> List[Subscription]:
+        """Return subscriptions stuck IN_PROGRESS with a stale heartbeat.
+
+        Only ``IN_PROGRESS`` rows are considered: ``ENQUEUED`` rows have no
+        heartbeat by construction (they are waiting for a free worker), so the
+        watchdog must not punish perfectly healthy queued work.
+        """
         with self.get_session() as s:
             res = s.execute(
                 text(
                     "SELECT id FROM subscriptions "
-                    "WHERE status IN ('ENQUEUED', 'IN_PROGRESS') "
+                    "WHERE status = 'IN_PROGRESS' "
                     "AND (last_heartbeat IS NULL "
                     "  OR (NOW() - last_heartbeat) > make_interval(secs => :t))"
                 ),
@@ -956,6 +962,24 @@ class DatabaseManager:
             s.query(TargetDatafile).filter(
                 TargetDatafile.target_id == target_id
             ).delete()
+
+    def count_other_target_datafiles(self, target_id: str, datafile_id: str) -> int:
+        """Number of OTHER targets still referencing ``datafile_id``.
+
+        Used by sinks that share a file store across targets (OpenWebUI keeps
+        every file in one global repo and links it into knowledge bases): a
+        ``base_remove_datafile`` must not delete the underlying remote file
+        while another target still references it.
+        """
+        with self.get_session() as s:
+            return (
+                s.query(TargetDatafile)
+                .filter(
+                    TargetDatafile.target_id != target_id,
+                    TargetDatafile.datafile_id == datafile_id,
+                )
+                .count()
+            )
 
     # ----- Target notify -----
     def _notify_target(self, target_id: str) -> None:

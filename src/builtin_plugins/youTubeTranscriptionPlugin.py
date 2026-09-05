@@ -266,6 +266,14 @@ def get_video_metadata(video_id, api_key=None):
         }
 
 
+def _is_indexed_chunk(fname: str, vid_id: str) -> bool:
+    """True if *fname* is a chunking-on output file for *vid_id*: ``<vid>-NNN.txt``."""
+    if not fname.startswith(vid_id + "-"):
+        return False
+    stem = fname[len(vid_id) + 1:-4]  # strip "<vid>-" prefix and ".txt" suffix
+    return bool(stem) and stem.isdigit()
+
+
 def split_by_duration(snippets, max_duration=MAX_DURATION_SECONDS):
     """Phase 1: Group consecutive transcript snippets into duration-bounded segments.
 
@@ -613,7 +621,7 @@ class youTubeTranscriptionPlugin(BaseSubscription):
             content = build_chunk_content(video_id, meta, single_chunk)
             return [
                 {
-                    "filename": f"{video_id}-000.txt",
+                    "filename": f"{video_id}-full.txt",
                     "content": content,
                     "tokens": len(enc.encode(full_text)) + compute_metadata_overhead(video_id, meta, single_chunk, enc),
                 }
@@ -701,10 +709,23 @@ class youTubeTranscriptionPlugin(BaseSubscription):
         # Reconciliation: find already-processed videos
         output_dir = self.get_destination_path()
         completed_videos = set()
+        mode_files = {}
         if os.path.isdir(output_dir):
             for fname in os.listdir(output_dir):
-                if fname.endswith(".txt"):
-                    vid_id = fname.rsplit("-", 1)[0]
+                if not fname.endswith(".txt"):
+                    continue
+                vid_id = fname.rsplit("-", 1)[0]
+                mode_files.setdefault(vid_id, set()).add(fname)
+        # A video is "done" only when its on-disk output matches the CURRENT
+        # chunking mode (chunking on → <vid>-NNN.txt; off → <vid>-full.txt).
+        # Toggling chunking_enabled therefore reliably regenerates instead of
+        # silently keeping stale, differently-chunked output.
+        for vid_id, files in mode_files.items():
+            if chunking_enabled:
+                if any(_is_indexed_chunk(n, vid_id) for n in files):
+                    completed_videos.add(vid_id)
+            else:
+                if f"{vid_id}-full.txt" in files:
                     completed_videos.add(vid_id)
         if completed_videos:
             self.log.info("reconciliation", already_processed=len(completed_videos))
@@ -730,6 +751,15 @@ class youTubeTranscriptionPlugin(BaseSubscription):
             if vid_id in completed_videos:
                 self.log.debug("loop_already_done", idx=idx, vid_id=vid_id)
                 continue
+
+            # Clear any stale artifacts for this video (e.g. output produced
+            # in the other chunking mode) so the regenerated files are not
+            # mixed with old-format ones.
+            for stale in mode_files.get(vid_id, ()):
+                try:
+                    os.remove(os.path.join(output_dir, stale))
+                except OSError:
+                    pass
 
             self.log.info("video_processing", video_id=vid_id, title=vid_title, idx=idx + 1, total=total_videos)
 

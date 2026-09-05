@@ -262,7 +262,7 @@ def _process_sub_inner(worker_idx: int, sub_id: str, operation: str,
                 pass
             return
 
-        result = execute_subscription(sub, rec, db, log)
+        result = execute_subscription(sub, rec, db, log, queue=queue)
 
         if result.outcome == "deleted":
             _cleanup_subscription(sub, sink_registry, db, log)

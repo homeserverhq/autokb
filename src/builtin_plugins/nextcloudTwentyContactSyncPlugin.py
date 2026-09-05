@@ -24,7 +24,7 @@ backend SMTP configuration (env) - no SMTP is configured in the schema.
 import hashlib
 import json
 import os
-import uuid
+
 
 import phonenumbers
 import requests
@@ -151,6 +151,19 @@ def _parse_vcard(text):
         "jobTitle": _clean(props.get("TITLE", "")),
         "company": org,
     }
+
+
+def _stable_uid(record) -> str:
+    """A STABLE vCard UID + CardDAV filename for a pairing.
+
+    Keyed off the Twenty person id (falling back to the email), NOT a fresh
+    random each write: a regenerated ``UID:`` makes every update look like a
+    brand-new contact to UID-keyed CardDAV clients (duplicate contacts), and
+    a random filename leaves orphans when a card is re-created after a delete.
+    """
+    import hashlib
+    key = (str(record.get("tw_id") or "") or str(record.get("email") or "")).lower()
+    return "autokb-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 def _serialize_vcard(record, uid):
@@ -894,14 +907,15 @@ class nextcloudTwentyContactSyncPlugin(BaseSubscription):
         return result
 
     def _write_nextcloud(self, record, nc_side, nc_base, nc_origin, nc_user, nc_pass):
-        card = _serialize_vcard(record, uuid.uuid4().hex)
+        uid = _stable_uid(record)
+        card = _serialize_vcard(record, uid)
         headers = {"Content-Type": "text/vcard"}
         if nc_side and nc_side.get("href"):
             href = _abs_url(nc_origin, nc_side["href"])
             if nc_side.get("etag"):
                 headers["If-Match"] = nc_side["etag"]
         else:
-            href = f"{nc_base}/{uuid.uuid4().hex}.vcf"
+            href = f"{nc_base}/{uid}.vcf"
         resp = requests.put(
             href, data=card.encode("utf-8"), auth=(nc_user, nc_pass),
             headers=headers, timeout=30,

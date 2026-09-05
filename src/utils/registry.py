@@ -121,6 +121,8 @@ class PluginRegistry:
                 continue
             if entry == "__init__.py":
                 continue
+            if os.path.isdir(os.path.join(self.plugins_dir, entry)):
+                continue  # a directory named foo.py is not a plugin
             out.append(entry)
         return out
 
@@ -150,13 +152,19 @@ class PluginRegistry:
                 # the new file load as a failure.
                 self._failed[fname] = str(exc)
                 stem = os.path.splitext(fname)[0]
-                pid_guess = sanitize_name(stem)
-                old = self._records.get(pid_guess)
-                if old is not None:
-                    new_records[pid_guess] = old
+                try:
+                    pid_guess = sanitize_name(stem)
+                except ValueError:
+                    # filename has no usable characters (e.g. '---.py') — nothing
+                    # to retain a previous record under; skip gracefully so a
+                    # single odd filename never aborts the whole reload.
+                    pid_guess = None
+                old = self._records.get(pid_guess) if pid_guess else None
+                if pid_guess is not None and old is not None:
+                    new_records[str(pid_guess)] = old
                 # If this was a breaking-change refusal, notify the caller so
                 # it can disable affected subscriptions and send alerts.
-                if "breaking change" in str(exc) and disable_subscriptions_callback is not None:
+                if pid_guess and "breaking change" in str(exc) and disable_subscriptions_callback is not None:
                     try:
                         disable_subscriptions_callback(pid_guess)
                     except Exception:

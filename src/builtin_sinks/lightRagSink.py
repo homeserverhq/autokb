@@ -115,6 +115,10 @@ class LightRagSink(BaseSink):
         # recon-pass end via ``flush()``.
         self._batch_ops = []
         self._batch_pages = 0
+        # Upserts persisted to the remote across the whole recon pass, for the
+        # progress callback. Accumulated in _flush_ops; initialized here once
+        # (NOT per enqueue, which used to reset the running total to 0).
+        self._completed_upserts = 0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -397,8 +401,6 @@ class LightRagSink(BaseSink):
             self._flush_ops(self._batch_ops)
         self._batch_ops = []
         self._batch_pages = 0
-        # Upserts persisted to the remote across the whole pass, for progress.
-        self._completed_upserts = 0
         self._batch_ops.append(op)
         self._batch_pages += pages
 
@@ -408,9 +410,10 @@ class LightRagSink(BaseSink):
         Returns ``{track_id: doc_id}`` once every document is ``processed``.
         Raises on ``failed`` or on timeout. Checks cancellation on every poll,
         which also pulses the recon heartbeat so the watchdog stays satisfied
-        during a long wait. On any failure, best-effort removes documents that
-        were uploaded before the failure so a later retry does not collide on
-        the deterministic filenames.
+        during a long wait. On a failure, only documents that NEVER reached
+        ``processed`` are best-effort removed (so a later retry does not
+        collide on the deterministic filenames) — documents that had already
+        processed successfully are left untouched.
         """
         seen_ids = {}
         resolved = {}
@@ -453,7 +456,10 @@ class LightRagSink(BaseSink):
                     time.sleep(self._POLL_INTERVAL)
             return dict(resolved)
         except Exception:
-            for doc_id in set(seen_ids.values()):
+            # Remove only the docs that never reached 'processed'; the ones
+            # already processed on the remote are good and must not be deleted.
+            failed_seen = set(seen_ids.values()) - set(resolved.values())
+            for doc_id in failed_seen:
                 self._raw_delete_doc(doc_id)
             raise
 

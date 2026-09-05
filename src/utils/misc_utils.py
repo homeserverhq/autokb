@@ -485,22 +485,32 @@ def schema_hash(schema: Dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Cron helpers (very simple, sufficient for our test cron expressions)
+# Cron helpers (5-field cron, evaluated in UTC)
 # ---------------------------------------------------------------------------
+# Per-field valid ranges: minute hour dom month dow.
+_CRON_RANGES = [(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)]
+
+
 def is_valid_cron(expr: str) -> bool:
-    """Validate a 5-field cron expression (minute hour dom month dow)."""
+    """Validate a 5-field cron expression (minute hour dom month dow).
+
+    Each field is range-checked per its own semantics (minute 0-59, hour
+    0-23, dom 1-31, month 1-12, dow 0-7 where 7 == Sunday), so expressions
+    like ``60 * * * *`` or ``0 25 * * *`` are rejected instead of being
+    "valid" and silently never firing.
+    """
     if not expr or not isinstance(expr, str):
         return False
     parts = expr.split()
     if len(parts) != 5:
         return False
-    for part in parts:
-        if not _cron_field_valid(part):
+    for part, (lo, hi) in zip(parts, _CRON_RANGES):
+        if not _cron_field_valid(part, lo, hi):
             return False
     return True
 
 
-def _cron_field_valid(field: str) -> bool:
+def _cron_field_valid(field: str, lo: int, hi: int) -> bool:
     if field in ("*",):
         return True
     for piece in field.split(","):
@@ -514,33 +524,36 @@ def _cron_field_valid(field: str) -> bool:
         else:
             base = piece
         if base == "*":
-            lo, hi = 0, 59
+            a, b = lo, hi
         elif "-" in base:
             lo_s, hi_s = base.split("-", 1)
             try:
-                lo = int(lo_s); hi = int(hi_s)
+                a = int(lo_s)
+                b = int(hi_s)
             except ValueError:
                 return False
         else:
             try:
-                lo = hi = int(base)
+                a = b = int(base)
             except ValueError:
                 return False
-        if step < 1:
+        if step < 1 or step > (hi - lo + 1):
             return False
-        # Field ranges are permissive — minute/hour/dom/month/dow all
-        # share [0, 59] union [1, 31] etc. We accept anything in [0, 365].
-        if not (0 <= lo <= 365 and 0 <= hi <= 365):
+        if not (lo <= a <= hi and lo <= b <= hi and a <= b):
             return False
     return True
 
 
 def cron_due(expr: str, now: Optional[datetime] = None) -> bool:
-    """Return True if the cron expression is "due" at ``now`` (i.e., matches
-    the minute bucket). We use minute-resolution triggers for test speed."""
+    """Return True if the cron expression is "due" at ``now`` (minute resolution).
+
+    Evaluated in UTC: ``now`` defaults to ``datetime.now(timezone.utc)`` and
+    all subscriptions' cron expressions are therefore interpreted as UTC, in
+    agreement with the DB's ``NOW()`` and ``last_heartbeat`` UTC timestamps.
+    """
     if not is_valid_cron(expr):
         return False
-    now = now or datetime.now()
+    now = now or datetime.now(timezone.utc)
     parts = expr.split()
     minute, hour, dom, month, dow = parts
     return (
@@ -548,7 +561,7 @@ def cron_due(expr: str, now: Optional[datetime] = None) -> bool:
         and _cron_field_match(hour, now.hour, 0, 23)
         and _cron_field_match(dom, now.day, 1, 31)
         and _cron_field_match(month, now.month, 1, 12)
-        and _cron_field_match(dow, (now.weekday() + 1) % 7, 0, 6)  # cron: 0=Sun
+        and _dow_matches(dow, (now.weekday() + 1) % 7)  # cron: 0=Sun
     )
 
 
@@ -571,6 +584,43 @@ def _cron_field_match(field: str, value: int, lo: int, hi: int) -> bool:
             a = b = int(base)
         if a <= value <= b and ((value - a) % step == 0):
             return True
+    return False
+
+
+def _dow_matches(field: str, value: int) -> bool:
+    """Match one cron DOW field against a weekday (0=Sun .. 6=Sat).
+
+    Handles the cron convention that ``7`` is an alias for Sunday (0), both
+    as a bare value and inside ranges (``1-7`` == Mon..Sun == every day).
+    """
+    if field == "*":
+        return True
+    for piece in field.split(","):
+        step = 1
+        base = piece
+        if "/" in piece:
+            base, step_s = piece.split("/", 1)
+            try:
+                step = int(step_s)
+            except ValueError:
+                continue
+        matched = set()
+        if base == "*":
+            return True
+        if "-" in base:
+            a_s, b_s = base.split("-", 1)
+            a, b = int(a_s), int(b_s)
+            for v in range(a, b + 1):
+                matched.add(0 if v == 7 else v)
+            for v in matched:
+                if v <= 6 and (v - a) % step == 0:
+                    if v == value:
+                        return True
+        else:
+            a = int(base)
+            v = 0 if a == 7 else a
+            if v == value and (v - a) % step == 0:
+                return True
     return False
 
 

@@ -387,10 +387,24 @@ class imapFolderWatchPlugin(BaseSubscription):
 
     @staticmethod
     def _extract_rfc822_bytes(msg_data):
+        # aioimaplib returns a UID FETCH result like
+        #   [b'1 (UID 123 RFC822 {4567}', <message literal bytes>, b')']
+        # The email body is the bytes chunk that immediately follows the
+        # "{N}" literal-size marker; grabbing "the first >100-byte blob" is
+        # fragile (can match the status line or a fragment). Fall back to the
+        # longest chunk if no marker is seen.
+        candidate = b""
+        next_is_literal = False
         for resp in msg_data:
-            if isinstance(resp, (bytes, bytearray)) and len(resp) > 100:
+            if next_is_literal and isinstance(resp, (bytes, bytearray)):
                 return bytes(resp)
-        return b""
+            if isinstance(resp, (bytes, bytearray)):
+                next_is_literal = b"{" in resp
+                if not next_is_literal and len(resp) > len(candidate):
+                    candidate = bytes(resp)
+            else:
+                next_is_literal = False
+        return candidate
 
     @staticmethod
     def _extract_best_text(msg):

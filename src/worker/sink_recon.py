@@ -90,9 +90,20 @@ def _make_cancel_check(db: DatabaseManager, sub_id: str, target_id: str, queue, 
 
 
 def _hb(db: DatabaseManager, sub_id: str, queue, pct: int, message: str = None) -> None:
-    db.update_heartbeat_and_progress(sub_id, pct)
+    """Best-effort heartbeat + lock refresh; never blocks the recon flow.
+
+    A transient DB error here must not escape into ``reconcile_subscription_targets``
+    and strand the sub IN_PROGRESS until the watchdog clears it.
+    """
+    try:
+        db.update_heartbeat_and_progress(sub_id, pct)
+    except Exception:
+        pass
     if message:
-        db.update_last_message(sub_id, message)
+        try:
+            db.update_last_message(sub_id, message)
+        except Exception:
+            pass
     if queue:
         try:
             queue.refresh_lock(sub_id)

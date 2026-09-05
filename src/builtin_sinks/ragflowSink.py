@@ -181,11 +181,21 @@ class RagflowSink(BaseSink):
         return self._upload_and_parse(path)
 
     def update_datafile(self, remote_datafile_id: str, path: str) -> str:
-        # RAGFlow cannot replace a document's content in place — remove the
-        # old document first (so the re-upload keeps the deterministic name
-        # instead of becoming a "name(1)" duplicate), then upload the new one.
-        self._delete_docs([remote_datafile_id], "update datafile")
-        return self._upload_and_parse(path)
+        # RAGFlow cannot replace a document's content in place. Upload the new
+        # document FIRST, then remove the old one: if the re-upload fails, the
+        # old document is still in place (no data loss). The tradeoff is that
+        # a crash between upload and delete may briefly leave a same-named
+        # duplicate on the remote; the next update converges, and Pass III
+        # reconciliation keeps the tracked id authoritative.
+        new_doc_id = self._upload_and_parse(path)
+        try:
+            self._delete_docs([remote_datafile_id], "update datafile")
+        except Exception:
+            # Old doc left behind — raise so the caller knows the remote now
+            # has both copies; a retry will converge, and the local DB row is
+            # only updated after this returns, so nothing is half-persisted.
+            raise
+        return new_doc_id
 
     def remove_datafile(self, remote_datafile_id: str) -> None:
         self._check_cancel()

@@ -92,8 +92,12 @@ def _ensure_hb_dir() -> None:
     os.makedirs(HB_DIR, exist_ok=True)
 
 
-def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManager, log) -> ExecutionResult:
+def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManager, log, queue=None) -> ExecutionResult:
     """Run a single subscription in a child process with heartbeat monitoring.
+
+    ``queue`` — optional QueueManager used by the watcher to refresh the
+    safety-lock TTL (token-verified). Reuses the connection already owned by
+    the worker instead of opening a fresh Redis client every tick.
 
     Returns an ``ExecutionResult`` describing the outcome. The caller
     (the Level-1 worker loop) is responsible for updating status,
@@ -150,7 +154,11 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
         proc = subprocess.Popen(
             [sys.executable, "-B", "-m", "worker._child_runner"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            # stdout goes to DEVNULL so a print()-happy plugin can never fill
+            # the 64KB OS pipe and wedge itself (the watcher would misread the
+            # stall as a heartbeat timeout). stderr is drained by a background
+            # thread into a bounded tail used only for the error fallback.
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             cwd="/",
             env=child_env,
@@ -167,6 +175,20 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
     finally:
         os.close(write_fd)  # closing the write end signals EOF to the child
     log.debug("child_spawned", sub_id=sub.id, name=sub.name, action="spawn", result=f"pid={proc.pid}")
+
+    # Drain child stderr in a background thread (bounded tail) so the pipe can
+    # never back up; the tail is used only if no .err file was written.
+    from collections import deque as _deque
+    stderr_tail: _deque = _deque(maxlen=200)
+    stderr_stream = proc.stderr
+    if stderr_stream:
+        def _drain_stderr() -> None:
+            try:
+                for line in stderr_stream:
+                    stderr_tail.append(line.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+        threading.Thread(target=_drain_stderr, daemon=True, name=f"stderr-{sub.id[:8]}").start()
 
     # 4. Watcher thread for heartbeat timeout
     stop_event = threading.Event()
@@ -281,13 +303,22 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
                     # No heartbeat file and timeout elapsed — fall through to kill
 
                 if age is not None and age < HEARTBEAT_TIMEOUT:
-                    # Heartbeat is fresh — refresh the safety lock TTL
-                    try:
-                        import redis as _redis
-                        rc = _redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=2)
-                        rc.expire(f"autokb:lock:{sub.id}", LOCK_TTL)
-                    except Exception:
-                        pass
+                    # Heartbeat is fresh — refresh the safety lock TTL. Uses the
+                    # worker's QueueManager (single connection, token-verified).
+                    if queue is not None:
+                        try:
+                            if not queue.refresh_lock(sub.id):
+                                log.warning(
+                                    "lock_refresh_missing",
+                                    sub_id=sub.id, name=sub.name, action="lock_refresh",
+                                    result="no_longer_held",
+                                )
+                        except Exception as exc:
+                            log.warning(
+                                "lock_refresh_failed",
+                                sub_id=sub.id, name=sub.name, action="lock_refresh",
+                                result=str(exc),
+                            )
                     continue
 
                 # --- Kill ---
@@ -371,9 +402,9 @@ def execute_subscription(sub: Subscription, rec: PluginRecord, db: DatabaseManag
     except Exception as exc:
         log.debug("err_file_read_failed", sub_id=sub.id, name=sub.name, action="read_err", result=str(exc))
     if not err_read:
-        # No exception file — try to read stderr
+        # No exception file — use the captured stderr tail instead.
         try:
-            stderr_data = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
+            stderr_data = "".join(stderr_tail)
             if stderr_data:
                 last_line = stderr_data.splitlines()[-1] if stderr_data.strip() else ""
                 if last_line:

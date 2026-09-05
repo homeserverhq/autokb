@@ -983,10 +983,15 @@ class DatabaseManager:
 
     # ----- Target notify -----
     def _notify_target(self, target_id: str) -> None:
+        # Runs inside other actors' get_session() blocks (link/unlink/datafile
+        # writes), so it must NOT open its own scoped session — the thread-local
+        # scoped session would be the caller's session and this would commit it
+        # early and close it out from under the outer block. A dedicated
+        # engine.begin() transaction is fully independent.
         try:
             payload = json.dumps({"type": "target", "target_id": target_id}, sort_keys=True, separators=(",", ":"))
-            with self.get_session() as s:
-                s.execute(text(f"SELECT pg_notify('{NOTIFY_CHANNEL}', :payload)"), {"payload": payload})
+            with self.engine.begin() as conn:
+                conn.execute(text(f"SELECT pg_notify('{NOTIFY_CHANNEL}', :payload)"), {"payload": payload})
         except Exception:
             pass
 

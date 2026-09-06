@@ -17,10 +17,11 @@ Lifecycle:
     404 is treated as success so deletes stay idempotent across retries.
   * ``add_target`` returns a deterministic remote_target_id and probes the
     server (``GET /documents/status_counts``) so a bad URL/API key surfaces at
-    target-create time. ``remove_target`` is a **no-op** — the connected
-    LightRAG server holds a single shared knowledge base, so destroying it when
-    the last subscription leaves a target would wipe unrelated data. Multi-KB
-    mode later restores per-workspace destruction here. ``clear_target`` calls
+    target-create time. ``remove_target`` removes only this target's documents
+    from the shared knowledge base — matched by the deterministic
+    ``autokb_{target}_`` filename prefix — so a shared-LightRAG instance's
+    unrelated docs survive, and the KB itself is never cleared; multi-KB mode
+    later restores per-workspace destruction here. ``clear_target`` calls
     ``DELETE /documents`` (idempotent on 404).
 
 Batched upserts:
@@ -36,10 +37,12 @@ Batched upserts:
 
     1. every file is uploaded (one ``/documents/upload`` per file, tracking
        each ``track_id``);
-    2. the sink **blocks** until the entire batch reaches a terminal state
-       (``processed`` or ``failed``) via ``/documents/track_status``, raising
-       on ``failed`` and pulsing the subscription heartbeat on every poll so
-       the watchdog never kills a long wait;
+    2. the sink confirms every track's document id via
+       ``/documents/track_status`` and returns — it does NOT wait for
+       indexing to finish (LightRAG processes in the background), so
+       upserts and Pass III heals upload-and-move-on instead of blocking;
+       a document that lands ``FAILED`` with an id is still accepted
+       (warned, not failed) and only a track that never gets an id raises;
     3. on success the DB rows are written as the base wrappers would have.
     Batches also flush when a removal runs and when the recon pass ends
     (``BaseSink.flush``, invoked by the sink reconciliation engine).
@@ -57,14 +60,18 @@ creation), the sink needs only three changes:
 Dependencies: none beyond the image-default ``requests``.
 """
 
+import logging
 import os
 import time
 
 import requests
 
-from utils.misc_utils import SinkCancelledError, sanitize_name
+from utils.constants import STATE_ERROR
+from utils.misc_utils import SinkCancelledError, sanitize_name, send_smtp_notification
 from utils.sink_base import BaseSink, compute_file_hash
 
+
+_LOG = logging.getLogger(__name__)
 
 _WHITESPACE = frozenset(b" \t\r\n\f\v")
 _TOKENS_PER_PAGE = 500  # rough token→page estimate used for batch sizing
@@ -78,7 +85,11 @@ class LightRagSink(BaseSink):
             "Synchronizes AutoKB output files into a LightRAG knowledge graph. "
             "Each Data Target maps to one LightRAG instance; data files are "
             "uploaded in page-bounded batches with deterministic names, "
-            "replaced on change, and deleted when removed from /output/."
+            "replaced on change, and deleted when removed from /output/. "
+            "Uploads confirm the document id and return immediately; "
+            "LightRAG indexes the file in the background. Deleting a Data "
+            "Target removes only this target's documents from the shared "
+            "knowledge base, never the KB itself."
         ),
     }
     default_api_url = "http://lightrag-app:9621"
@@ -92,10 +103,21 @@ class LightRagSink(BaseSink):
     _POLL_TIMEOUT = 120
     _UPDATE_CONFLICT_TIMEOUT = 30
     _CANCEL_CLEANUP_GRACE = 15
-    # How long a full batch may wait for processing before raising. Chosen to
-    # comfortably exceed realistic LLM-extraction times; the heartbeat keeps
-    # the subscription alive for the whole wait.
-    _BATCH_COMPLETE_TIMEOUT = 7200
+    # How long the sink may wait for the background pipeline to assign each
+    # uploaded document an id before the batch is reported as failed. The id is
+    # confirmed as soon as the pipeline writes the doc_status record — long
+    # before indexing finishes — so this only needs to cover enqueue latency
+    # under realistic backlog. The sink does NOT wait for processing here.
+    _BATCH_ID_CONFIRM_TIMEOUT = 600
+
+    # How long remove_target() will wait (retrying) for a busy pipeline to
+    # clear so its documents can be deleted. Fail-strict: on persistent busy the
+    # target is retained instead of being half-deleted. The window is generous
+    # (2 hours) because the waiting delete is only spent while the pipeline is
+    # genuinely processing; the single cancel_pipeline request on first busy
+    # normally makes it clear far sooner. Retries wait this long between tries.
+    _REMOVE_TARGET_BUSY_TIMEOUT = 7200
+    _REMOVE_TARGET_BUSY_INTERVAL = 15
 
     def __init__(self, target_row, db):
         super().__init__(target_row, db)
@@ -216,8 +238,9 @@ class LightRagSink(BaseSink):
     def _wait_for_doc_id(self, track_id: str, max_wait: float) -> str | None:
         """Poll track_status until a document id appears; return it or None.
 
-        Raises RuntimeError if the document lands in FAILED state (e.g. an
-        async content-duplicate detection). Checks cancellation on every poll.
+        A document that lands in FAILED state (e.g. an async content-duplicate
+        detection) still carries an id and is returned with a warning; a FAILED
+        record without an id raises. Checks cancellation on every poll.
         """
         deadline = time.time() + max_wait
         while time.time() < deadline:
@@ -232,13 +255,23 @@ class LightRagSink(BaseSink):
             documents = data.get("documents") if isinstance(data, dict) else None
             if documents:
                 first = documents[0]
-                if first.get("status") == "FAILED":
-                    raise RuntimeError(
-                        f"{self.metadata['name']} upload failed processing: "
-                        f"{first.get('error_msg') or 'unknown error'}"
-                    )
-                if first.get("id"):
-                    return first["id"]
+                status = str(first.get("status") or "").upper()
+                doc_id = first.get("id")
+                if status == "FAILED":
+                    if doc_id:
+                        _LOG.warning(
+                            "lightrag_upload_failed_processing track_id=%s error_msg=%s",
+                            track_id,
+                            first.get("error_msg") or "unknown error",
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"{self.metadata['name']} upload failed processing "
+                            f"before a document id was assigned: "
+                            f"{first.get('error_msg') or 'unknown error'}"
+                        )
+                if doc_id:
+                    return doc_id
             time.sleep(self._POLL_INTERVAL)
         return None
 
@@ -268,7 +301,11 @@ class LightRagSink(BaseSink):
             resp = requests.delete(
                 self._url("documents/delete_document"),
                 headers=self._headers(),
-                json={"doc_ids": [remote_datafile_id], "delete_file": True},
+                json={
+                    "doc_ids": [remote_datafile_id],
+                    "delete_file": True,
+                    "delete_llm_cache": True,
+                },
                 timeout=self._TIMEOUT,
             )
         except Exception:
@@ -286,7 +323,11 @@ class LightRagSink(BaseSink):
         resp = requests.delete(
             self._url("documents/delete_document"),
             headers=self._headers(),
-            json={"doc_ids": [remote_datafile_id], "delete_file": True},
+            json={
+                "doc_ids": [remote_datafile_id],
+                "delete_file": True,
+                "delete_llm_cache": True,
+            },
             timeout=self._TIMEOUT,
         )
         if resp.status_code == 404:
@@ -298,6 +339,72 @@ class LightRagSink(BaseSink):
                 f"{self.metadata['name']} delete datafile {remote_datafile_id} "
                 "refused: pipeline busy"
             )
+
+    def _delete_docs(self, doc_ids: list, retry_timeout: float) -> None:
+        """Delete *doc_ids* in chunks, asking the pipeline to cancel if busy.
+
+        Always removes the uploaded file AND the extracted LLM cache. Fail-
+        strict: a busy pipeline is asked to cancel once (``cancel_pipeline``,
+        which marks any in-flight document FAILED — including other targets'
+        — and releases the busy flag), then the delete is retried until
+        *retry_timeout* elapses, after which a RuntimeError is raised so the
+        caller can retain the target. A 404 for a chunk is treated as
+        already-gone (idempotent). Used by ``remove_target``.
+        """
+        deadline = time.time() + retry_timeout
+        cancel_requested = False
+        for start in range(0, len(doc_ids), 100):
+            chunk = doc_ids[start : start + 100]
+            while True:
+                self._check_cancel()
+                resp = requests.delete(
+                    self._url("documents/delete_document"),
+                    headers=self._headers(),
+                    json={
+                        "doc_ids": chunk,
+                        "delete_file": True,
+                        "delete_llm_cache": True,
+                    },
+                    timeout=self._TIMEOUT,
+                )
+                if resp.status_code == 404:
+                    break  # already gone → idempotent
+                self._check(resp, f"delete {len(chunk)} datafiles")
+                status = resp.json().get("status") if isinstance(resp.json(), dict) else None
+                if status != "busy":
+                    break
+                if not cancel_requested:
+                    cancel_requested = True
+                    self._request_pipeline_cancel()
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"{self.metadata['name']} deleting {len(chunk)} datafiles "
+                        "refused: pipeline busy"
+                    )
+                time.sleep(self._REMOVE_TARGET_BUSY_INTERVAL)
+
+    def _request_pipeline_cancel(self) -> None:
+        """Best-effort ``POST /documents/cancel_pipeline`` to release busy.
+
+        The delete endpoint refuses while the pipeline is processing; asking for
+        a cancellation makes the loop stop marking in-flight documents FAILED
+        and clear the busy flag so the delete can proceed. Errors and a
+        ``not_busy`` reply are ignored (delete retries regardless).
+        """
+        try:
+            resp = requests.post(
+                self._url("documents/cancel_pipeline"),
+                headers=self._headers(),
+                json={},
+                timeout=self._TIMEOUT,
+            )
+            if resp.status_code < 400:
+                return
+            if isinstance(resp.json(), dict):
+                if resp.json().get("status") == "not_busy":
+                    return  # nothing was processing; fine
+        except Exception:
+            return
 
     def _clear_documents(self) -> None:
         resp = requests.delete(
@@ -345,6 +452,51 @@ class LightRagSink(BaseSink):
                     if isinstance(doc, dict) and doc.get("id") and doc["id"] not in seen:
                         seen.add(doc["id"])
                         results.append({"id": doc["id"]})
+        return results
+
+    def _kb_doc_items(self) -> list:
+        """Enumerate EVERY document on the remote as ``{"id", "file_path"}``.
+
+        Pages through ``POST /documents/paginated`` (unlike ``GET /documents``,
+        which caps at 1000 records) so a removal never silently misses
+        documents. ``file_path`` is canonical (parser-hint stripped); AutoKB's
+        uploaded names carry no hints, so they compare against the local
+        ``autokb_{target}_`` prefix exactly.
+        """
+        page = 1
+        results = []
+        seen = set()
+        while True:
+            self._check_cancel()
+            resp = requests.post(
+                self._url("documents/paginated"),
+                headers=self._headers(),
+                json={
+                    "status_filters": None,
+                    "page": page,
+                    "page_size": 200,
+                    "sort_field": "id",
+                    "sort_direction": "asc",
+                },
+                timeout=self._TIMEOUT,
+            )
+            self._check(resp, "list documents (paginated)")
+            data = resp.json()
+            documents = data.get("documents") or []
+            for doc in documents:
+                if isinstance(doc, dict) and doc.get("id") and doc["id"] not in seen:
+                    seen.add(doc["id"])
+                    results.append({
+                        "id": doc["id"],
+                        "file_path": doc.get("file_path") or "",
+                    })
+            has_next = (
+                isinstance(data.get("pagination"), dict)
+                and bool(data["pagination"].get("has_next"))
+            )
+            if not has_next:
+                break
+            page += 1
         return results
 
     def _upload_file(self, path: str) -> str:
@@ -405,20 +557,26 @@ class LightRagSink(BaseSink):
         self._batch_pages += pages
 
     def _wait_for_batch(self, track_ids) -> dict:
-        """Block until all *track_ids* resolve to terminal documents.
+        """Confirm the document id for every *track_id*, then return.
 
-        Returns ``{track_id: doc_id}`` once every document is ``processed``.
-        Raises on ``failed`` or on timeout. Checks cancellation on every poll,
-        which also pulses the recon heartbeat so the watchdog stays satisfied
-        during a long wait. On a failure, only documents that NEVER reached
-        ``processed`` are best-effort removed (so a later retry does not
-        collide on the deterministic filenames) — documents that had already
-        processed successfully are left untouched.
+        Polls ``/documents/track_status`` for each track until the background
+        pipeline has assigned an id to every document. Unlike old behaviour it
+        does NOT wait for indexing to finish — processing continues on the
+        LightRAG side while the sink moves on.
+
+        A document that lands in ``FAILED`` state (e.g. an async content-
+        duplicate detection) still carries an id and is treated as confirmed
+        (with a warning logged). A FAILED record that never got an id raises.
+
+        Raises on timeout before every track has an id. Checks cancellation on
+        every poll, which also pulses the recon heartbeat so the watchdog stays
+        satisfied. On any error, documents that DID get an id are best-effort
+        removed so a later re-add of the same file does not collide on its
+        deterministic filename.
         """
-        seen_ids = {}
-        resolved = {}
+        confirmed = {}
         pending = set(track_ids)
-        deadline = time.time() + self._BATCH_COMPLETE_TIMEOUT
+        deadline = time.time() + self._BATCH_ID_CONFIRM_TIMEOUT
         try:
             while pending:
                 self._check_cancel()
@@ -434,43 +592,50 @@ class LightRagSink(BaseSink):
                     if not documents:
                         continue
                     first = documents[0]
-                    status = str(first.get("status") or "").lower()
-                    if status == "failed":
-                        raise RuntimeError(
-                            f"{self.metadata['name']} upload failed processing: "
-                            f"{first.get('error_msg') or 'unknown error'}"
-                        )
+                    status = str(first.get("status") or "").upper()
                     doc_id = first.get("id")
+                    if status == "FAILED":
+                        if doc_id:
+                            _LOG.warning(
+                                "lightrag_upload_failed_processing track_id=%s error_msg=%s",
+                                tid,
+                                first.get("error_msg") or "unknown error",
+                            )
+                        else:
+                            raise RuntimeError(
+                                f"{self.metadata['name']} upload failed processing "
+                                f"before a document id was assigned: "
+                                f"{first.get('error_msg') or 'unknown error'}"
+                            )
                     if doc_id:
-                        seen_ids[tid] = doc_id
-                    if doc_id and status == "processed":
-                        resolved[tid] = doc_id
+                        confirmed[tid] = doc_id
                         pending.discard(tid)
                 if pending and time.time() >= deadline:
                     raise RuntimeError(
-                        f"{self.metadata['name']} batch did not complete within "
-                        f"{int(self._BATCH_COMPLETE_TIMEOUT)}s; unfinished: "
-                        f"{sorted(pending)}"
+                        f"{self.metadata['name']} batch did not confirm document "
+                        f"ids within {int(self._BATCH_ID_CONFIRM_TIMEOUT)}s; "
+                        f"unconfirmed: {sorted(pending)}"
                     )
                 if pending:
                     time.sleep(self._POLL_INTERVAL)
-            return dict(resolved)
+            return dict(confirmed)
         except Exception:
-            # Remove only the docs that never reached 'processed'; the ones
-            # already processed on the remote are good and must not be deleted.
-            failed_seen = set(seen_ids.values()) - set(resolved.values())
-            for doc_id in failed_seen:
+            # Remove the ids we confirmed so a later re-add of the same
+            # deterministic filename does not hit a 409 name conflict; the
+            # still-unresolved tracks have no record on the remote to clean.
+            for doc_id in confirmed.values():
                 self._raw_delete_doc(doc_id)
             raise
 
     def _flush_ops(self, ops: list) -> None:
-        """Upload *ops* as one batch, wait for full completion, then persist.
+        """Upload *ops* as one batch, confirm document ids, then persist.
 
         Order of operations for data integrity:
 
           1. Stage every file upload (adds upload directly; updates delete the
              old doc first). Collects one ``track_id`` per op.
-          2. Wait until the ENTIRE batch has finished processing on the remote.
+          2. Confirm every track's document id (background pipeline may still
+             be indexing — the sink does not wait for processing).
           3. Write the DB rows the base wrappers would have written.
         """
         if not ops:
@@ -486,8 +651,8 @@ class LightRagSink(BaseSink):
                 track_id = self._do_upload(op["path"])
             staged.append((op, track_id))
 
-        # Report the batch as in-flight (done + this batch) before blocking,
-        # so the recon engine can update the link's status message.
+        # Report the batch as in-flight (done + this batch) before confirming
+        # ids, so the recon engine can update the link's status message.
         self._report_progress(self._completed_upserts, len(staged))
 
         doc_ids = self._wait_for_batch([tid for _, tid in staged])
@@ -552,11 +717,74 @@ class LightRagSink(BaseSink):
         return f"autokb_{sanitize_name(self.name)}"
 
     def remove_target(self) -> None:
-        # No-op on purpose: the connected LightRAG server holds a single
-        # shared knowledge base. Deleting all documents here when the last
-        # subscription leaves one target would destroy unrelated data. Once
-        # multi-KB routing exists, delete this target's workspace instead.
-        pass
+        """Delete THIS target's documents from the shared LightRAG knowledge base.
+
+        The connected LightRAG server holds a single shared KB, so only the
+        documents AutoKB uploaded for this target are removed — identified by
+        the deterministic ``autokb_{target}_`` filename prefix. Documents other
+        targets (or anything else) put in the KB are left untouched; the KB
+        itself is never cleared. Deletion is fail-strict: if the pipeline stays
+        busy for the retry window, a RuntimeError is raised so the caller
+        retains the target instead of dropping it half-deleted.
+
+        On failure the target's subscriptions are transitioned to ERROR and a
+        single SMTP notification is sent — the same behaviour the recon engine
+        applies to sink errors (``_transition_ds_error``) — and the exception
+        is re-raised so the caller still decides retain-vs-delete.
+        """
+        if not self.name or not self.api_url:
+            return
+        prefix = f"autokb_{sanitize_name(self.name)}_"
+        owned = [
+            item["id"]
+            for item in self._kb_doc_items()
+            if item["file_path"].startswith(prefix)
+        ]
+        if owned:
+            try:
+                self._delete_docs(owned, self._REMOVE_TARGET_BUSY_TIMEOUT)
+            except Exception as exc:
+                self._mark_target_error(exc)
+                raise
+
+    def _mark_target_error(self, exc: Exception) -> None:
+        """Transition this target's subscriptions to ERROR + send one email.
+
+        Mirrors the recon engine's ``_transition_ds_error``: every subscription
+        linked to this target is set to ERROR with the failure message, and a
+        single SMTP notification is sent (env-configured, like the builtin
+        plugins). Best-effort — never raises, so the caller's re-raise of the
+        original exception still happens.
+        """
+        message = f"Target deletion failed: {exc}"
+        if self.db is not None:
+            seen = set()
+            try:
+                for s in self.db.list_target_subscriptions(self.target_id):
+                    if s.subscription_id in seen:
+                        continue
+                    seen.add(s.subscription_id)
+                    try:
+                        self.db.set_target_subscription_status(
+                            self.target_id, s.subscription_id, STATE_ERROR, message=message
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        try:
+            send_smtp_notification(
+                subject=f"[AutoKB] TARGET delete error: {self.name}",
+                body=(
+                    f"Data Target: {self.name}\n"
+                    f"Service: {self.service_id}\n"
+                    f"Error: {exc}\n\n"
+                    "The target has been retained and its subscriptions marked ERROR. "
+                    "Re-enable the target and run Update once the issue is resolved."
+                ),
+            )
+        except Exception:
+            pass
 
     def clear_target(self) -> None:
         self._check_cancel()

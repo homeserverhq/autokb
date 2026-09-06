@@ -164,17 +164,25 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         for doc in documents:
             doc_id = doc["id"]
             checksum = doc["versions"][0]["checksum"]
+            original_file_name = doc.get(
+                "original_file_name", f"document-{doc_id}.pdf"
+            )
+            if doc.get("archived_file_name"):
+                ext = "pdf"
+            else:
+                ext = os.path.splitext(original_file_name)[1].lstrip(".").lower() or "pdf"
             api_index[doc_id] = {
                 "checksum": checksum,
                 "checksum_prefix": checksum[:16],
                 "title": doc.get("title", "Untitled"),
-                "original_file_name": doc.get("original_file_name", f"document-{doc_id}.pdf"),
+                "original_file_name": original_file_name,
+                "ext": ext,
             }
 
         # 4. Build disk index from output directory
         output_dir = self.get_destination_path()
         disk_index = {}  # doc_id -> {"prefix": str, "chunked": bool, "ext": str}
-        disk_name_re = re.compile(r"^(\d+)\.([a-f0-9]{16})(?:-(\d+))?\.(md|pdf)$")
+        disk_name_re = re.compile(r"^(\d+)\.([a-f0-9]{16})(?:-(\d+))?\.([a-z0-9]+)$")
         if os.path.isdir(output_dir):
             for fname in os.listdir(output_dir):
                 match = disk_name_re.match(fname)
@@ -185,8 +193,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                         "ext": match.group(4),
                     }
 
-        expected_chunked = chunking_enabled
-        expected_ext = "pdf" if raw_pdf else "md"
+        expected_chunked = False if raw_pdf else chunking_enabled
 
         # 5. Three-way set comparison
         api_ids = set(api_index.keys())
@@ -200,6 +207,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         for doc_id in api_ids & disk_ids:
             disk_entry = disk_index[doc_id]
             checksum_matches = api_index[doc_id]["checksum"].startswith(disk_entry["prefix"])
+            expected_ext = api_index[doc_id]["ext"] if raw_pdf else "md"
             pattern_matches = (
                 disk_entry["chunked"] == expected_chunked
                 and disk_entry["ext"] == expected_ext
@@ -230,13 +238,21 @@ class ePaperlessDoclingPlugin(BaseSubscription):
             progress_callback(pct, message=f"Processing {original_name}")
 
             try:
+                # Remove any stale output files for an update before writing
+                # fresh ones, otherwise the just-written file(s) would match
+                # ``^<doc_id>.`` and be deleted again below.
+                if doc_id in to_update:
+                    for fname in os.listdir(output_dir):
+                        if re.match(rf"^{doc_id}\.", fname):
+                            os.remove(os.path.join(output_dir, fname))
+
                 if raw_pdf:
-                    pdf_bytes = self._download_document(
+                    file_bytes = self._download_document(
                         pl_url, pl_headers, doc_id
                     )
-                    tmp = f"/tmp/{doc_id}.{checksum_prefix}.pdf"
+                    tmp = f"/tmp/{doc_id}.{checksum_prefix}.{entry['ext']}"
                     with open(tmp, "wb") as f:
-                        f.write(pdf_bytes)
+                        f.write(file_bytes)
                     self.move_to_destination(tmp)
                 else:
                     if use_paperless_content:
@@ -261,12 +277,6 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                         with open(tmp, "w", encoding="utf-8") as f:
                             f.write(f"Original file: {original_name}\n\n{chunk['text']}")
                         self.move_to_destination(tmp)
-
-                # Delete stale files if this is an update
-                if doc_id in to_update:
-                    for fname in os.listdir(output_dir):
-                        if re.match(rf"^{doc_id}\.", fname):
-                            os.remove(os.path.join(output_dir, fname))
             except Exception as exc:
                 # Any per-document failure aborts the run: the wrapper emails
                 # once and the subscription stays enabled for the next run.

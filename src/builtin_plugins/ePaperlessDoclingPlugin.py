@@ -1,5 +1,5 @@
-"""Watches a Paperless-ngx storage path, sends new/changed documents to
-Docling for OCR/conversion, and writes full markdown output."""
+"""Queries Paperless-ngx documents matching a filter, sends new/changed
+documents to Docling for OCR/conversion, and writes full markdown output."""
 
 import os
 import re
@@ -35,9 +35,9 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         "name": "ePaperlessDoclingPlugin",
         "display_name": "Paperless Docling Parser",
         "description": (
-            "Watches a Paperless-ngx storage path, sends new and changed "
-            "documents to Docling for OCR and parsing, and writes chunked "
-            "markdown output (~490 tokens per chunk)."
+            "Queries Paperless-ngx documents matching a filter, sends new and "
+            "changed documents to Docling for OCR and parsing, and writes "
+            "chunked markdown output (~490 tokens per chunk)."
         ),
         "sub_type": "SCHEDULED",
     }
@@ -46,17 +46,12 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         return {
             "type": "object",
             "properties": {
-                "storage_path_id": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Paperless storage path ID to watch",
-                },
                 "document_filter": {
                     "type": "string",
                     "default": "",
                     "format": "textarea",
-                    "description": "Extra filter params appended to the /api/documents/ call to narrow results. Leave blank to return all documents in the storage path.",
-                    "ui_hint": "Example: owner__id=7&document_type__id=2&tags__id__in=3,5",
+                    "description": "Filter params appended to the /api/documents/ call to select documents. Leave blank to return all documents. Scope to a storage path with storage_path__id.",
+                    "ui_hint": "Example: storage_path__id=3&owner__id=7&document_type__id=2&tags__id__in=3,5",
                 },
                 "paperless_url": {
                     "type": "string",
@@ -105,7 +100,6 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                 },
             },
             "required": [
-                "storage_path_id",
                 "paperless_url",
                 "paperless_token",
                 "docling_url",
@@ -131,7 +125,6 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         pl_token = config.get("paperless_token") or os.environ.get("PAPERLESS_TOKEN") or ""
         dl_url = (config.get("docling_url") or os.environ.get("DOCLING_URL") or "http://docling-app:5001").rstrip("/")
         dl_key = config.get("docling_api_key") or os.environ.get("DOCLING_API_KEY") or ""
-        sp_id = config["storage_path_id"]
         document_filter = config.get("document_filter", "")
         chunking_enabled = config.get("chunking_enabled", False)
         processing_mode = config.get("processing_mode", "Paperless Content")
@@ -142,14 +135,13 @@ class ePaperlessDoclingPlugin(BaseSubscription):
 
         self.log.info(
             "plugin_start",
-            storage_path_id=sp_id,
             document_filter=document_filter or "(none)",
         )
 
-        # 1. Query Paperless for documents in the storage path
+        # 1. Query Paperless for documents matching the filter
         progress_callback(5, message="Querying Paperless...")
         documents = self._query_documents(
-            pl_url, pl_headers, sp_id, document_filter
+            pl_url, pl_headers, document_filter
         )
 
         if not documents:
@@ -346,13 +338,9 @@ class ePaperlessDoclingPlugin(BaseSubscription):
     # Paperless helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _query_documents(base_url, headers, storage_path_id, document_filter=""):
+    def _query_documents(base_url, headers, document_filter=""):
         from urllib.parse import parse_qsl
-        params = {"storage_path__id": storage_path_id}
-        if document_filter:
-            params.update(
-                {k: v for k, v in parse_qsl(document_filter) if k != "storage_path__id"}
-            )
+        params = dict(parse_qsl(document_filter)) if document_filter else {}
         all_results = []
         url = f"{base_url}/api/documents/"
         while url:

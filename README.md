@@ -119,7 +119,7 @@ API keys for targets are encrypted at rest and decrypted only at reconciliation 
 |---|---|---|
 | **Crawl4AI Web Scraper** (`crawl4AIWebScraperPlugin`) | SCHEDULED | Crawls websites with configurable depth/pages, converts to markdown, uses 3-way SHA-256 hash reconciliation |
 | **Bible Scriptures** (`eBiblePlugin`) | SCHEDULED | Downloads Bible books/chapters in multiple versions with dynamic dropdowns populated via custom API routes |
-| **Paperless Docling Parser** (`ePaperlessDoclingPlugin`) | SCHEDULED | Watches a Paperless-ngx storage path, sends new and changed documents to Docling for OCR and parsing, and writes chunked markdown output (~490 tokens per chunk) |
+| **Paperless Docling Parser** (`ePaperlessDoclingPlugin`) | SCHEDULED | Queries Paperless-ngx documents matching a filter, sends new and changed documents to Docling for OCR and parsing, and writes chunked markdown output (~490 tokens per chunk) |
 | **IMAP Folder Watch** (`imapFolderWatchPlugin`) | EVENT_BASED | Watches IMAP folders via IDLE push notifications, downloads new emails, chunks long messages |
 | **YouTube Transcriptions** (`youTubeTranscriptionPlugin`) | SCHEDULED | Downloads channel transcripts via YouTube API, chunks by token budget (~490 tokens), supports multiple languages |
 

@@ -1,7 +1,8 @@
 fastapi
 uvicorn
-sqlalchemy
+sqlalchemy>=2.0,<2.2
 asyncpg
+psycopg[binary]
 psycopg2-binary
 redis>=4.3,<5.0
 pydantic

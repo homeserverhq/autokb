@@ -145,8 +145,11 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         )
 
         if not documents:
-            progress_callback(100, message="No documents found")
-            return
+            self.log.warning(
+                "no_documents",
+                document_filter=document_filter or "(none)",
+                message="No documents matched the filter; reconciling output to empty",
+            )
 
         doc_count = len(documents)
         progress_callback(5, message=f"{doc_count} documents found")
@@ -280,7 +283,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         # 7. Process deletions
         for doc_id in sorted(to_delete):
             pct = 10 + int(80 * done_work / total_work) if total_work else 90
-            progress_callback(pct, message=f"Removing {disk_index[doc_id]}")
+            progress_callback(pct, message=f"Removing document {doc_id}")
 
             for fname in os.listdir(output_dir):
                 if re.match(rf"^{doc_id}\.", fname):

@@ -273,11 +273,13 @@ Called synchronously by the Manager at target create/update time (never by the r
 
 ### 6.5 `remove_target() -> None`
 
-Called when the **last** subscription is unlinked from the Target (or the Target is deleted with no remaining subscriptions). The remote container is now orphaned.
+Called only when the **Target itself is deleted**. Removing subscriptions (even the last one) does **not** delete the Target or its remote container — it only removes that subscription's datafiles, leaving the container in place (possibly empty).
+
+An empty container is still a valid Target: recon removes its files with `remove_datafile()` but never calls `remove_target()` just because the container has no datafiles.
 
 - Destroy the remote container **and all its datafiles**.
 - **Must be idempotent** (404 == success).
-- Do not touch the local database — the engine cleans up the join rows and the target row itself after you return.
+- Do not touch the local database — the Manager cleans up the join rows and the target row itself after you return.
 
 ### 6.6 `clear_target() -> None`
 
@@ -344,7 +346,7 @@ def _upload_file(self, path: str) -> str:
 | `update_datafile` | file content changed     | new `remote_datafile_id` | no |
 | `remove_datafile` | file deleted on disk     | — | **yes** (404 == success) |
 | `add_target`      | target create/update time, synchronously by Manager | `remote_target_id` | no |
-| `remove_target`   | last subscription removed | — | **yes** (404 == success) |
+| `remove_target`   | Target explicitly deleted | — | **yes** (404 == success) |
 | `clear_target`    | (contract only, unused)  | — | yes |
 
 ---
@@ -403,7 +405,7 @@ For each subscription, the engine:
 5. **Pass II** syncs `akb_datafile` stats (size/mtime/hash) from the filesystem and prunes rows for deleted files.
 6. **Pass III — healing** (drift reconciliation): the engine re-reads the remote target and looks for tracked `target_datafile` rows whose remote copy is **missing** on the remote (external deletion, a cross-KB `DELETE`, a crash mid-pass). For each drifted file it writes the link's message as `Healing {datafile_id}...` and re-pushes it via `base_update_datafile()`. This only runs for sinks that expose a `_kb_files(kb_id)` method (see Section 9); sinks without it are skipped. After healing, the engine calls `svc.flush()` so any buffered heal upserts land (no-op for non-batching sinks).
 7. **Finalize link statuses**: **only now**, after the whole recon (blocking batches and healing) has finished, the engine sets each link back to `ENABLED` with the summary message `Reconciled: +{a} added, ~{u} updated, -{r} removed`. Healed files are **merged into the `~N updated` count** — there is no separate "healed" field in the message. Because finalization is deferred until after Pass III, the link never reports success early while the worker is still blocking on uploads.
-8. **Orphan cleanup**: when the last subscription is unlinked from a Target, the engine calls `remove_target()` and deletes the target row.
+8. **Target deletion**: when a Target is explicitly deleted, the Manager calls `remove_target()` and deletes the target row. Unlinking or deleting subscriptions does **not** delete the Target or its remote container; it only removes that subscription's files, leaving the container in place (possibly empty).
 
 ### Per-File Resilience
 
@@ -595,7 +597,7 @@ DELETE {api_url}/targets/{target_id}/files/{remote_id}  → delete a file    →
 DELETE {api_url}/targets/{target_id}/files    → clear a container          → 204
 ```
 
-The convention is deliberately minimal — one remote container per Data Target, one HTTP call per method. Files are added when they appear, replaced when they change, and deleted when they disappear; the container is created synchronously at target create/update time (by the Manager) and destroyed when the last subscription is removed. The target-subscription link status flows from `ENQUEUED` (at create/update) → `IN_PROGRESS` (set by the recon engine at sync start) → `ENABLED` (sync complete). That keeps every method to a single request plus an error guard, which is the correct shape for most targets.
+The convention is deliberately minimal — one remote container per Data Target, one HTTP call per method. Files are added when they appear, replaced when they change, and deleted when they disappear; the container is created synchronously at target create/update time (by the Manager) and destroyed only when the Target itself is deleted. The target-subscription link status flows from `ENQUEUED` (at create/update) → `IN_PROGRESS` (set by the recon engine at sync start) → `ENABLED` (sync complete). That keeps every method to a single request plus an error guard, which is the correct shape for most targets.
 
 ```python
 """restUploadSink — delivers AutoKB output to a simple REST file service.

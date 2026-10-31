@@ -387,14 +387,17 @@ def _cleanup_subscription(sub: Subscription, sink_registry: SinkRegistry, parent
 
 def _cleanup_subscription_targets(sub: Subscription, sink_registry: SinkRegistry,
                                       db: DatabaseManager, log) -> None:
-    """Remove all Sink artifacts for a deleted subscription."""
-    from worker.sink_recon import _get_service, _remove_orphan_target
+    """Remove a deleted subscription's Sink artifacts, keeping its Targets.
+
+    Targets (and their remote KB objects) are independent of subscriptions:
+    deleting the last subscription must leave the Target row and remote KB in
+    place, with its contents emptied by the per-link cleanup below.
+    """
+    from worker.sink_recon import _get_service
 
     t_links = db.list_targets_for_subscription(sub.id)
-    targets_seen = set()
     for t_link in t_links:
         target_id = t_link.target_id
-        targets_seen.add(target_id)
         t_df_rows = db.list_datafiles_for_target_subscription(target_id, sub.id)
         for t_df in t_df_rows:
             try:
@@ -406,12 +409,6 @@ def _cleanup_subscription_targets(sub: Subscription, sink_registry: SinkRegistry
             except Exception as exc:
                 log.warning("sink_cleanup_remove_failed", datafile_id=t_df.datafile_id, error=str(exc))
         db.delete_target_subscription(target_id, sub.id)
-
-    # For each target now orphaned, call remove_target + delete row
-    for did in targets_seen:
-        remaining = db.count_target_subscriptions_for_target(did)
-        if remaining == 0:
-            _remove_orphan_target(did, db, sink_registry, log)
 
     # Delete orphan akb_datafile rows for this subscription
     for df in db.list_datafiles_for_subscription(sub.id):

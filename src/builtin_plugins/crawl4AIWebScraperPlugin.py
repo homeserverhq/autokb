@@ -109,8 +109,6 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
 
         if not results:
             self.log.warning("webscraper_no_results", url=url)
-            progress_callback(100, message="No pages returned")
-            return
 
         total_api = len(results)
         self.log.info("webscraper_api_results", count=total_api)
@@ -119,6 +117,9 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
         # Build API index from results
         api_index = {}
         for r in results:
+            if not isinstance(r, dict):
+                self.log.warning("webscraper_invalid_result", result=repr(r)[:200])
+                continue
             if not r.get("success"):
                 self.log.warning(
                     "webscraper_page_failed",
@@ -142,8 +143,9 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
                 "content_prefix": _content_hash_prefix(content),
             }
 
-        if not api_index:
-            progress_callback(100, message="No successful pages")
+        if not api_index and results:
+            self.log.error("webscraper_no_successful_pages", url=url, total=total_api)
+            progress_callback(100, message="No successful pages — keeping existing output")
             return
 
         # Build disk index from output directory
@@ -423,7 +425,12 @@ class crawl4AIWebScraperPlugin(BaseSubscription):
                 if not raw:
                     raise RuntimeError("Job completed but no result data")
                 result_data = json.loads(raw) if isinstance(raw, str) else raw
-                return result_data.get("results", [])
+                if not isinstance(result_data, dict):
+                    raise RuntimeError("Job completed but result data is not an object")
+                results = result_data.get("results")
+                if not isinstance(results, list):
+                    raise RuntimeError("Job completed but result data has no results list")
+                return results
 
             elif status == "failed":
                 error_msg = data.get("error", "Unknown error")

@@ -716,7 +716,12 @@ def _transition_ds_error(ds_link, target_id, sub_id, db, log,
 
 def _remove_orphan_target(target_id: str, db: DatabaseManager,
                               sink_registry: SinkRegistry, log) -> None:
-    """Called when the last subscription is removed from a target."""
+    """Force-delete a target and its remote resource.
+
+    Used only by the Manager's explicit force-delete path. Subscription
+    cleanup no longer calls this: Targets (and their remote KB objects)
+    outlive their subscriptions.
+    """
     ds_row = db.get_target(target_id)
     if ds_row is None:
         return

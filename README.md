@@ -97,7 +97,7 @@ A sink subclasses `BaseSink` (in `src/utils/sink_base.py`) and implements six re
 | `update_datafile(remote_id, path)` | content changed (hash diff) | new remote datafile ID |
 | `remove_datafile(remote_id)` | file deleted on disk | — |
 | `add_target()` | first recon for a target | remote target ID |
-| `remove_target()` | last subscription unlinked | — |
+| `remove_target()` | Target explicitly deleted | — |
 | `clear_target()` | contract-only (not yet invoked) | — |
 
 Registration mirrors plugins: files matching `*Sink.py` in `/src/sinks/` are scanned by `SinkRegistry`, and the file stem must equal the sanitized `metadata["name"]`. Full authoring guide: [`assets/sink-development.md`](assets/sink-development.md).

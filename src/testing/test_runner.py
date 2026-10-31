@@ -1989,6 +1989,100 @@ def test_dkb_unlink_last_sub_keeps_target() -> Tuple[bool, str]:
             _delete_sub(sub_id)
 
 
+def test_dkb_delete_last_sub_keeps_target() -> Tuple[bool, str]:
+    """Deleting the last subscription keeps the (empty) target and remote KB."""
+    _reset_sink_calls()
+    uid = str(time.time()).replace(".", "")[-8:]
+    sub_name = f"e2e-delsub-{uid}"
+    t_name = f"e2e-delsub-ds-{uid}"
+    sub_id = None
+    t_id = None
+    try:
+        sub = create_sub("testSinkWriterPlugin", sub_name, {}, cron="0 0 * * *")
+        sub_id = sub["id"]
+        svcs = api_get("/api/sinks")
+        svc_id = next(s["service_id"] for s in svcs if s.get("name") == "testSink")
+        ds = api_post(f"/api/sinks/{svc_id}/targets", {
+            "name": t_name, "api_url": "http://fake/api", "api_key": "test",
+            "target_extra_params": {}, "subscription_ids": [sub_id],
+        })
+        t_id = ds["target_id"]
+        _write_output_file(sub_name, "manual.md", "x\n")
+        trigger_sub(sub_id)
+        deadline = time.time() + 120
+        last_status = None
+        while time.time() < deadline:
+            t_det = api_get(f"/api/targets/{t_id}")
+            subs_detail = t_det.get("subscriptions", [])
+            if subs_detail:
+                last_status = subs_detail[0].get("status", "")
+                if last_status == "ENABLED":
+                    break
+            time.sleep(2)
+        if last_status != "ENABLED":
+            return False, f"DelSubKeepTarget: link not ENABLED (last={last_status})"
+
+        t_before = api_get(f"/api/targets/{t_id}")
+        remote_before = t_before.get("remote_target_id")
+        if not remote_before:
+            return False, "DelSubKeepTarget: remote_target_id is empty"
+
+        _reset_sink_calls()
+        r = requests.delete(f"{MANAGER_URL}/api/subscriptions/{sub_id}",
+                            headers=_api_headers(), timeout=30)
+        if r.status_code != 200:
+            return False, f"DelSubKeepTarget: DELETE sub returned {r.status_code}: {r.text[:200]}"
+        sub_id = None  # cleaned up by this test
+
+        deadline = time.time() + 120
+        kept = False
+        subs_gone = False
+        while time.time() < deadline:
+            try:
+                t_det = api_get(f"/api/targets/{t_id}")
+                kept = True
+                if len(t_det.get("subscriptions", [])) == 0:
+                    subs_gone = True
+                    break
+            except Exception:
+                kept = False
+                break
+            time.sleep(2)
+        if not kept:
+            return False, "DelSubKeepTarget: target was deleted (should be kept)"
+        if not subs_gone:
+            return False, "DelSubKeepTarget: target still has linked subs"
+
+        t_after = api_get(f"/api/targets/{t_id}")
+        if t_after.get("remote_target_id") != remote_before:
+            return False, "DelSubKeepTarget: remote_target_id changed"
+        calls = _read_sink_calls()
+        if not any(c[0] == "remove_datafile" for c in calls):
+            return False, "DelSubKeepTarget: remove_datafile not called"
+        if any(c[0] == "remove_target" for c in calls):
+            return False, "DelSubKeepTarget: remove_target should NOT be called"
+
+        _reset_sink_calls()
+        r = requests.delete(f"{MANAGER_URL}/api/targets/{t_id}",
+                            headers=_api_headers(), timeout=30)
+        if r.status_code != 200:
+            return False, f"DelSubKeepTarget: DELETE target returned {r.status_code}: {r.text[:200]}"
+        t_id = None
+        calls = _read_sink_calls()
+        if not any(c[0] == "remove_target" for c in calls):
+            return False, "DelSubKeepTarget: remove_target not called on explicit target delete"
+        return True, "Delete last sub OK (target/KB kept, files removed; target delete removes remote)"
+    finally:
+        try:
+            if t_id is not None:
+                requests.delete(f"{MANAGER_URL}/api/targets/{t_id}?force=true",
+                                headers=_api_headers(), timeout=10)
+        except Exception:
+            pass
+        if sub_id is not None:
+            _delete_sub(sub_id)
+
+
 # ---------------------------------------------------------------------------
 # Sink unit test helpers and functions
 # ---------------------------------------------------------------------------
@@ -2904,14 +2998,16 @@ def _dkb_test_recon_cancel_sub_deleted(db, sub, ds):
         return False, "target_subscription link not cleaned"
     if db.list_datafiles_for_target_subscription(ds.id, after):
         return False, "target_datafile rows remain after cleanup"
-    if db.get_target(ds.id) is not None:
-        return False, "orphan target not deleted after cleanup"
+    if db.get_target(ds.id) is None:
+        return False, "target row was deleted (should be kept)"
     if db.get_subscription(after) is not None:
         return False, "subscription row not deleted after cleanup"
+    if db.list_datafiles_for_subscription(after):
+        return False, "akb_datafile rows remain after cleanup"
     if not any(c[0] == "remove_datafile" for c in svc.calls):
         return False, "remove_datafile not called during cleanup"
-    if not any(c[0] == "remove_target" for c in svc.calls):
-        return False, "remove_target not called for orphan target"
+    if any(c[0] == "remove_target" for c in svc.calls):
+        return False, "remove_target must not be called when a subscription is deleted"
     return True, "OK"
 
 
@@ -3798,6 +3894,7 @@ def _run_suite(reset_mode: bool) -> int:
         ("DKB Test 30 — delete target force", test_dkb_delete_force),
         ("DKB Test 31 — delete strict failure retains + force recovers", test_dkb_delete_strict_failure_force),
         ("DKB Test 32 — unlink last sub keeps target", test_dkb_unlink_last_sub_keeps_target),
+        ("DKB Test 33 — delete last sub keeps target", test_dkb_delete_last_sub_keeps_target),
     ]
 
     results: List[Tuple[str, bool, str]] = []

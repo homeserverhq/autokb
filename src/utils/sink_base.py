@@ -224,7 +224,8 @@ class BaseSink(ABC):
     @abstractmethod
     def remove_target(self) -> None:
         """Destroy the remote target object and all its datafiles.
-        Called when the last target_subscription is removed.
+        Called only when the Target itself is explicitly deleted; removing
+        subscriptions (even the last one) must leave the remote target intact.
         """
         ...
 

@@ -9,7 +9,12 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPTS = ["test_crons.py", "test_cipher.py", "test_plugin_loading.py"]
+SCRIPTS = [
+    "test_crons.py",
+    "test_cipher.py",
+    "test_plugin_loading.py",
+    "test_empty_source_reconcile.py",
+]
 
 
 def main() -> int:

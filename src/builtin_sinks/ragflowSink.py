@@ -8,12 +8,14 @@ edit a document in place) and removed when they disappear from ``/output/``.
 
 RAGFlow REST API (``{api_url}/api/v1``), auth: ``Authorization: Bearer <key>``.
 The API reports failures with HTTP 200 and a non-zero ``code`` in the body,
-which ``_check`` inspects. The dataset is provisioned with the ``General``
-chunking method (``chunk_method: "naive"``) and the Docling layout parser
-(``parser_config: {"layout_recognize": "Docling"}``) so PDFs are recognized
-with Docling rather than the default DeepDoc. RAGFlow dataset visibility is
-``me`` (private) or ``team`` (shared with the tenant team); a PUBLIC target
-maps to ``team``.
+which ``_check`` inspects. RAGFlow 1.0 selects a built-in parser with
+``parse_type: 1`` and ``parser_id: "general"`` and stores ``parser_config``
+keyed by pipeline component (e.g. ``Parser:HipSignsRhyme``). The dataset is
+provisioned with Docling as the PDF parser
+(``Parser:<node>.pdf.parse_method = "Docling"``) so PDFs are recognized with
+Docling rather than the default DeepDoc. RAGFlow dataset visibility is ``me``
+(private) or ``team`` (shared with the tenant team); a PUBLIC target maps to
+``team``.
 
 Required dependencies: ``requests`` and ``utils.misc_utils`` (already in the
 AutoKB runtime image).
@@ -43,6 +45,7 @@ class RagflowSink(BaseSink):
     api_key_env_var = "RAGFLOW_API_KEY"
     _TIMEOUT = 60
     _PAGE_SIZE = 100
+    _PARSER_COMPONENT_HINT = "Parser:HipSignsRhyme"
 
     def __init__(self, target_row, db):
         super().__init__(target_row, db)
@@ -72,12 +75,18 @@ class RagflowSink(BaseSink):
     def _check(self, resp: requests.Response, action: str) -> None:
         if resp.status_code >= 400:
             body = resp.text[:500]
-            raise RuntimeError(f"ragflow {action} failed: HTTP {resp.status_code}: {body}")
+            raise RuntimeError(
+                f"ragflow {action} failed: HTTP {resp.status_code}: {body}"
+            )
         body = self._try_json(resp)
         if body is None:
-            raise RuntimeError(f"ragflow {action} failed: non-JSON response: {resp.text[:500]}")
+            raise RuntimeError(
+                f"ragflow {action} failed: non-JSON response: {resp.text[:500]}"
+            )
         if body.get("code") != 0:
-            raise RuntimeError(f"ragflow {action} failed: {body.get('message') or body}")
+            raise RuntimeError(
+                f"ragflow {action} failed: {body.get('message') or body}"
+            )
 
     def _not_found(self, body) -> bool:
         if not isinstance(body, dict):
@@ -112,6 +121,23 @@ class RagflowSink(BaseSink):
         if body is not None and body.get("code") != 0 and self._not_found(body):
             return  # already gone → idempotent
         self._check(resp, action)
+
+    def _parser_component_id(self, parser_config) -> str | None:
+        for key in parser_config or {}:
+            if key.split(":", 1)[0] == "Parser":
+                return key
+        return None
+
+    def _delete_target_quietly(self, dataset_id: str) -> None:
+        try:
+            requests.delete(
+                self._url("datasets"),
+                headers=self._headers(),
+                json={"ids": [dataset_id]},
+                timeout=self._TIMEOUT,
+            )
+        except Exception:
+            pass
 
     def _list_docs(self, kb_id: str):
         page = 1
@@ -205,9 +231,12 @@ class RagflowSink(BaseSink):
         self._check_cancel()
         payload = {
             "name": self._kb_name(),
-            "chunk_method": "naive",  # "General" in the RAGFlow UI
+            "parse_type": 1,  # BuiltIn parser, selected by parser_id below
+            "parser_id": "general",  # "General" in the RAGFlow UI
             "permission": "team" if self.access_level == "PUBLIC" else "me",
-            "parser_config": {"layout_recognize": "Docling"},
+            "parser_config": {
+                self._PARSER_COMPONENT_HINT: {"pdf": {"parse_method": "Docling"}},
+            },
         }
         resp = requests.post(
             self._url("datasets"),
@@ -216,9 +245,37 @@ class RagflowSink(BaseSink):
             timeout=self._TIMEOUT,
         )
         self._check(resp, "add target")
-        dataset_id = ((resp.json() or {}).get("data") or {}).get("id")
+        data = (resp.json() or {}).get("data") or {}
+        dataset_id = data.get("id")
         if not dataset_id:
             raise RuntimeError("ragflow add target returned no dataset id")
+
+        # The Parser node id is a builtin-template detail. Confirm Docling
+        # actually landed; otherwise the flat/unknown key would be dropped and
+        # PDFs would silently parse with DeepDOC.
+        parser_config = data.get("parser_config") or {}
+        parser_node = self._parser_component_id(parser_config)
+        node_config = parser_config.get(parser_node) if parser_node else None
+        if not isinstance(node_config, dict):
+            self._delete_target_quietly(dataset_id)
+            raise RuntimeError(
+                "ragflow add target: dataset parser_config has no usable Parser component"
+            )
+        pdf = node_config.setdefault("pdf", {})
+        if not isinstance(pdf, dict):
+            self._delete_target_quietly(dataset_id)
+            raise RuntimeError(
+                "ragflow add target: dataset Parser component has no usable pdf setup"
+            )
+        if str(pdf.get("parse_method", "")).lower() != "docling":
+            pdf["parse_method"] = "Docling"
+            update = requests.put(
+                self._url(f"datasets/{dataset_id}"),
+                headers=self._headers(),
+                json={"parser_config": parser_config},
+                timeout=self._TIMEOUT,
+            )
+            self._check(update, "configure Docling")
         return dataset_id
 
     def remove_target(self) -> None:
@@ -226,6 +283,18 @@ class RagflowSink(BaseSink):
         dataset_id = self.remote_target_id
         if not dataset_id:
             return
+        # RAGFlow 1.0 reports an already-deleted dataset as 403 "Permission
+        # denied" (not a not-found message), so probe first to stay idempotent
+        # without masking a genuine permission failure on a dataset we can read.
+        probe = requests.get(
+            self._url(f"datasets/{dataset_id}"),
+            headers=self._headers(),
+            timeout=self._TIMEOUT,
+        )
+        probe_body = self._try_json(probe)
+        if probe_body is not None and probe_body.get("code") == 404:
+            return  # already gone → idempotent
+        self._check(probe, "probe target")
         resp = requests.delete(
             self._url("datasets"),
             headers=self._headers(),

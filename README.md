@@ -118,6 +118,7 @@ API keys for targets are encrypted at rest and decrypted only at reconciliation 
 | Plugin | Type | Description |
 |---|---|---|
 | **Crawl4AI Web Scraper** (`crawl4AIWebScraperPlugin`) | SCHEDULED | Crawls websites with configurable depth/pages, converts to markdown, uses 3-way SHA-256 hash reconciliation |
+| **FastCRW Web Scraper** (`fastCRWWebScraperPlugin`) | SCHEDULED | Crawls websites through the FastCRW API with configurable depth/pages, stores markdown one file per page, uses 3-way SHA-256 hash reconciliation |
 | **Bible Scriptures** (`eBiblePlugin`) | SCHEDULED | Downloads Bible books/chapters in multiple versions with dynamic dropdowns populated via custom API routes |
 | **Paperless Docling Parser** (`ePaperlessDoclingPlugin`) | SCHEDULED | Queries Paperless-ngx documents matching a filter, sends new and changed documents to Docling for OCR and parsing, and writes chunked markdown output (~490 tokens per chunk) |
 | **IMAP Folder Watch** (`imapFolderWatchPlugin`) | EVENT_BASED | Watches IMAP folders via IDLE push notifications, downloads new emails, chunks long messages |
@@ -241,6 +242,8 @@ Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sendin
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_NOTIFY_EMAIL` | — | SMTP notification configuration |
 | `HEARTBEAT_TIMEOUT` | `300` | Seconds before watcher terminates unresponsive plugin |
 | `WORKER_STARTUP_DELAY_S` | `5` | Delay before worker initializes sink components (lets Manager run migrations) |
+| `FASTCRW_API_URL` | `http://fastcrw-app:3000` | FastCRW API base URL used by `fastCRWWebScraperPlugin` |
+| `FASTCRW_API_KEY` | — | Default FastCRW bearer token; per-subscription `api_key` overrides it |
 | `OPENWEBUI_API_KEY` | — | Default API key fallback for the Open WebUI sink |
 | `COGNEE_API_KEY` | — | Default API key fallback for the Cognee sink |
 

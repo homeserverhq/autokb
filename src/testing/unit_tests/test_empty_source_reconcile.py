@@ -31,6 +31,7 @@ except ImportError:
     requests_stub.RequestException = RequestException
     requests_stub.HTTPError = HTTPError
     requests_stub.get = lambda *args, **kwargs: None
+    requests_stub.post = lambda *args, **kwargs: None
     sys.modules["requests"] = requests_stub
 
 try:

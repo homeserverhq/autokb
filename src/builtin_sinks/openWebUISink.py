@@ -51,7 +51,11 @@ class OpenWebUISink(BaseSink):
         self.api_url = (self.api_url or self.default_api_url).rstrip("/")
         self.api_key = self.api_key or (os.environ.get(self.api_key_env_var, "") if self.api_key_env_var else "")
         self._api_root = self.api_url + "/api/v1"
+        # Short timeout for metadata/list/delete calls; uploads and KB links
+        # can trigger synchronous indexing/embedding and legitimately take
+        # much longer for large documents.
         self._timeout = 60
+        self._operation_timeout = 300
         self._process_timeout = 300
         self._process_interval = 1
         self._log = get_logger("openWebUISink")
@@ -108,7 +112,7 @@ class OpenWebUISink(BaseSink):
                 self._url("files/"),
                 headers=self._headers(),
                 files=files,
-                timeout=self._timeout,
+                timeout=self._operation_timeout,
             )
         self._check(resp, "upload file")
         file_id = resp.json().get("id")
@@ -154,7 +158,7 @@ class OpenWebUISink(BaseSink):
             self._url(f"knowledge/{kb_id}/file/add"),
             headers=self._headers(),
             json={"file_id": file_id},
-            timeout=self._timeout,
+            timeout=self._operation_timeout,
         )
         self._check(resp, f"link file {file_id} to KB {kb_id}")
 

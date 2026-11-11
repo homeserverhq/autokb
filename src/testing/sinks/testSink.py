@@ -35,7 +35,9 @@ class TestSink(BaseSink):
         _record("add_datafile", path, rid)
         return rid
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: str = None, new_hash: str = None,
+                        datafile_id: str = None) -> str:
         self._check_cancel()
         new_rid = self._file_name(path)
         _record("update_datafile", remote_datafile_id, path, new_rid)

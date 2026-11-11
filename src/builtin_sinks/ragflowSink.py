@@ -206,7 +206,9 @@ class RagflowSink(BaseSink):
         self._check_cancel()
         return self._upload_and_parse(path)
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: str = None, new_hash: str = None,
+                        datafile_id: str = None) -> str:
         # RAGFlow cannot replace a document's content in place. Upload the new
         # document FIRST, then remove the old one: if the re-upload fails, the
         # old document is still in place (no data loss). The tradeoff is that

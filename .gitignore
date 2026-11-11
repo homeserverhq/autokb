@@ -9,6 +9,8 @@ logs/
 !/output/.gitkeep
 /db/*
 /dbexport/*
+# Isolated development stack data
+/.dev/
 
 # Local secrets/credentials — keep stack.env tracked but ignore local overrides
 .env

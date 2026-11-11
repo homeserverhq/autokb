@@ -17,7 +17,13 @@ import time
 
 import requests
 
-from utils.misc_utils import SinkCancelledError, guess_content_type, sanitize_name
+from utils.misc_utils import (
+    SinkCancelledError,
+    SinkDuplicateContent,
+    get_logger,
+    guess_content_type,
+    sanitize_name,
+)
 from utils.sink_base import BaseSink
 
 
@@ -48,6 +54,7 @@ class OpenWebUISink(BaseSink):
         self._timeout = 60
         self._process_timeout = 300
         self._process_interval = 1
+        self._log = get_logger("openWebUISink")
 
     # ---- HTTP helpers ----
 
@@ -112,11 +119,9 @@ class OpenWebUISink(BaseSink):
                 raise RuntimeError(f"openWebUI file {file_id} did not finish processing")
         except SinkCancelledError:
             # Cancel fired while the file was processing — best-effort remove
-            # the uploaded-but-unlinked file so nothing is orphaned in the repo.
-            try:
-                self._delete_file(file_id)
-            except Exception:
-                pass
+            # the uploaded-but-unlinked file so nothing is orphaned in the
+            # repo. Never delete when another linked file owns the same hash.
+            self._safe_delete_unlinked(file_id)
             raise
         return file_id
 
@@ -194,35 +199,96 @@ class OpenWebUISink(BaseSink):
             timeout=self._timeout,
         )
         self._check(resp, f"get content for {file_id}")
-        content = (resp.json() or {}).get("content", "") if isinstance(resp.json(), dict) else ""
+        payload = resp.json() if isinstance(resp.json(), dict) else {}
+        content = payload.get("content", "")
+        if not isinstance(content, str) or not content:
+            raise RuntimeError(f"openWebUI file {file_id} has no retrievable content")
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-    def _recover_duplicate(self, new_file_id: str) -> bool:
-        """Resolve a duplicate-content rejection so *new_file_id* becomes the
-        sole owner of that content in the KB: find the existing file holding
-        the same text, delete it (clearing the dedup blocker), then re-link
-        the fresh upload. Returns True when the fresh file is linked.
+    def _find_duplicate_owner(self, new_file_id: str):
+        """Return ``(owner_id, content_hash)`` for a duplicate rejection.
+
+        ``owner_id`` is the currently linked file that owns the same content,
+        or ``None`` when the content hash is held only by state we cannot see
+        (e.g. orphaned OpenWebUI vectors). Lookup errors propagate so the
+        caller can treat them as transient rather than permanently blocked.
+        """
+        content_hash = self._content_hash(new_file_id)
+        kb_files = self._kb_files(self.remote_target_id)
+        for f in kb_files:
+            if f.get("id") != new_file_id and f.get("hash") == content_hash:
+                return f.get("id"), content_hash
+        self._log.error(
+            "sink_duplicate_unrecoverable",
+            target_id=self.target_id,
+            file_id=new_file_id,
+            content_hash=content_hash,
+            kb_files=len(kb_files),
+            reason="no_linked_owner",
+        )
+        return None, content_hash
+
+    def _safe_delete_unlinked(self, file_id: str, content_hash: str = None) -> None:
+        """Delete an uploaded-but-unlinked file only when it cannot be the
+        hash owner of another linked file.
+
+        OpenWebUI's file delete can remove KB points by content hash, so
+        deleting a duplicate upload would wipe the very vectors that caused
+        the rejection. When the hash cannot be determined, leave the upload
+        alone rather than risk data loss.
         """
         try:
-            content_hash = self._content_hash(new_file_id)
-        except Exception:
-            return False
-        existing_id = None
-        for f in self._kb_files(self.remote_target_id):
-            if f.get("id") != new_file_id and f.get("hash") == content_hash:
-                existing_id = f.get("id")
-                break
-        if not existing_id:
-            return False
+            content_hash = content_hash or self._content_hash(file_id)
+            for f in self._kb_files(self.remote_target_id):
+                if f.get("id") != file_id and f.get("hash") == content_hash:
+                    self._log.warning(
+                        "sink_cleanup_skipped_hash_owner",
+                        target_id=self.target_id,
+                        file_id=file_id,
+                        content_hash=content_hash,
+                    )
+                    return
+            self._delete_file(file_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log.warning(
+                "sink_cleanup_skipped_unknown",
+                target_id=self.target_id,
+                file_id=file_id,
+                error=str(exc),
+            )
+
+    def _handle_duplicate(self, path: str, file_id: str):
+        """Resolve a duplicate rejection by reuse, or raise a typed block.
+
+        Returns the existing linked owner id when one exists. Never deletes
+        the existing owner or the fresh upload: either delete could remove
+        vectors shared by hash.
+        """
         try:
-            self._delete_file(existing_id)
-        except Exception:
-            return False
-        try:
-            self._link_to_kb(self.remote_target_id, new_file_id)
-        except Exception:
-            return False
-        return True
+            owner_id, content_hash = self._find_duplicate_owner(file_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log.error(
+                "sink_duplicate_lookup_failed",
+                target_id=self.target_id,
+                file_id=file_id,
+                error=str(exc),
+            )
+            raise
+        if owner_id:
+            self._log.info(
+                "sink_duplicate_reused",
+                target_id=self.target_id,
+                file_id=file_id,
+                owner_id=owner_id,
+                content_hash=content_hash,
+            )
+            return owner_id
+        raise SinkDuplicateContent(
+            path=path,
+            file_id=file_id,
+            content_hash=content_hash,
+            reason="orphan_vectors",
+        )
 
     def _create_kb(self, name: str) -> str:
         payload = {"name": name, "description": f"AutoKB sync: {name}"}
@@ -246,29 +312,49 @@ class OpenWebUISink(BaseSink):
         try:
             self._link_to_kb(self.remote_target_id, file_id)
         except RuntimeError as exc:
-            if not (self._is_duplicate_error(exc) and self._recover_duplicate(file_id)):
-                try:
-                    self._delete_file(file_id)
-                except Exception:
-                    pass
-                raise
+            if self._is_duplicate_error(exc):
+                return self._handle_duplicate(path, file_id)
+            self._safe_delete_unlinked(file_id)
+            raise
         return file_id
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: str = None, new_hash: str = None,
+                        datafile_id: str = None) -> str:
         new_id = self._upload_file(path)
         if new_id == remote_datafile_id:
             return new_id  # remote deduped by content → nothing to clean up
+        duplicate_reuse = False
         try:
             self._link_to_kb(self.remote_target_id, new_id)
         except RuntimeError as exc:
-            if not (self._is_duplicate_error(exc) and self._recover_duplicate(new_id)):
-                try:
-                    self._delete_file(new_id)
-                except Exception:
-                    pass
+            if not self._is_duplicate_error(exc):
+                self._safe_delete_unlinked(new_id)
                 raise
-        if remote_datafile_id and remote_datafile_id != new_id:
-            self._delete_file(remote_datafile_id)
+            owner_id = self._handle_duplicate(path, new_id)
+            duplicate_reuse = True
+            new_id = owner_id
+        if remote_datafile_id and remote_datafile_id != new_id and not duplicate_reuse:
+            if previous_hash and new_hash and previous_hash == new_hash:
+                self._log.warning(
+                    "sink_old_version_retained_same_hash",
+                    target_id=self.target_id,
+                    old_id=remote_datafile_id,
+                    new_id=new_id,
+                )
+            elif datafile_id and self.db.count_remote_datafile_references(
+                remote_datafile_id,
+                excluding_target_id=self.target_id,
+                excluding_datafile_id=datafile_id,
+            ):
+                self._log.info(
+                    "sink_old_version_retained_shared",
+                    target_id=self.target_id,
+                    old_id=remote_datafile_id,
+                    new_id=new_id,
+                )
+            else:
+                self._delete_file(remote_datafile_id)
         return new_id
 
     def remove_datafile(self, remote_datafile_id: str) -> None:

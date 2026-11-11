@@ -48,6 +48,7 @@ from utils.constants import (
     STATE_ENABLED,
     STATE_ERROR,
     STATE_IN_PROGRESS,
+    TARGET_DF_DUPLICATE_BLOCKED,
     SUB_TYPE_EVENT_BASED,
     SUB_TYPE_SCHEDULED,
     TRIGGERABLE_STATES,
@@ -368,6 +369,12 @@ async def _handle_notify(payload: str) -> None:
 def _serialise_target_subscription(s, db) -> Dict[str, Any]:
     """Serialize a single target-subscription link, enriched with the sub's name."""
     sub_row = db.get_subscription(s.subscription_id)
+    try:
+        blocked = db.count_target_datafiles_by_state(
+            s.target_id, s.subscription_id, TARGET_DF_DUPLICATE_BLOCKED,
+        )
+    except Exception:
+        blocked = 0
     return {
         "subscription_id": s.subscription_id,
         "subscription_name": sub_row.name if sub_row else "",
@@ -375,6 +382,7 @@ def _serialise_target_subscription(s, db) -> Dict[str, Any]:
         "status": s.status,
         "last_updated": s.last_updated.isoformat() if s.last_updated else None,
         "last_message": s.last_message,
+        "blocked_count": blocked,
     }
 
 
@@ -1318,6 +1326,9 @@ def api_target_detail(target_id: str):
             "status": s.status,
             "last_updated": s.last_updated.isoformat() if s.last_updated else None,
             "last_message": s.last_message,
+            "blocked_count": db.count_target_datafiles_by_state(
+                target_id, s.subscription_id, TARGET_DF_DUPLICATE_BLOCKED,
+            ),
         })
     data = _serialise_target(t, subs, db)
     data["subscriptions"] = enriched
@@ -1483,13 +1494,28 @@ def api_delete_target(target_id: str, force: bool = False):
 
 @app.post("/api/targets/{target_id}/update")
 def api_trigger_target_update(target_id: str):
+    """Run a full downstream recon/heal for every linked subscription.
+
+    Update is also the explicit recovery action: it clears duplicate-blocked
+    outcomes (so those documents are retried) and moves ERROR links back to
+    ENABLED. DISABLED links are deliberately left alone.
+    """
     db: DatabaseManager = STATE["db"]
     queue: QueueManager = STATE["queue"]
+    t = db.get_target(target_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    cleared = db.clear_duplicate_blocks(target_id)
+    retried = db.retry_error_links(target_id)
     subs = db.list_target_subscriptions(target_id)
     sub_ids = list({s.subscription_id for s in subs})
     for sid in sub_ids:
         queue.push_primary(sid, operation="SINK_ONLY")
-    return {"enqueued": len(sub_ids)}
+    return {
+        "enqueued": len(sub_ids),
+        "cleared_duplicate_blocks": cleared,
+        "retried_error_links": retried,
+    }
 
 
 @app.post("/api/targets/{target_id}/status")

@@ -12,7 +12,14 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from utils.misc_utils import SinkCancelledError, in_schedule_window, parse_schedule_window, sanitize_name
+from utils.constants import TARGET_DF_DUPLICATE_BLOCKED, TARGET_DF_SYNCED
+from utils.misc_utils import (
+    SinkCancelledError,
+    SinkDuplicateContent,
+    in_schedule_window,
+    parse_schedule_window,
+    sanitize_name,
+)
 
 
 _CHUNK_SIZE = 1 << 20  # 1 MiB
@@ -197,12 +204,17 @@ class BaseSink(ABC):
         ...
 
     @abstractmethod
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: Optional[str] = None,
+                        new_hash: Optional[str] = None,
+                        datafile_id: Optional[str] = None) -> str:
         """Re-upload (update) an existing file on the remote target.
 
         Returns the NEW remote_datafile_id assigned after the re-upload.
         It may equal the old id if the remote instance dedupes by content.
-        Callers must persist the returned id.
+        Callers must persist the returned id. ``previous_hash`` / ``new_hash``
+        let content-scoped sinks avoid deleting a new version's remote data;
+        ``datafile_id`` identifies the local row for shared-file refcounts.
         """
         ...
 
@@ -262,13 +274,28 @@ class BaseSink(ABC):
         # get-or-create akb_datafile
         df = self.db.get_or_create_datafile(sub_id, path, size, mtime, datafile_hash)
 
-        # check if already tracked for this target
+        # check if already tracked for this target. A blocked/failed row is
+        # not a successful add: it must remain retryable.
         existing = self.db.get_target_datafile(self.target_id, df.id)
-        if existing:
+        if existing and existing.state == TARGET_DF_SYNCED:
             return  # already added
 
-        remote_id = self.add_datafile(path)
-        self.db.insert_target_datafile(self.target_id, df.id, remote_id, datafile_hash)
+        try:
+            remote_id = self.add_datafile(path)
+        except SinkDuplicateContent as exc:
+            self.db.upsert_target_datafile(
+                self.target_id, df.id,
+                remote_id=exc.remote_datafile_id,
+                datafile_hash=datafile_hash,
+                state=TARGET_DF_DUPLICATE_BLOCKED,
+                last_error=str(exc),
+            )
+            raise
+
+        self.db.upsert_target_datafile(
+            self.target_id, df.id, remote_id, datafile_hash,
+            state=TARGET_DF_SYNCED,
+        )
 
     def base_update_datafile(self, datafile_id: str, new_hash: str) -> None:
         """Update a file on the remote target and sync the hash + remote id."""
@@ -278,10 +305,24 @@ class BaseSink(ABC):
         df = self.db.get_datafile(datafile_id)
         if not df:
             return
-        new_remote_id = self.update_datafile(t_df.remote_datafile_id, df.path)
+        try:
+            new_remote_id = self.update_datafile(
+                t_df.remote_datafile_id, df.path,
+                previous_hash=t_df.hash, new_hash=new_hash,
+                datafile_id=datafile_id,
+            )
+        except SinkDuplicateContent as exc:
+            self.db.update_target_datafile_state(
+                self.target_id, datafile_id,
+                TARGET_DF_DUPLICATE_BLOCKED, last_error=str(exc),
+            )
+            raise
         if new_remote_id:
             self.db.update_target_datafile_remote_id(self.target_id, datafile_id, new_remote_id)
         self.db.update_target_datafile_hash(self.target_id, datafile_id, new_hash)
+        self.db.update_target_datafile_state(
+            self.target_id, datafile_id, TARGET_DF_SYNCED, last_error=None,
+        )
 
     def base_remove_datafile(self, datafile_id: str) -> None:
         """Remove a file from the remote target and delete the join row.
@@ -294,11 +335,21 @@ class BaseSink(ABC):
         t_df = self.db.get_target_datafile(self.target_id, datafile_id)
         if not t_df:
             return
-        if getattr(self, "shared_file_store", False) and self.db.count_other_target_datafiles(
-            self.target_id, datafile_id
-        ):
+        # A duplicate-blocked add has no remote counterpart; deleting the row
+        # is the whole cleanup.
+        if not t_df.remote_datafile_id:
             self.db.delete_target_datafile(self.target_id, datafile_id)
             return
+        if getattr(self, "shared_file_store", False):
+            other_target = self.db.count_other_target_datafiles(self.target_id, datafile_id)
+            other_remote = self.db.count_remote_datafile_references(
+                t_df.remote_datafile_id,
+                excluding_target_id=self.target_id,
+                excluding_datafile_id=datafile_id,
+            )
+            if other_target or other_remote:
+                self.db.delete_target_datafile(self.target_id, datafile_id)
+                return
         self.remove_datafile(t_df.remote_datafile_id)
         self.db.delete_target_datafile(self.target_id, datafile_id)
 

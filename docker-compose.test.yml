@@ -1,3 +1,5 @@
+name: autokb-test
+
 services:
   autokb-db:
     image: mirror.gcr.io/postgres:15.0-bullseye
@@ -101,4 +103,5 @@ services:
 
 networks:
   int-autokb-net:
+    name: autokb-test-net
     driver: bridge

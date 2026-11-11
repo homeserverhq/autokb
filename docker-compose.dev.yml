@@ -1,0 +1,146 @@
+# Isolated development stack.
+#
+# NEVER run this with the production compose file or project name. The
+# top-level `name` plus the unique container/network/volume names below keep
+# this stack fully separate from the production `autokb` project.
+#
+# Bind-mount sources are absolute HOST paths because the Docker daemon runs on
+# the host, not inside the opencode-app container. AUTOKB_DEV_HOST_ROOT is the
+# host view of /repos/autokb inside this container.
+name: autokb-dev
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: autokb-dev:local
+
+x-app-volumes: &app-volumes
+  - ${AUTOKB_DEV_HOST_ROOT:-/home/bolt/hshq/data/stacks/opencode/repos/autokb}/src:/src
+  - ${AUTOKB_DEV_HOST_ROOT:-/home/bolt/hshq/data/stacks/opencode/repos/autokb}/assets:/assets
+  - ${AUTOKB_DEV_HOST_ROOT:-/home/bolt/hshq/data/stacks/opencode/repos/autokb}/.dev/output:/output
+  - ${AUTOKB_DEV_HOST_ROOT:-/home/bolt/hshq/data/stacks/opencode/repos/autokb}/.dev/logs:/logs
+  - ${AUTOKB_DEV_HOST_ROOT:-/home/bolt/hshq/data/stacks/opencode/repos/autokb}/.dev/plugins:/src/plugins
+  - ${AUTOKB_DEV_HOST_ROOT:-/home/bolt/hshq/data/stacks/opencode/repos/autokb}/.dev/sinks:/src/sinks
+
+services:
+  autokb-dev-db:
+    image: mirror.gcr.io/postgres:15.0-bullseye
+    container_name: autokb-dev-db
+    hostname: autokb-dev-db
+    restart: unless-stopped
+    env_file: stack.dev.env
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256mb
+    networks:
+      - autokb-dev-net
+    volumes:
+      - autokb-dev-db:/var/lib/postgresql/data
+
+  autokb-dev-redis:
+    image: mirror.gcr.io/valkey/valkey:alpine3.23
+    container_name: autokb-dev-redis
+    hostname: autokb-dev-redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command: redis-server
+    networks:
+      - autokb-dev-net
+
+  autokb-dev-manager:
+    <<: *app-build
+    container_name: autokb-dev-manager
+    hostname: autokb-dev-manager
+    restart: unless-stopped
+    env_file: stack.dev.env
+    command: python /src/manager/manager.py
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - autokb-dev-net
+    depends_on:
+      - autokb-dev-db
+      - autokb-dev-redis
+    volumes: *app-volumes
+
+  autokb-dev-worker:
+    <<: *app-build
+    container_name: autokb-dev-worker
+    hostname: autokb-dev-worker
+    restart: unless-stopped
+    env_file: stack.dev.env
+    command: python /src/worker/worker.py
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - autokb-dev-net
+    depends_on:
+      - autokb-dev-db
+      - autokb-dev-redis
+      - autokb-dev-manager
+    volumes: *app-volumes
+
+  autokb-dev-web:
+    <<: *app-build
+    container_name: autokb-dev-web
+    hostname: autokb-dev-web
+    restart: unless-stopped
+    env_file: stack.dev.env
+    command: gunicorn web.app:app --bind 0.0.0.0:80 --worker-class aiohttp.worker.GunicornWebWorker
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - autokb-dev-net
+    depends_on:
+      - autokb-dev-manager
+    volumes: *app-volumes
+    # Only for a human browser. The agent container must use docker exec or
+    # attach opencode-app to autokb-dev-net.
+    ports:
+      - "${AUTOKB_DEV_BIND:-127.0.0.1}:${AUTOKB_DEV_WEB_PORT:-18080}:80"
+
+  # Local SMTP sink so duplicate-content notifications never reach real users.
+  autokb-dev-mailpit:
+    image: axllent/mailpit:latest
+    container_name: autokb-dev-mailpit
+    hostname: autokb-dev-mailpit
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - autokb-dev-net
+    ports:
+      - "${AUTOKB_DEV_BIND:-127.0.0.1}:${AUTOKB_DEV_MAILPIT_PORT:-18083}:8025"
+
+  # Optional: enable with `--profile mcp`.
+  autokb-dev-mcp:
+    profiles: ["mcp"]
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile
+    image: autokb-dev-mcp:local
+    container_name: autokb-dev-mcp
+    hostname: autokb-dev-mcp
+    restart: unless-stopped
+    environment:
+      AUTOKB_BASE_URL: http://autokb-dev-web:80
+      MCP_PORT: 80
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - autokb-dev-net
+    depends_on:
+      - autokb-dev-web
+    ports:
+      - "${AUTOKB_DEV_BIND:-127.0.0.1}:${AUTOKB_DEV_MCP_PORT:-18082}:80"
+
+volumes:
+  autokb-dev-db:
+    name: autokb-dev-db
+
+networks:
+  autokb-dev-net:
+    name: autokb-dev-net
+    driver: bridge

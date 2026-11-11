@@ -2118,7 +2118,9 @@ class _MockSink(BaseSink):
         self.calls.append(("add_datafile", path, self.remote_target_id))
         return _MOCK_REMOTE_ID
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: str = None, new_hash: str = None,
+                        datafile_id: str = None) -> str:
         self.calls.append(("update_datafile", remote_datafile_id, path))
         return _MOCK_REMOTE_UPDATED
 
@@ -3149,6 +3151,40 @@ def _dkb_test_pass2_last_checked(db, sub, ds):
     return True, "OK"
 
 
+def _dkb_test_remote_refcount_same_target(db, sub, ds):
+    """Remote-id refcount must see other rows in the SAME target."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    df1 = str(_uuid.uuid4())
+    df2 = str(_uuid.uuid4())
+    with db.get_session() as s:
+        s.add(AKBDatafile(id=df1, subscription_id=sub, path=f"/tmp/sink_test/{df1}.md",
+                          size=1, mtime=now, hash="h1"))
+        s.add(AKBDatafile(id=df2, subscription_id=sub, path=f"/tmp/sink_test/{df2}.md",
+                          size=1, mtime=now, hash="h1"))
+        s.flush()
+        s.add(TargetDatafile(target_id=ds.id, datafile_id=df1,
+                             remote_datafile_id="shared-remote", hash="h1"))
+        s.add(TargetDatafile(target_id=ds.id, datafile_id=df2,
+                             remote_datafile_id="shared-remote", hash="h1"))
+    try:
+        refs = db.count_remote_datafile_references(
+            "shared-remote", excluding_target_id=ds.id, excluding_datafile_id=df1,
+        )
+        if refs != 1:
+            return False, f"expected 1 same-target reference, got {refs}"
+        return True, "OK"
+    finally:
+        with db.get_session() as s:
+            s.query(TargetDatafile).filter(
+                TargetDatafile.datafile_id.in_([df1, df2])
+            ).delete(synchronize_session=False)
+            s.query(AKBDatafile).filter(AKBDatafile.id.in_([df1, df2])).delete(
+                synchronize_session=False
+            )
+
+
 def _dkb_test_datafiles_by_sub(db, sub, ds):
     """list_datafiles_for_target_subscription filters by sub correctly."""
     import uuid as _uuid
@@ -3269,7 +3305,11 @@ def _dkb_test_pass3_heal_update(db, sub, ds):
     svc._kb_files = lambda kb: []  # remote lost the file
     links = db.list_targets_for_subscription(sub)
     with patch("worker.sink_recon._get_service", return_value=svc):
-        healed_map = _pass3_heal_remote(sub_row, links, db, None, None, _TLog(), [])
+        healed_map, abort_all = _pass3_heal_remote(
+            sub_row, links, db, None, None, _TLog(), [], {}
+        )
+    if abort_all:
+        return False, "Pass III unexpectedly aborted"
     if sum(healed_map.values()) != 1:
         return False, f"expected 1 healed got {healed_map}"
     if not any(c[0] == "update_datafile" for c in svc.calls):
@@ -3304,7 +3344,11 @@ def _dkb_test_pass3_heal_flush_batch(db, sub, ds):
     svc._kb_files = lambda kb: []  # remote lost the file
     links = db.list_targets_for_subscription(sub)
     with patch("worker.sink_recon._get_service", return_value=svc):
-        healed_map = _pass3_heal_remote(sub_row, links, db, None, None, _TLog(), [])
+        healed_map, abort_all = _pass3_heal_remote(
+            sub_row, links, db, None, None, _TLog(), [], {}
+        )
+    if abort_all:
+        return False, "Pass III unexpectedly aborted"
     if sum(healed_map.values()) != 1:
         return False, f"expected 1 healed got {healed_map}"
     if svc.flush_calls < 1:
@@ -3317,6 +3361,164 @@ def _dkb_test_pass3_heal_flush_batch(db, sub, ds):
     if t_df2 is None or t_df2.remote_datafile_id != _MOCK_REMOTE_UPDATED:
         return False, "buffered heal never landed in the DB row"
     return True, "Pass III flushes batching sink heal OK"
+
+
+def _dkb_test_recon_duplicate_blocked(db, sub, ds):
+    """A duplicate with no linked owner is per-document blocked, not ERROR."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    from utils.misc_utils import SinkDuplicateContent
+    from utils.constants import TARGET_DF_DUPLICATE_BLOCKED, TARGET_DF_SYNCED
+
+    sub_row = db.get_subscription(sub)
+    _write_output_file_test(sub_row.name, "dup.md", "# duplicate\n")
+    svc = _mk_cancel_test_svc(db, ds)
+    exc = SinkDuplicateContent(
+        path="/output/test_plugin/test_sub/dup.md",
+        file_id="uploaded-1",
+        content_hash="hash-1",
+        reason="orphan_vectors",
+    )
+    svc.add_datafile = MagicMock(side_effect=exc)
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    link = db.get_target_subscription(ds.id, sub)
+    if link is None or link.status != STATE_ENABLED:
+        return False, f"duplicate block must leave link ENABLED, got {link and link.status}"
+    if "blocked" not in (link.last_message or ""):
+        return False, f"blocked count missing from message: {link.last_message!r}"
+    rows = db.list_datafiles_for_target_subscription(ds.id, sub)
+    blocked = [r for r in rows if r.state == TARGET_DF_DUPLICATE_BLOCKED]
+    if len(blocked) != 1:
+        return False, f"expected one blocked row, got {[(r.state, r.remote_datafile_id) for r in rows]}"
+    if svc.add_datafile.call_count != 1:
+        return False, "first pass should attempt the add exactly once"
+
+    # Same unchanged content: no re-upload on the next pass.
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if svc.add_datafile.call_count != 1:
+        return False, "blocked, unchanged document was retried"
+
+    # Update recovery: clear the block, then a successful add transitions SYNCED.
+    db.clear_duplicate_blocks(ds.id)
+    svc.add_datafile = MagicMock(return_value=_MOCK_REMOTE_ID)
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    rows = db.list_datafiles_for_target_subscription(ds.id, sub)
+    if not rows or rows[0].state != TARGET_DF_SYNCED:
+        return False, f"retry did not transition to SYNCED: {[(r.state, r.remote_datafile_id) for r in rows]}"
+    return True, "duplicate blocked -> skip -> Update retry OK"
+
+
+def _dkb_test_recon_duplicate_update_not_retried(db, sub, ds):
+    """A blocked UPDATE must not be retried every pass after Pass II refreshes
+    akb_datafile stats."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    from utils.misc_utils import SinkDuplicateContent
+    from utils.constants import TARGET_DF_DUPLICATE_BLOCKED, TARGET_DF_SYNCED
+
+    sub_row = db.get_subscription(sub)
+    path = _write_output_file_test(sub_row.name, "dupup.md", "# v1\n")
+    svc = _mk_cancel_test_svc(db, ds)
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+
+    with open(path, "w") as f:
+        f.write("# v2 changed content\n")
+    dup = SinkDuplicateContent(
+        path=path, file_id="uploaded-2", content_hash="hash-2",
+        reason="orphan_vectors",
+    )
+    svc.update_datafile = MagicMock(side_effect=dup)
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if svc.update_datafile.call_count != 1:
+        return False, f"expected one blocked update attempt, got {svc.update_datafile.call_count}"
+    df = db.get_datafile_by_path(path)
+    row = db.get_target_datafile(ds.id, df.id)
+    if row is None or row.state != TARGET_DF_DUPLICATE_BLOCKED:
+        return False, f"expected DUPLICATE_BLOCKED row, got {row and row.state}"
+
+    # Pass II has now refreshed df.hash/mtime. A second pass must still skip.
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if svc.update_datafile.call_count != 1:
+        return False, "blocked update was retried after Pass II refreshed stats"
+
+    db.clear_duplicate_blocks(ds.id)
+    svc.update_datafile = MagicMock(return_value=_MOCK_REMOTE_UPDATED)
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    row = db.get_target_datafile(ds.id, df.id)
+    if row is None or row.state != TARGET_DF_SYNCED:
+        return False, f"Update retry did not transition to SYNCED: {row and row.state}"
+    return True, "blocked update skipped until Update retry OK"
+
+
+def _dkb_test_recon_duplicate_email_aggregated(db, sub, ds):
+    """One duplicate summary email per KB/run, covering all blocked files."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+    from utils.misc_utils import SinkDuplicateContent
+
+    sub_row = db.get_subscription(sub)
+    for i in range(2):
+        _write_output_file_test(sub_row.name, f"dup{i}.md", f"# duplicate {i}\n")
+    svc = _mk_cancel_test_svc(db, ds)
+
+    def _raise_dup(path):
+        raise SinkDuplicateContent(
+            path=path, file_id=f"uploaded-{path}", content_hash="same-hash",
+            reason="orphan_vectors",
+        )
+
+    svc.add_datafile = MagicMock(side_effect=_raise_dup)
+    mail = MagicMock()
+    with patch("worker.sink_recon._get_service", return_value=svc), \
+            patch("worker.sink_recon._send_duplicate_summary_email", mail):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if mail.call_count != 1:
+        return False, f"expected 1 summary email, got {mail.call_count}"
+    items = mail.call_args.args[2]
+    if len(items) != 2:
+        return False, f"expected 2 blocked items in one email, got {len(items)}"
+
+    # Second pass skips both unchanged blocked files: no second email.
+    with patch("worker.sink_recon._get_service", return_value=svc), \
+            patch("worker.sink_recon._send_duplicate_summary_email", mail):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    if mail.call_count != 1:
+        return False, "repeat pass with no attempts sent another email"
+    return True, "one aggregated email per run OK"
+
+
+def _dkb_test_recon_disable_during_pass3(db, sub, ds):
+    """A disable during Pass III must stay DISABLED (never ERROR/ENABLED)."""
+    from unittest.mock import MagicMock, patch
+    from worker.sink_recon import reconcile_subscription_targets
+
+    sub_row = db.get_subscription(sub)
+    _write_output_file_test(sub_row.name, "p3.md", "# pass3\n")
+    svc = _mk_cancel_test_svc(db, ds)
+    state = {"flipped": False}
+
+    def kb_files(_kb):
+        if not state["flipped"]:
+            state["flipped"] = True
+            db.set_target_subscription_status(ds.id, sub, STATE_DISABLED)
+            svc._check_cancel()  # reads DB -> raises link_disabled
+        return []
+
+    svc._kb_files = kb_files
+    with patch("worker.sink_recon._get_service", return_value=svc):
+        reconcile_subscription_targets(sub_row, db, MagicMock(), MagicMock())
+    link = db.get_target_subscription(ds.id, sub)
+    if link is None or link.status != STATE_DISABLED:
+        return False, f"disable during Pass III became {link and link.status}"
+    db.set_target_subscription_status(ds.id, sub, STATE_ENABLED)
+    return True, "disable during Pass III preserved"
 
 
 def _dkb_test_recon_progress_upserting(db, sub, ds):
@@ -3337,9 +3539,9 @@ def _dkb_test_recon_progress_upserting(db, sub, ds):
     orig = db.set_target_subscription_status
     recorded = []
 
-    def wrap(target_id, sub_id_, status, message=None):
+    def wrap(target_id, sub_id_, status, message=None, **kwargs):
         recorded.append((status, message))
-        return orig(target_id, sub_id_, status, message=message)
+        return orig(target_id, sub_id_, status, message=message, **kwargs)
 
     db.set_target_subscription_status = wrap
     try:
@@ -3381,9 +3583,9 @@ def _dkb_test_recon_heal_merge(db, sub, ds):
     orig = db.set_target_subscription_status
     recorded = []
 
-    def wrap(target_id, sub_id_, status, message=None):
+    def wrap(target_id, sub_id_, status, message=None, **kwargs):
         recorded.append((status, message))
-        return orig(target_id, sub_id_, status, message=message)
+        return orig(target_id, sub_id_, status, message=message, **kwargs)
 
     db.set_target_subscription_status = wrap
     try:
@@ -3440,6 +3642,7 @@ def _run_dkb_unit_tests():
         ("DKB Service — cancel check hook", lambda db, sub, ds: _dkb_test_sink_cancel_check(db, sub, ds)),
         ("DKB Pass II — last_checked consistent", lambda db, sub, ds: _dkb_test_pass2_last_checked(db, sub, ds)),
         ("DKB Filter — datafiles by sub", lambda db, sub, ds: _dkb_test_datafiles_by_sub(db, sub, ds)),
+        ("DKB Refcount — same-target shared remote", lambda db, sub, ds: _dkb_test_remote_refcount_same_target(db, sub, ds)),
         ("DKB Delete — strict raises on remote failure", lambda db, sub, ds: _dkb_test_delete_strict_raises(db, sub, ds)),
         ("DKB Delete — strict success keeps rows for caller", lambda db, sub, ds: _dkb_test_delete_strict_success(db, sub, ds)),
         ("DKB Delete — orphan best-effort deletes rows", lambda db, sub, ds: _dkb_test_delete_orphan_best_effort(db, sub, ds)),
@@ -3447,6 +3650,10 @@ def _run_dkb_unit_tests():
         ("DKB Pass III — heal flush on batching sink", lambda db, sub, ds: _dkb_test_pass3_heal_flush_batch(db, sub, ds)),
         ("DKB Recon — Upserting progress + final message", lambda db, sub, ds: _dkb_test_recon_progress_upserting(db, sub, ds)),
         ("DKB Recon — Healing msg + healed-into-updated", lambda db, sub, ds: _dkb_test_recon_heal_merge(db, sub, ds)),
+        ("DKB Recon — duplicate blocked per document", lambda db, sub, ds: _dkb_test_recon_duplicate_blocked(db, sub, ds)),
+        ("DKB Recon — duplicate update not retried", lambda db, sub, ds: _dkb_test_recon_duplicate_update_not_retried(db, sub, ds)),
+        ("DKB Recon — duplicate email aggregated", lambda db, sub, ds: _dkb_test_recon_duplicate_email_aggregated(db, sub, ds)),
+        ("DKB Recon — disable during Pass III preserved", lambda db, sub, ds: _dkb_test_recon_disable_during_pass3(db, sub, ds)),
     ]
 
     results = []

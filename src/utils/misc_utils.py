@@ -791,6 +791,41 @@ class SubscriptionCancelledError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# SinkDuplicateContent
+# ---------------------------------------------------------------------------
+class SinkDuplicateContent(Exception):
+    """Raised when a sink rejects a file because its content already exists.
+
+    Unlike a transient remote failure, this is a per-document outcome: the
+    recon engine must not count it toward the consecutive-failure escalation
+    and must not flip the whole target link to ERROR. ``reason`` distinguishes
+    "there is a linked owner we can reuse" from "the duplicate is held by
+    orphaned remote state we cannot see".
+
+    ``remote_datafile_id`` is set when recovery found an existing remote file
+    whose content matches; callers may map the new datafile to that id.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        file_id: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        reason: str = "duplicate_content",
+        remote_datafile_id: Optional[str] = None,
+    ):
+        self.path = path
+        self.file_id = file_id
+        self.content_hash = content_hash
+        self.reason = reason
+        self.remote_datafile_id = remote_datafile_id
+        detail = f"duplicate content blocked: {reason}"
+        if content_hash:
+            detail += f" (hash={content_hash})"
+        super().__init__(detail)
+
+
+# ---------------------------------------------------------------------------
 # SinkCancelledError
 # ---------------------------------------------------------------------------
 class SinkCancelledError(Exception):
@@ -838,5 +873,6 @@ __all__ = [
     "uuid7",
     "uuid4",
     "SubscriptionCancelledError",
+    "SinkDuplicateContent",
     "SinkCancelledError",
 ]

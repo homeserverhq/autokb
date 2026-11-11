@@ -37,6 +37,8 @@ from .constants import (
     STATE_ENQUEUED,
     STATE_ERROR,
     STATE_IN_PROGRESS,
+    TARGET_DF_DUPLICATE_BLOCKED,
+    TARGET_DF_SYNCED,
     TRIGGERABLE_STATES,
     WATCHDOG_TIMEOUT_S,
     EXTRA_PARAM_KEYS,
@@ -158,8 +160,13 @@ class TargetDatafile(Base):
     __tablename__ = "target_datafile"
     target_id = Column(String(36), ForeignKey("target.id", ondelete="CASCADE"), nullable=False, primary_key=True)
     datafile_id = Column(String(36), ForeignKey("akb_datafile.id", ondelete="CASCADE"), nullable=False, primary_key=True)
-    remote_datafile_id = Column(Text, nullable=False)
+    # Nullable so a duplicate-blocked add can be persisted before it has a
+    # remote file to reference.
+    remote_datafile_id = Column(Text, nullable=True)
     hash = Column(Text, nullable=False)
+    state = Column(String(32), nullable=False, default=TARGET_DF_SYNCED, server_default=TARGET_DF_SYNCED)
+    last_error = Column(Text, nullable=True)
+    last_attempt = Column(DateTime(timezone=True), nullable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -797,19 +804,33 @@ class DatabaseManager:
             self._notify_target(target_id)
 
     def set_target_subscription_status(self, target_id: str, sub_id: str, status: str,
-                                       message: str = None) -> None:
+                                       message: str = None,
+                                       allowed_from: Optional[Iterable[str]] = None) -> bool:
+        """Set a link's status.
+
+        ``allowed_from`` makes the write conditional on the row's *current*
+        status. Recon uses this for progress/finalize/ERROR writes so an
+        operator's DISABLED (or a DELETED) intent is never overwritten by an
+        in-flight pass. Returns True when a row was updated.
+        """
         now = datetime.now(timezone.utc)
+        allowed = tuple(allowed_from) if allowed_from is not None else None
         with self.get_session() as s:
-            row = s.query(TargetSubscription).filter(
+            q = s.query(TargetSubscription).filter(
                 TargetSubscription.target_id == target_id,
                 TargetSubscription.subscription_id == sub_id,
-            ).first()
+            )
+            if allowed is not None:
+                q = q.filter(TargetSubscription.status.in_(allowed))
+            row = q.first()
+            updated = row is not None
             if row:
                 row.status = status
                 row.last_updated = now
                 if message is not None:
                     row.last_message = message
             self._notify_target(target_id)
+            return updated
 
     def delete_target_subscription(self, target_id: str, sub_id: str) -> None:
         with self.get_session() as s:
@@ -905,12 +926,51 @@ class DatabaseManager:
                 TargetDatafile.datafile_id == datafile_id,
             ).first()
 
-    def insert_target_datafile(self, target_id: str, datafile_id: str, remote_id: str, datafile_hash: str) -> None:
+    def insert_target_datafile(self, target_id: str, datafile_id: str, remote_id: str,
+                               datafile_hash: str, state: str = TARGET_DF_SYNCED,
+                               last_error: Optional[str] = None) -> None:
         with self.get_session() as s:
             s.add(TargetDatafile(
                 target_id=target_id, datafile_id=datafile_id,
                 remote_datafile_id=remote_id, hash=datafile_hash,
+                state=state, last_error=last_error,
+                last_attempt=datetime.now(timezone.utc),
             ))
+            self._notify_target(target_id)
+
+    def upsert_target_datafile(self, target_id: str, datafile_id: str,
+                               remote_id: Optional[str], datafile_hash: str,
+                               state: str = TARGET_DF_SYNCED,
+                               last_error: Optional[str] = None) -> None:
+        """Insert or update a target_datafile row, including its outcome state."""
+        now = datetime.now(timezone.utc)
+        with self.get_session() as s:
+            row = s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.datafile_id == datafile_id,
+            ).first()
+            if row is None:
+                s.add(TargetDatafile(
+                    target_id=target_id, datafile_id=datafile_id,
+                    remote_datafile_id=remote_id, hash=datafile_hash,
+                    state=state, last_error=last_error, last_attempt=now,
+                ))
+            else:
+                row.remote_datafile_id = remote_id
+                row.hash = datafile_hash
+                row.state = state
+                row.last_error = last_error
+                row.last_attempt = now
+            self._notify_target(target_id)
+
+    def update_target_datafile_state(self, target_id: str, datafile_id: str, state: str,
+                                     last_error: Optional[str] = None) -> None:
+        now = datetime.now(timezone.utc)
+        with self.get_session() as s:
+            s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.datafile_id == datafile_id,
+            ).update({"state": state, "last_error": last_error, "last_attempt": now})
             self._notify_target(target_id)
 
     def update_target_datafile_hash(self, target_id: str, datafile_id: str, new_hash: str) -> None:
@@ -957,6 +1017,98 @@ class DatabaseManager:
                 )
                 .count()
             )
+
+    def count_remote_datafile_references(self, remote_id: str,
+                                         excluding_target_id: Optional[str] = None,
+                                         excluding_datafile_id: Optional[str] = None) -> int:
+        """Number of remaining rows pointing at one remote file id.
+
+        True duplicates can map several target_datafile rows (in the same
+        target or different targets) to a single remote id. Any remote delete
+        must first prove no other row still needs that file.
+        """
+        with self.get_session() as s:
+            q = s.query(TargetDatafile).filter(
+                TargetDatafile.remote_datafile_id == remote_id
+            )
+            if excluding_target_id is not None and excluding_datafile_id is not None:
+                q = q.filter(~(
+                    (TargetDatafile.target_id == excluding_target_id)
+                    & (TargetDatafile.datafile_id == excluding_datafile_id)
+                ))
+            elif excluding_target_id is not None:
+                q = q.filter(TargetDatafile.target_id != excluding_target_id)
+            elif excluding_datafile_id is not None:
+                q = q.filter(TargetDatafile.datafile_id != excluding_datafile_id)
+            return q.count()
+
+    def count_target_datafiles_by_state(self, target_id: str, sub_id: Optional[str] = None,
+                                        state: str = TARGET_DF_DUPLICATE_BLOCKED) -> int:
+        with self.get_session() as s:
+            q = s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.state == state,
+            )
+            if sub_id is not None:
+                q = q.join(AKBDatafile, AKBDatafile.id == TargetDatafile.datafile_id).filter(
+                    AKBDatafile.subscription_id == sub_id
+                )
+            return q.count()
+
+    def list_blocked_datafiles(self, target_id: str, sub_id: Optional[str] = None) -> List[TargetDatafile]:
+        with self.get_session() as s:
+            q = s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.state == TARGET_DF_DUPLICATE_BLOCKED,
+            )
+            if sub_id is not None:
+                q = q.join(AKBDatafile, AKBDatafile.id == TargetDatafile.datafile_id).filter(
+                    AKBDatafile.subscription_id == sub_id
+                )
+            return q.all()
+
+    def clear_duplicate_blocks(self, target_id: str, sub_id: Optional[str] = None) -> int:
+        """Clear DUPLICATE_BLOCKED outcomes so the next recon retries them.
+
+        Blocked adds have no remote id and are deleted (Pass I re-adds them).
+        Blocked updates keep their old remote id, so only the state is reset;
+        Pass I will notice the hash/mtime drift and update them again.
+        """
+        with self.get_session() as s:
+            q = s.query(TargetDatafile).filter(
+                TargetDatafile.target_id == target_id,
+                TargetDatafile.state == TARGET_DF_DUPLICATE_BLOCKED,
+            )
+            if sub_id is not None:
+                q = q.join(AKBDatafile, AKBDatafile.id == TargetDatafile.datafile_id).filter(
+                    AKBDatafile.subscription_id == sub_id
+                )
+            rows = q.all()
+            cleared = 0
+            for row in rows:
+                if not row.remote_datafile_id:
+                    s.delete(row)
+                else:
+                    row.state = TARGET_DF_SYNCED
+                    row.last_error = None
+                cleared += 1
+            self._notify_target(target_id)
+            return cleared
+
+    def retry_error_links(self, target_id: str) -> int:
+        """Move links in ERROR back to ENABLED for an explicit Update/Retry."""
+        now = datetime.now(timezone.utc)
+        with self.get_session() as s:
+            rows = s.query(TargetSubscription).filter(
+                TargetSubscription.target_id == target_id,
+                TargetSubscription.status == STATE_ERROR,
+            ).all()
+            for row in rows:
+                row.status = STATE_ENABLED
+                row.last_updated = now
+                row.last_message = "Retry requested"
+            self._notify_target(target_id)
+            return len(rows)
 
     # ----- Target notify -----
     def _notify_target(self, target_id: str) -> None:

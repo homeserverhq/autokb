@@ -693,7 +693,9 @@ class LightRagSink(BaseSink):
         self._check_cancel()
         return self._upload_file(path)
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: str = None, new_hash: str = None,
+                        datafile_id: str = None) -> str:
         self._check_cancel()
         return self._upload_after_delete(remote_datafile_id, path)
 

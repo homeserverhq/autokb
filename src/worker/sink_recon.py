@@ -19,11 +19,18 @@ from utils.constants import (
     STATE_ENQUEUED,
     STATE_ERROR,
     STATE_IN_PROGRESS,
+    TARGET_DF_DUPLICATE_BLOCKED,
+    TARGET_DF_SYNCED,
 )
 from utils.database import DatabaseManager
 from utils.sink_registry import SinkRegistry
 from utils.sink_base import compute_file_hash
-from utils.misc_utils import DecryptionError, SinkCancelledError, get_logger
+from utils.misc_utils import (
+    DecryptionError,
+    SinkCancelledError,
+    SinkDuplicateContent,
+    get_logger,
+)
 
 
 LOG_FILE = "/logs/worker.log"
@@ -126,6 +133,39 @@ def _send_error_email(sub_name: str, target_name: str, error: str) -> None:
         pass
 
 
+def _send_duplicate_summary_email(sub_name: str, target_name: str, items: list) -> None:
+    """Send one aggregated duplicate-blocked notification for a target/KB."""
+    from worker.execution_engine import _send_smtp_for_worker
+    lines = [
+        f"Subscription: {sub_name}",
+        f"Target/KB: {target_name}",
+        f"Blocked documents: {len(items)}",
+        "",
+        "AutoKB could not add the following document(s) because OpenWebUI",
+        "reported duplicate content that has no linked file in the knowledge base:",
+        "",
+    ]
+    for item in items:
+        lines.append(f"- {item.get('path')}")
+        lines.append(f"  content hash: {item.get('content_hash') or 'unknown'}")
+        lines.append(f"  reason: {item.get('reason') or 'duplicate_content'}")
+        if item.get("file_id"):
+            lines.append(f"  uploaded file id (unlinked): {item.get('file_id')}")
+    lines.extend([
+        "",
+        "The target link remains ENABLED; other documents continue to sync.",
+        "To recover: reset the knowledge base in OpenWebUI, then press Update",
+        "on this target in AutoKB to retry the blocked document(s).",
+    ])
+    try:
+        _send_smtp_for_worker(
+            subject=f"[AutoKB] Duplicate content blocked {len(items)} file(s) in {target_name}",
+            body="\n".join(lines),
+        )
+    except Exception:
+        pass
+
+
 # Mtime matching helpers
 def _fs_mtime(path: str) -> float:
     return os.path.getmtime(path)
@@ -149,6 +189,29 @@ def _file_matches_db(path: str, df) -> bool:
     if fs_stat.st_size != df.size:
         return False
     return _mtimes_match(fs_stat.st_mtime, df.mtime)
+
+
+def _blocked_unchanged(ds_df, df, path: str) -> bool:
+    """True when a duplicate-blocked row has not changed since its last attempt.
+
+    Pass II refreshes ``akb_datafile.hash``/``mtime`` even when an update was
+    blocked, so comparing hashes alone would retry every pass. The file mtime
+    versus ``last_attempt`` is the stable signal: content modified after the
+    block is retried, unchanged content is skipped.
+    """
+    if ds_df is None or ds_df.state != TARGET_DF_DUPLICATE_BLOCKED:
+        return False
+    if df is None or not _file_matches_db(path, df):
+        return False
+    last_attempt = ds_df.last_attempt
+    if last_attempt is None:
+        return True
+    df_mtime = df.mtime
+    if df_mtime.tzinfo is None:
+        df_mtime = df_mtime.replace(tzinfo=timezone.utc)
+    if last_attempt.tzinfo is None:
+        last_attempt = last_attempt.replace(tzinfo=timezone.utc)
+    return df_mtime <= last_attempt
 
 
 def reconcile_subscription_targets(
@@ -178,8 +241,12 @@ def reconcile_subscription_targets(
     for link in ds_links:
         if link.status in (STATE_ENABLED, STATE_ENQUEUED):
             try:
-                db.set_target_subscription_status(link.target_id, sub_id, STATE_IN_PROGRESS)
-                link.status = STATE_IN_PROGRESS
+                updated = db.set_target_subscription_status(
+                    link.target_id, sub_id, STATE_IN_PROGRESS,
+                    allowed_from=(STATE_ENABLED, STATE_ENQUEUED),
+                )
+                if updated:
+                    link.status = STATE_IN_PROGRESS
             except Exception:
                 pass
 
@@ -206,6 +273,8 @@ def reconcile_subscription_targets(
     # link reflects the whole recon — including blocking batch upserts and any
     # healing — instead of reporting "done" prematurely).
     summaries = {}
+    # {target_id: [duplicate outcome dicts]} — aggregated for one email per KB.
+    blocked_by_target = {}
 
     for ds_link in ds_links:
         ds_status = ds_link.status
@@ -262,9 +331,11 @@ def reconcile_subscription_targets(
             add_count += pass1_count[0]
             update_count += pass1_count[1]
             remove_count += pass1_count[2]
+            if pass1_count[3]:
+                blocked_by_target.setdefault(target_id, []).extend(pass1_count[3])
             prog += 1
             _hb(db, sub_id, queue, prog % 100)
-            summaries[target_id] = pass1_count
+            summaries[target_id] = pass1_count[:3]
 
         except SinkCancelledError as exc:
             # The link/sub was removed or disabled mid-recon — this is NOT an
@@ -274,12 +345,11 @@ def reconcile_subscription_targets(
                 sub_name, error_ds_names, queue,
             )
             if abort_all:
-                _finalize_link_statuses(db, sub_id, summaries, {}, error_ds_names, log)
                 log.info(
                     "sink_recon_aborted",
                     sub_id=sub_id, name=sub_name, target_id=target_id, reason=exc.kind,
                 )
-                return  # sub-level cancel — stop everything, skip Pass II
+                return  # sub-level cancel — stop everything, leave link statuses
             continue
 
         except Exception as exc:
@@ -302,35 +372,51 @@ def reconcile_subscription_targets(
             pass
 
     # --- Pass III: heal remote drift — DB rows missing on the remote ---
+    abort_all = False
     try:
-        healed_map = _pass3_heal_remote(
+        healed_map, abort_all = _pass3_heal_remote(
             sub, ds_links, db, sink_registry, queue, log, error_ds_names,
+            blocked_by_target,
         )
     except Exception as exc:
         healed_map = {}
         log.error("sink_pass3_failed", sub_id=sub_id, error=str(exc))
 
+    if abort_all:
+        log.info(
+            "sink_recon_aborted", sub_id=sub_id, name=sub_name,
+            target_id=None, reason="pass3_cancel",
+        )
+        return
+
     healed_total = sum(healed_map.values())
-    _finalize_link_statuses(db, sub_id, summaries, healed_map, error_ds_names, log)
+    _finalize_link_statuses(
+        db, sub_id, summaries, healed_map, error_ds_names, blocked_by_target, log,
+    )
+    _send_duplicate_emails(
+        sub_name, blocked_by_target, error_ds_names, sub_id, db, log,
+    )
 
     log.info(
         "sink_recon_complete",
         sub_id=sub_id, name=sub_name,
         added=add_count, updated=update_count + healed_total, removed=remove_count,
         healed=healed_total, errors=len(error_ds_names),
+        blocked=sum(len(v) for v in blocked_by_target.values()),
     )
 
 
-def _finalize_link_statuses(db, sub_id, summaries, healed_map, error_ds_names, log) -> None:
+def _finalize_link_statuses(db, sub_id, summaries, healed_map, error_ds_names,
+                            blocked_by_target, log) -> None:
     """Write each processed link back to ENABLED with its final Reconciled message.
 
     Called only after the entire recon (including blocking batch upserts and any
     Pass III healing) has finished, so the link never reports success early.
     Healed files are reported as "updated" (merged count), per product intent.
 
-    Links that errored earlier in this pass (tracked in ``error_ds_names``) are
-    left in ERROR so the failure stays visible and the next recon retries them;
-    the error is never masked by the final "Reconciled" status.
+    The write is conditional on the link still being active, so a link disabled
+    or deleted mid-pass is never flipped back to ENABLED. Links that errored
+    earlier in this pass are left in ERROR.
     """
     for tid, counts in summaries.items():
         if f"{tid}_{sub_id}" in error_ds_names:
@@ -338,10 +424,42 @@ def _finalize_link_statuses(db, sub_id, summaries, healed_map, error_ds_names, l
         add_n, upd_n, rem_n = counts
         upd_n += healed_map.get(tid, 0)
         msg = f"Reconciled: +{add_n} added, ~{upd_n} updated, -{rem_n} removed"
+        blocked_n = len(blocked_by_target.get(tid, []))
+        if blocked_n:
+            msg += f", {blocked_n} blocked (duplicate content)"
         try:
-            db.set_target_subscription_status(tid, sub_id, STATE_ENABLED, message=msg)
+            db.set_target_subscription_status(
+                tid, sub_id, STATE_ENABLED, message=msg,
+                allowed_from=(STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS),
+            )
         except Exception as exc:  # noqa: BLE001
             log.error("sink_finalize_failed", target_id=tid, error=str(exc))
+
+
+def _send_duplicate_emails(sub_name, blocked_by_target, error_ds_names, sub_id,
+                           db, log) -> None:
+    """Send at most one duplicate summary per target/KB for this recon run."""
+    for tid, items in blocked_by_target.items():
+        if not items:
+            continue
+        if f"{tid}_{sub_id}" in error_ds_names:
+            # The generic error email already covered this target in this run.
+            continue
+        try:
+            cur = db.get_target_subscription(tid, sub_id)
+        except Exception:
+            cur = None
+        if cur is None or cur.status in (STATE_DISABLED, STATE_DELETED):
+            # Operator paused/removed the link mid-pass; do not email.
+            continue
+        target = db.get_target(tid)
+        target_name = target.name if target else tid
+        _send_duplicate_summary_email(sub_name, target_name, items)
+        log.warning(
+            "sink_duplicate_blocked",
+            target_id=tid, sub_id=sub_id,
+            blocked=len(items), target_name=target_name,
+        )
 
 
 def _get_service(ds_row, db, sink_registry, log):
@@ -381,6 +499,7 @@ def _reconcile_pass1(
     update_count = 0
     remove_count = 0
     fail_streak = 0
+    blocked = []
     ds_df_rows = db.list_datafiles_for_target_subscription(target_id, sub_id)
     ds_df_by_datafile = {r.datafile_id: r for r in ds_df_rows}
 
@@ -406,6 +525,8 @@ def _reconcile_pass1(
     for fpath in fs_files:
         df = db.get_datafile_by_path(fpath)
         ds_df = ds_df_by_datafile.get(df.id) if df else None
+        if _blocked_unchanged(ds_df, df, fpath):
+            continue  # already blocked and unchanged — do not re-upload
         if df is None or ds_df is None:
             planned += 1  # add
         elif _file_matches_db(fpath, df):
@@ -420,6 +541,7 @@ def _reconcile_pass1(
             db.set_target_subscription_status(
                 target_id, sub_id, STATE_IN_PROGRESS,
                 message=f"Upserting {shown} of {planned} to remote sink...",
+                allowed_from=(STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS),
             )
         svc.set_progress_callback(_progress)
 
@@ -433,6 +555,8 @@ def _reconcile_pass1(
 
         df = db.get_datafile_by_path(fpath)
         ds_df = ds_df_by_datafile.get(df.id) if df else None
+        if _blocked_unchanged(ds_df, df, fpath):
+            continue  # already blocked and unchanged — do not re-upload
         if df is None or ds_df is None:
             try:
                 if df is not None and _file_matches_db(fpath, df):
@@ -443,6 +567,12 @@ def _reconcile_pass1(
                 fail_streak = 0
             except SinkCancelledError:
                 raise
+            except SinkDuplicateContent as exc:
+                blocked.append(_duplicate_outcome(exc, fpath, df))
+                log.warning(
+                    "sink_duplicate_blocked", target_id=target_id, path=fpath,
+                    hash=exc.content_hash, reason=exc.reason,
+                )
             except Exception as exc:
                 fail_streak += 1
                 log.error("sink_add_failed", path=fpath, error=str(exc))
@@ -458,6 +588,12 @@ def _reconcile_pass1(
                     fail_streak = 0
                 except SinkCancelledError:
                     raise
+                except SinkDuplicateContent as exc:
+                    blocked.append(_duplicate_outcome(exc, fpath, df))
+                    log.warning(
+                        "sink_duplicate_blocked", target_id=target_id, path=fpath,
+                        hash=exc.content_hash, reason=exc.reason,
+                    )
                 except Exception as exc:
                     fail_streak += 1
                     log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
@@ -479,6 +615,12 @@ def _reconcile_pass1(
                     fail_streak = 0
                 except SinkCancelledError:
                     raise
+                except SinkDuplicateContent as exc:
+                    blocked.append(_duplicate_outcome(exc, fpath, df))
+                    log.warning(
+                        "sink_duplicate_blocked", target_id=target_id, path=fpath,
+                        hash=exc.content_hash, reason=exc.reason,
+                    )
                 except Exception as exc:
                     fail_streak += 1
                     log.error("sink_update_failed", datafile_id=df.id, error=str(exc))
@@ -491,6 +633,12 @@ def _reconcile_pass1(
                 fail_streak = 0
             except SinkCancelledError:
                 raise
+            except SinkDuplicateContent as exc:
+                blocked.append(_duplicate_outcome(exc, fpath, df))
+                log.warning(
+                    "sink_duplicate_blocked", target_id=target_id, path=fpath,
+                    hash=exc.content_hash, reason=exc.reason,
+                )
             except Exception as exc:
                 fail_streak += 1
                 log.error("sink_update_failed", datafile_id=df.id, hash=real_hash, error=str(exc))
@@ -501,7 +649,18 @@ def _reconcile_pass1(
     # leftover after the removal loop). No-op for sinks that do not batch.
     svc.flush()
 
-    return add_count, update_count, remove_count
+    return add_count, update_count, remove_count, blocked
+
+
+def _duplicate_outcome(exc: SinkDuplicateContent, fpath: str, df) -> dict:
+    return {
+        "path": fpath,
+        "file_id": exc.file_id,
+        "content_hash": exc.content_hash,
+        "reason": exc.reason,
+        "remote_datafile_id": exc.remote_datafile_id,
+        "datafile_id": getattr(df, "id", None),
+    }
 
 
 def _remove_deleted_link(ds_link, target_id, sub_id, db, sink_registry, log,
@@ -561,6 +720,7 @@ def _handle_recon_cancel(kind, ds_link, target_id, sub_id, db, sink_registry, lo
             try:
                 db.set_target_subscription_status(
                     target_id, sub_id, STATE_ENABLED, message="Outside upload window — deferred",
+                    allowed_from=(STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS),
                 )
             except Exception:
                 pass
@@ -599,22 +759,34 @@ def _pass2_akb_datafiles(sub, db, output_dir, fs_files, log) -> None:
             db.update_datafile_stats(df.id, st.st_size, st.st_mtime, real_hash, checked_at)
 
 
-def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_names) -> dict:
+def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log,
+                       error_ds_names, blocked_by_target) -> tuple:
     """Pass III — reconcile our DB against the remote target.
 
     For every tracked datafile whose remote copy is missing on the remote
     (regardless of *why* it drifted — external deletion, a cross-KB ``DELETE``,
-    a crash mid-pass), re-push it so both sides agree again. Returns a map of
-    ``{target_id: files_healed}``.
+    a crash mid-pass), re-push it so both sides agree again. Returns
+    ``({target_id: files_healed}, abort_all)``.
+
+    Link state is re-read from the DB per target so a disable/removal that
+    happened during Pass I cannot be processed with a stale IN_PROGRESS object.
+    Cancel exceptions are never treated as remote errors.
     """
     sub_id = sub.id
     sub_name = sub.name
     healed_map = {}
 
     for ds_link in ds_links:
-        if ds_link.status not in (STATE_ENABLED, STATE_IN_PROGRESS, STATE_ENQUEUED):
-            continue
         target_id = ds_link.target_id
+        # Fresh read: ds_links was captured before Pass I and may be stale.
+        try:
+            cur = db.get_target_subscription(target_id, sub_id)
+        except Exception:
+            cur = None
+        if cur is None or cur.status not in (STATE_ENABLED, STATE_IN_PROGRESS, STATE_ENQUEUED):
+            continue
+        ds_link.status = cur.status
+
         ds_row = db.get_target(target_id)
         if ds_row is None:
             continue
@@ -631,9 +803,17 @@ def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_na
         if not callable(getattr(svc, "_kb_files", None)):
             continue
 
-        # Snapshot of remote file ids for this KB (one read per target).
         try:
+            # Snapshot of remote file ids for this KB (one read per target).
             remote_ids = {f.get("id") for f in svc._kb_files(svc.remote_target_id)}
+        except SinkCancelledError as exc:
+            abort_all = _handle_recon_cancel(
+                exc.kind, ds_link, target_id, sub_id, db, sink_registry, log,
+                sub_name, error_ds_names, queue,
+            )
+            if abort_all:
+                return healed_map, True
+            continue
         except Exception as exc:
             log.error("sink_pass3_remote_read_failed", target_id=target_id, error=str(exc))
             _transition_ds_error(
@@ -643,39 +823,61 @@ def _pass3_heal_remote(sub, ds_links, db, sink_registry, queue, log, error_ds_na
             continue
 
         link_healed = 0
-        for t_df in rows:
-            svc._check_cancel()
-            df = db.get_datafile(t_df.datafile_id)
-            if df is None:
-                continue  # Pass II already removed the datafile
-            if not os.path.exists(df.path):
-                continue  # missing on FS — Pass I.a / Pass II handle it
-            if not t_df.remote_datafile_id:
-                continue  # schema enforces NOT NULL — defensive skip
-            if t_df.remote_datafile_id in remote_ids:
-                continue  # present on remote — already reconciled
-            try:
-                # Re-push the current content; the sink's duplicate-content
-                # recovery rewrites the remote to point at the fresh id.
-                db.set_target_subscription_status(
-                    target_id, sub_id, STATE_IN_PROGRESS,
-                    message=f"Healing {t_df.datafile_id}...",
-                )
-                svc.base_update_datafile(df.id, df.hash)
-                link_healed += 1
-            except Exception as exc:
-                log.error("sink_pass3_heal_failed", datafile_id=df.id, target_id=target_id, error=str(exc))
-                _transition_ds_error(
-                    ds_link, target_id, sub_id, db, log,
-                    sub_name, ds_row.name, str(exc), error_ds_names,
-                )
-                break
+        try:
+            for t_df in rows:
+                svc._check_cancel()
+                df = db.get_datafile(t_df.datafile_id)
+                if df is None:
+                    continue  # Pass II already removed the datafile
+                if not os.path.exists(df.path):
+                    continue  # missing on FS — Pass I.a / Pass II handle it
+                if t_df.state != TARGET_DF_SYNCED:
+                    continue  # blocked/failed row — Pass I owns retries
+                if not t_df.remote_datafile_id:
+                    continue  # no remote counterpart
+                if t_df.remote_datafile_id in remote_ids:
+                    continue  # present on remote — already reconciled
+                try:
+                    # Re-push the current content; the sink's duplicate-content
+                    # recovery rewrites the remote to point at the fresh id.
+                    db.set_target_subscription_status(
+                        target_id, sub_id, STATE_IN_PROGRESS,
+                        message=f"Healing {t_df.datafile_id}...",
+                        allowed_from=(STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS),
+                    )
+                    svc.base_update_datafile(df.id, df.hash)
+                    link_healed += 1
+                except SinkCancelledError:
+                    raise
+                except SinkDuplicateContent as exc:
+                    blocked_by_target.setdefault(target_id, []).append(
+                        _duplicate_outcome(exc, df.path, df)
+                    )
+                    log.warning(
+                        "sink_duplicate_blocked", target_id=target_id,
+                        path=df.path, hash=exc.content_hash, reason=exc.reason,
+                    )
+                except Exception as exc:
+                    log.error("sink_pass3_heal_failed", datafile_id=df.id, target_id=target_id, error=str(exc))
+                    _transition_ds_error(
+                        ds_link, target_id, sub_id, db, log,
+                        sub_name, ds_row.name, str(exc), error_ds_names,
+                    )
+                    break
+        except SinkCancelledError as exc:
+            abort_all = _handle_recon_cancel(
+                exc.kind, ds_link, target_id, sub_id, db, sink_registry, log,
+                sub_name, error_ds_names, queue,
+            )
+            if abort_all:
+                return healed_map, True
+            continue
         healed_map[target_id] = link_healed
 
         # Send any heal upserts the sink buffered (no-op for the non-batching
         # sinks; LightRAG batches page-bounded upserts until flush()).
         svc.flush()
-    return healed_map
+    return healed_map, False
 
 
 def _invoke_remove(ds_link, target_id, ds_df, db, sink_registry, log, sub_name, error_ds_names):
@@ -697,14 +899,30 @@ def _invoke_remove(ds_link, target_id, ds_df, db, sink_registry, log, sub_name, 
 
 def _transition_ds_error(ds_link, target_id, sub_id, db, log,
                           sub_name, ds_name, error, error_ds_names) -> None:
-    """Set a target_subscription to ERROR and send one email on transition."""
+    """Set a target_subscription to ERROR and send one email on transition.
+
+    Never overrides DISABLED/DELETED and never re-emails an already-ERROR row.
+    """
     if f"{target_id}_{sub_id}" in error_ds_names:
         return  # already handled this pass
-    if ds_link and ds_link.status != STATE_ERROR:
-        try:
-            db.set_target_subscription_status(target_id, sub_id, STATE_ERROR, message=error)
-        except Exception:
-            pass
+    try:
+        cur = db.get_target_subscription(target_id, sub_id)
+    except Exception:
+        cur = None
+    if cur is not None and cur.status in (STATE_DISABLED, STATE_DELETED, STATE_ERROR):
+        log.warning(
+            "sink_ds_error_suppressed", target_id=target_id, sub_id=sub_id,
+            status=cur.status, error=error,
+        )
+        return
+    try:
+        updated = db.set_target_subscription_status(
+            target_id, sub_id, STATE_ERROR, message=error,
+            allowed_from=(STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS),
+        )
+    except Exception:
+        updated = False
+    if updated:
         try:
             _send_error_email(sub_name, ds_name, error)
         except Exception:

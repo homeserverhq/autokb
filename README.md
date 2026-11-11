@@ -218,6 +218,46 @@ Full documentation: [`mcp/README.md`](mcp/README.md)
 
 6. Navigate to **Data Sources** to see available plugins, then create a subscription.
 
+### Isolated Development Stack
+
+Never run the production `docker-compose.yml` from this repository when a
+production `autokb` project already exists: Compose's default project name
+would match it. Use the dedicated dev stack instead:
+
+```bash
+./scripts/dev-up.sh          # project autokb-dev, compose file docker-compose.dev.yml
+./scripts/dev-down.sh        # keeps the dev DB volume
+./scripts/dev-reset.sh       # DESTRUCTIVE: removes the dev DB volume too
+```
+
+The dev stack uses its own project (`autokb-dev`), containers
+(`autokb-dev-*`), network (`autokb-dev-net`), DB volume (`autokb-dev-db`), and
+localhost-only ports (`18080` web, `18083` Mailpit). It never starts services
+on the production `autokb` network.
+
+Bind-mount sources are absolute **host** paths rooted at
+`AUTOKB_DEV_HOST_ROOT` (default
+`/home/bolt/hshq/data/stacks/opencode/repos/autokb`, the host view of
+`/repos/autokb` inside the opencode container). Override it in the shell or in
+`stack.dev.env` if the repository moves.
+
+Because the agent runs inside a container, host port mappings are only for a
+human browser. Agent-side verification should run inside the dev containers,
+or attach the agent container to the private dev network:
+
+```bash
+./scripts/dev-agent-connect.sh   # one-time per agent container restart
+
+docker exec -e MANAGER_URL=http://autokb-dev-manager:80 \
+  autokb-dev-manager python /src/testing/test_runner.py confirm --reset
+docker exec autokb-dev-manager python /src/testing/unit_tests/run_all.py
+```
+
+`stack.dev.env` sets the test-runner timeouts to short values
+(`AUTOKB_HEARTBEAT_TIMEOUT=5`, `AUTOKB_LOCK_TTL=60`, etc.) so the suite does not
+wait for production-length timeouts. Dev SMTP points at Mailpit, so test
+notifications never reach real recipients.
+
 ### MCP Client Connection
 
 Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sending `Authorization: Bearer <AUTOKB_API_KEY>`.

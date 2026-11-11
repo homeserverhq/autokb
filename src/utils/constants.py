@@ -86,6 +86,12 @@ ALL_STATES = (
     STATE_DELETED,
 )
 
+# ---------------------------------------------------------------------------
+# target_datafile states
+# ---------------------------------------------------------------------------
+TARGET_DF_SYNCED = "SYNCED"
+TARGET_DF_DUPLICATE_BLOCKED = "DUPLICATE_BLOCKED"
+
 # States a subscription may be in to be *enqueued* (cleanup allowed for DELETED).
 ENQUEUEABLE_STATES = (STATE_ENABLED, STATE_ENQUEUED, STATE_IN_PROGRESS, STATE_DELETED)
 

@@ -1143,6 +1143,33 @@ This plugin demonstrates every major concept: schema with configurable fields (i
 
 ## 15. File Placement
 
+### Built-in plugin seeding and upgrade recovery
+
+The image ships built-in plugins in `/src/builtin_plugins/`. On startup they are copied into the live `/src/plugins/` directory **only if a same-name file does not already exist**. Existing files are never overwritten.
+
+Consequences:
+
+- User customisations are preserved across upgrades.
+- If a newer image fixes a built-in plugin, the old live copy is **still loaded** until it is removed. Upgrading the image alone does not replace it.
+- If you have **not modified** the built-in, recovery is safe:
+  1. inspect the file while the stack is running (see below);
+  2. stop the stack;
+  3. back up `/src/plugins/` (or the host directory mounted there);
+  4. delete only the affected built-in file;
+  5. start the stack — the new image re-seeds the missing file from `/src/builtin_plugins/`.
+- If you **did modify** the built-in, do not delete it blindly: back it up, compare it with the new image copy, and merge your changes manually.
+- `/src/plugins/` may also contain custom plugins. Never wipe the whole directory without a backup.
+- Removing the code file does not delete subscriptions or other database state. The re-seeded plugin is picked up under the same name; the normal schema-validation rules still apply.
+
+Useful check (while running):
+
+```bash
+docker compose exec autokb-manager \
+  diff /src/plugins/ePaperlessDoclingPlugin.py /src/builtin_plugins/ePaperlessDoclingPlugin.py
+```
+
+The same rules apply to built-in sinks via `/src/builtin_sinks/` → `/src/sinks/`.
+
 | Item | Location / Method |
 |------|------------------|
 | Plugin `.py` file | **Option A:** Upload via Web UI **Developer Lab** (`#/devlab`) — paste code, click **Save**. **Option B:** Place directly in `/src/plugins/{yourPlugin}.py`. |

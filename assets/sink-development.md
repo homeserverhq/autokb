@@ -4,7 +4,7 @@
 
 An AutoKB **sink** (also called a *Destination connector*) is **a single Python file** subclassing `BaseSink` that implements six small remote-operation methods. Where a **plugin** pulls data out of an external source and writes files to `/output/`, a **sink** pushes those files into an external *destination* — a knowledge base, a dataset, a document store, or any remote service that should receive AutoKB's output.
 
-Each sink describes one **Destination service type** (e.g. Open WebUI, Cognee). A user creates a **Data Target** under that Destination — one concrete remote instance (one knowledge base, one dataset) bound to a URL, an API key, and the subscriptions whose output it should receive. Every time a subscription runs, the recon engine compares what is on disk in `/output/` against what the target already has, and calls your six methods to add, update, and remove the difference.
+Each sink describes one **Destination service type** (e.g. Open WebUI, RAGFlow, LightRAG). A user creates a **Data Target** under that Destination — one concrete remote instance (one knowledge base, one dataset) bound to a URL, an API key, and the subscriptions whose output it should receive. Every time a subscription runs, the recon engine compares what is on disk in `/output/` against what the target already has, and calls your six methods to add, update, and remove the difference.
 
 A sink can be uploaded through the **Web UI Developer Lab → Destination Developer** (`#/devlab/destination`) or placed directly in `/src/sinks/`. Either way it is hot-swapped into the running system within ~2 seconds. No server restart, no config file, no registration step.
 
@@ -74,7 +74,9 @@ class myFirstSink(BaseSink):
         self._check(resp, "add datafile")
         return resp.json()["id"]
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: str = None, new_hash: str = None,
+                        datafile_id: str = None) -> str:
         """Re-upload *path* over an existing remote file. Return the new id."""
         resp = requests.put(
             f"{self.api_url}/files/{remote_datafile_id}",
@@ -158,7 +160,7 @@ The icon filename is derived from the sink name: `{sanitize_name(metadata["name"
 
 ### Naming Rules
 
-- The file stem **must end with `Sink`** (`openWebUISink.py`, `cogneeSink.py`). Files that do not match `*Sink.py` are ignored by the registry.
+- The file stem **must end with `Sink`** (`openWebUISink.py`, `ragflowSink.py`). Files that do not match `*Sink.py` are ignored by the registry.
 - `metadata["name"]` must be a valid **camelCase** identifier ≤ 32 characters that **already ends with `Sink`**.
 - `sanitize_name(metadata["name"])` must equal the file stem exactly — the same rule plugins follow for their names. `sanitize_name()` keeps only `[a-zA-Z0-9.-]`, so keep the metadata name clean.
 
@@ -247,14 +249,19 @@ Called when a new file appears in `/output/{plugin}/{sub}/` that the target does
 
 - Upload the file at `path` to the remote service.
 - **Return the `remote_datafile_id`** assigned by the remote instance. The engine persists it, so it can `update_datafile`/`remove_datafile` later.
-- If the upload fails partway, raise an exception — the engine will log it, mark the target subscription ERROR (once, which triggers the notification email), and move on to the other Targets; the next recon retries the failed file.
+- If the upload fails transiently, raise an exception. The engine logs it and tolerates a small number of consecutive per-file failures; the link only transitions to `ERROR` after **five consecutive file failures** in the same pass. The next recon retries the failed file.
+- If the remote rejects the content as a duplicate, do not treat it as a generic failure. Either reuse the existing remote owner (return its id) or raise `SinkDuplicateContent` for an unrecoverable block. See §6.8.
 
-### 6.2 `update_datafile(remote_datafile_id, path) -> str`
+### 6.2 `update_datafile(remote_datafile_id, path, previous_hash=None, new_hash=None, datafile_id=None) -> str`
 
 Called when a tracked file's content changes (the engine detects the hash differs from what the target last received).
 
 - Re-upload `path` over the existing remote file identified by `remote_datafile_id`.
 - **Return the NEW `remote_datafile_id`** assigned after the re-upload. It may equal the old id if the remote instance dedupes by content — callers persist whatever you return, so returning the old id when nothing changed is correct and harmless.
+- Accept the optional keyword arguments even if you ignore them. The base wrapper passes them so content-addressed sinks can avoid deleting a new version's remote data and shared-file sinks can refcount remote ids:
+  - `previous_hash`: local hash recorded for the old version;
+  - `new_hash`: local hash of the new content;
+  - `datafile_id`: the local `akb_datafile` id.
 
 ### 6.3 `remove_datafile(remote_datafile_id) -> None`
 
@@ -321,7 +328,7 @@ def _wait_for_processing(self, file_id: str) -> bool:
     return False
 ```
 
-If a cancel fires partway through an upload (the file is already on the remote but not yet linked), best-effort delete the orphaned file before re-raising to keep the remote repo clean:
+If a cancel fires partway through an upload (the file is already on the remote but not yet linked), you may delete the orphaned upload **only if you can prove no other remote file owns the same content hash**. Services that delete points/vectors by content hash can otherwise lose the existing owner's data. If you cannot prove that, leave the unlinked upload in place and log it:
 
 ```python
 def _upload_file(self, path: str) -> str:
@@ -330,20 +337,65 @@ def _upload_file(self, path: str) -> str:
     try:
         self._wait_for_processing(file_id)
     except SinkCancelledError:
-        try:
-            self._delete_file(file_id)
-        except Exception:
-            pass
+        if self._no_other_hash_owner(file_id):
+            try:
+                self._delete_file(file_id)
+            except Exception:
+                pass
+        else:
+            self._log.warning("unlinked_upload_left", file_id=file_id)
         raise
     return file_id
 ```
+
+### 6.8 Duplicate-content outcomes
+
+Some remote services reject a document because its content already exists. AutoKB models that as a **per-document outcome**, not a target-wide failure. The engine recognises `SinkDuplicateContent` (from `utils.misc_utils`):
+
+```python
+from utils.misc_utils import SinkDuplicateContent
+
+raise SinkDuplicateContent(
+    path=path,
+    file_id=uploaded_file_id,
+    content_hash=remote_content_hash,
+    reason="orphan_vectors",  # or another short reason
+)
+```
+
+Behaviour:
+
+- the link stays `ENABLED`;
+- the document is stored as `DUPLICATE_BLOCKED` in `target_datafile.state`, with `last_error` and `last_attempt`;
+- unchanged blocked documents are skipped on later passes;
+- pressing **Update** on the Target clears blocked outcomes and retries;
+- one aggregated email is sent per target/KB per run when blocked documents are attempted.
+
+If the duplicate is owned by a currently linked remote file, **reuse that id instead of deleting and re-linking**:
+
+```python
+def add_datafile(self, path: str) -> str:
+    file_id = self._upload_file(path)
+    try:
+        self._link(file_id)
+    except YourDuplicateContentError as exc:  # whatever your remote/API layer raises
+        owner_id = self._find_linked_hash_owner(exc)
+        if owner_id:
+            return owner_id  # map this local file to the existing remote owner
+        raise SinkDuplicateContent(path=path, file_id=file_id,
+                                   content_hash=exc.content_hash,
+                                   reason="no_linked_owner")
+    return file_id
+```
+
+Important safety rule: never delete a freshly uploaded file whose content hash may already be owned by another remote file. Some services delete vectors/points by content hash, which would remove the existing owner's data.
 
 ### Summary Table
 
 | Method | Trigger | Returns | Idempotent required |
 |--------|---------|---------|---------------------|
 | `add_datafile`    | new file on disk         | `remote_datafile_id` | no  |
-| `update_datafile` | file content changed     | new `remote_datafile_id` | no |
+| `update_datafile` | file content changed; accepts optional `previous_hash` / `new_hash` / `datafile_id` | new `remote_datafile_id` | no |
 | `remove_datafile` | file deleted on disk     | — | **yes** (404 == success) |
 | `add_target`      | target create/update time, synchronously by Manager | `remote_target_id` | no |
 | `remove_target`   | Target explicitly deleted | — | **yes** (404 == success) |
@@ -357,9 +409,9 @@ You implement the six abstract methods above. `BaseSink` then wraps them so the 
 
 | Wrapper | What it does |
 |---------|--------------|
-| `base_add_datafile(sub_id, path)` | Sizes/hashes the file (`compute_file_hash`), gets-or-creates the `akb_datafile` row, checks the `target_datafile` join, and only then calls your `add_datafile(path)` and persists the returned remote id. Returns early if the file is already tracked for this target. |
-| `base_update_datafile(datafile_id, new_hash)` | Looks up the tracked join row, calls your `update_datafile(remote_id, path)`, persists the new remote id (if returned) and the new content hash. |
-| `base_remove_datafile(datafile_id)` | Looks up the join row, calls your `remove_datafile(remote_id)`, then deletes the join row. |
+| `base_add_datafile(sub_id, path)` | Sizes/hashes the file (`compute_file_hash`), gets-or-creates the `akb_datafile` row, checks the `target_datafile` join, and only then calls your `add_datafile(path)` and persists the returned remote id. Returns early only when the existing row is `SYNCED`; a blocked/failed row remains retryable. |
+| `base_update_datafile(datafile_id, new_hash)` | Looks up the tracked join row, calls your `update_datafile(remote_id, path, previous_hash=..., new_hash=..., datafile_id=...)`, persists the new remote id (if returned), the new content hash, and the `SYNCED` state. On `SinkDuplicateContent`, keeps the old remote id and marks the row `DUPLICATE_BLOCKED`. |
+| `base_remove_datafile(datafile_id)` | Looks up the join row, calls your `remove_datafile(remote_id)`, then deletes the join row. Sinks with `shared_file_store = True` also refcount references to the same remote id and never delete a still-shared remote file. |
 | `base_add_target()` | Calls your `add_target()`, persists the returned remote id on the target row, and updates `self.remote_target_id`. |
 
 An additional concrete helper is available for building deterministic remote filenames:
@@ -404,12 +456,14 @@ For each subscription, the engine:
    - **Link status is NOT set here** — see Pass III below.
 5. **Pass II** syncs `akb_datafile` stats (size/mtime/hash) from the filesystem and prunes rows for deleted files.
 6. **Pass III — healing** (drift reconciliation): the engine re-reads the remote target and looks for tracked `target_datafile` rows whose remote copy is **missing** on the remote (external deletion, a cross-KB `DELETE`, a crash mid-pass). For each drifted file it writes the link's message as `Healing {datafile_id}...` and re-pushes it via `base_update_datafile()`. This only runs for sinks that expose a `_kb_files(kb_id)` method (see Section 9); sinks without it are skipped. After healing, the engine calls `svc.flush()` so any buffered heal upserts land (no-op for non-batching sinks).
-7. **Finalize link statuses**: **only now**, after the whole recon (blocking batches and healing) has finished, the engine sets each link back to `ENABLED` with the summary message `Reconciled: +{a} added, ~{u} updated, -{r} removed`. Healed files are **merged into the `~N updated` count** — there is no separate "healed" field in the message. Because finalization is deferred until after Pass III, the link never reports success early while the worker is still blocking on uploads.
+7. **Finalize link statuses**: **only now**, after the whole recon (blocking batches and healing) has finished, the engine sets each active link back to `ENABLED` with the summary message `Reconciled: +{a} added, ~{u} updated, -{r} removed`. Healed files are **merged into the `~N updated` count** — there is no separate "healed" field in the message. Blocked documents add `, {n} blocked (duplicate content)`. The write is conditional, so a link disabled or deleted mid-pass is never re-enabled. Because finalization is deferred until after Pass III, the link never reports success early while the worker is still blocking on uploads.
 8. **Target deletion**: when a Target is explicitly deleted, the Manager calls `remove_target()` and deletes the target row. Unlinking or deleting subscriptions does **not** delete the Target or its remote container; it only removes that subscription's files, leaving the container in place (possibly empty).
 
 ### Per-File Resilience
 
-Failures inside **Pass I** are logged and **abort that target's pass**: `_reconcile_pass1` logs (`sink_add_failed`, `sink_update_failed`, `sink_remove_failed`) and re-raises. The recon loop catches the exception, transitions the link to `ERROR` (which triggers the one-time notification email), and moves on to the next Target — the remaining Targets, Pass II, and Pass III for the subscription still run. This is why uploads must be **idempotent where documented and raise clean exceptions otherwise**: a failed link is not retried mid-pass; the next recon picks it up again. (Since `add_target()` is now called at target create/update time by the Manager — never by recon — its failures surface as API errors before any queue items are pushed.)
+Failures inside **Pass I** are logged (`sink_add_failed`, `sink_update_failed`, `sink_remove_failed`) and tolerated for individual files. The link only transitions to `ERROR` after **five consecutive file failures** in the same pass; a successful file resets the counter. A duplicate-content rejection is a separate typed outcome and does **not** increment that counter.
+
+This is why uploads must raise clean, meaningful exceptions: a failed file is not retried mid-pass; the next recon picks it up. `SinkCancelledError` is never swallowed and never causes `ERROR`. Since `add_target()` is called at target create/update time by the Manager — never by recon — its failures surface as API errors before any queue items are pushed.
 
 ### Mid-Run Cancellation
 
@@ -427,9 +481,11 @@ Cancellation is NOT an error: the engine never transitions the link to `ERROR` a
 
 ### Error Transitions
 
-When a target-subscription transitions to `ERROR`, the engine sends **one** notification email (subject `[AutoKB] SINK target error: {target_name}`) and only on the transition (not on every recon). On the next successful recon the link returns to `ENABLED`.
+When a target-subscription transitions to `ERROR` after persistent per-file failures, the engine sends **one** notification email (subject `[AutoKB] SINK target error: {target_name}`), only on the transition. The target **Update** action moves `ERROR` links back to `ENABLED` and runs a fresh downstream recon/heal.
 
-A missing `remote_target_id` at recon time (null — the remote container was never provisioned) is treated as an error: the link transitions to `ERROR` and triggers the same notification so the user can re-provision the target via the Update action.
+A missing `remote_target_id` at recon time (null — the remote container was never provisioned) is treated as an error: the link transitions to `ERROR` and triggers the same notification so the user can re-provision the target via Update.
+
+Duplicate-content blocks do **not** transition the link to `ERROR`; they produce a separate aggregated notification (one per target/KB per run).
 
 ---
 
@@ -498,9 +554,12 @@ The POST `/api/sinks/{service_id}/targets` endpoint accepts:
 
 When a remote operation fails, raise an exception (a `RuntimeError` with a short human-readable message is the convention). The engine:
 
-- logs the failure,
-- marks the link `ERROR` for that target (which aborts that target's Pass I — see §8 Per-File Resilience), or `ERROR` for `add_target()` failures,
-- sends one notification email on transition to `ERROR`.
+- logs the failure and tolerates it as a per-file failure;
+- after **five consecutive** file failures in one pass, marks the link `ERROR` and sends one notification email on the transition;
+- treats `add_target()` failures as errors at target create/update time;
+- never treats cancellation as an error.
+
+For duplicate content, raise `SinkDuplicateContent` instead of `RuntimeError` when the duplicate cannot be resolved by reusing a linked owner. The engine records `DUPLICATE_BLOCKED`, keeps the link `ENABLED`, and sends one aggregated notification for the target/KB.
 
 Do not return `None`/`""` from `add_datafile()` or `add_target()` as a way to signal failure — an empty remote id will corrupt tracking. Raise instead.
 
@@ -528,13 +587,16 @@ def _check(self, resp: requests.Response, action: str) -> None:
 
 ### Structured Logging
 
-A logger is available at `self.log` (name `sink.{ClassName}`) for anything you want to record beyond the exceptions:
+Sinks do **not** get a `self.log` logger from `BaseSink` (that is a plugin-only convenience). Create one in `__init__` with `get_logger`:
 
 ```python
-self.log.warning("remote_timeout", action="add_datafile", target=self.name)
+from utils.misc_utils import get_logger
+
+self._log = get_logger("openWebUISink")
+self._log.warning("remote_timeout", action="add_datafile", target=self.name)
 ```
 
-Logs are written to `/logs/worker.log`.
+Worker-side sink logs are written to `/logs/worker.log`.
 
 ---
 
@@ -676,7 +738,9 @@ class RestUploadSink(BaseSink):
         self._check(resp, "add datafile")
         return resp.json()["id"]
 
-    def update_datafile(self, remote_datafile_id: str, path: str) -> str:
+    def update_datafile(self, remote_datafile_id: str, path: str,
+                        previous_hash: str = None, new_hash: str = None,
+                        datafile_id: str = None) -> str:
         self._check_cancel()
         with open(path, "rb") as f:
             files = {"file": (self._remote_file_name(path), f, "application/octet-stream")}
@@ -751,7 +815,7 @@ This sink demonstrates every concept in this guide:
 - **Deterministic remote filenames** — `autokb_{sanitized_target}_{basename}` so the same local file always maps to the same remote name.
 - **Pure remote I/O** — no database access; the recon engine and base wrappers handle all bookkeeping.
 
-To adapt it to a real service (Open WebUI, Cognee, a WebDAV server, etc.), change the HTTP calls inside the six methods to match that service's API. The surrounding contract — what each method is for, what it returns, and when the engine calls it — stays identical.
+To adapt it to a real service (Open WebUI, RAGFlow, LightRAG, a WebDAV server, etc.), change the HTTP calls inside the six methods to match that service's API. The surrounding contract — what each method is for, what it returns, and when the engine calls it — stays identical.
 
 This sink is intentionally **non-batching**: every `base_add_datafile`/`base_update_datafile` call drives one immediate remote write, and it does not implement `_kb_files()`, so it gets no Pass III healing and reports no `Upserting {shown} of {planned} to remote sink...` progress. That is fully supported. The optional extensions described in Sections 7–9 are additive:
 
@@ -764,6 +828,33 @@ Think of the walkthrough as the minimal core and Sections 7–9 as the lever kit
 ---
 
 ## 14. File Placement
+
+### Built-in sink seeding and upgrade recovery
+
+The image ships built-in sinks in `/src/builtin_sinks/`. On startup they are copied into the live `/src/sinks/` directory **only if a same-name file does not already exist**. Existing files are never overwritten.
+
+Consequences:
+
+- User customisations are preserved across upgrades.
+- If a newer image fixes a built-in sink, the old live copy is **still loaded** until it is removed. Upgrading the image alone does not replace it.
+- If you have **not modified** the built-in, recovery is safe:
+  1. inspect the file while the stack is running (see below);
+  2. stop the stack;
+  3. back up `/src/sinks/` (or the host directory mounted there);
+  4. delete only the affected built-in file;
+  5. start the stack — the new image re-seeds the missing file from `/src/builtin_sinks/`.
+- If you **did modify** the built-in, do not delete it blindly: back it up, compare it with the new image copy, and merge your changes manually.
+- `/src/sinks/` may also contain custom sinks. Never wipe the whole directory without a backup.
+- Removing the code file does not delete Targets, target links, subscriptions, or other database state. The re-seeded sink is picked up under the same name.
+
+Useful check (while running):
+
+```bash
+docker compose exec autokb-manager \
+  diff /src/sinks/ragflowSink.py /src/builtin_sinks/ragflowSink.py
+```
+
+The same rules apply to built-in plugins via `/src/builtin_plugins/` → `/src/plugins/`.
 
 | Item | Location / Method |
 |------|------------------|
@@ -784,6 +875,9 @@ Before considering your sink complete, verify:
 - [ ] `metadata["display_name"]` is a human-friendly label (falls back to `name` if absent)
 - [ ] All six abstract methods are implemented: `add_datafile`, `update_datafile`, `remove_datafile`, `add_target`, `remove_target`, `clear_target`
 - [ ] `add_datafile` and `update_datafile` return the remote id assigned by the remote service
+- [ ] `update_datafile` accepts the optional `previous_hash`, `new_hash`, and `datafile_id` keyword arguments
+- [ ] Duplicate content is handled explicitly: reuse a linked owner, or raise `SinkDuplicateContent`
+- [ ] No remote delete is performed when the content hash or remote id may still be shared
 - [ ] `add_target` returns the remote container id assigned by the remote service
 - [ ] `remove_datafile` and `remove_target` are idempotent (treat "not found" as success)
 - [ ] `__init__` falls back to `default_api_url` when `api_url` is empty and to `api_key_env_var` when `api_key` is empty

@@ -12,14 +12,14 @@ AutoKB connects to diverse data sources through a hot-swappable plugin architect
 ## Key Features
 
 - **Pluggable Architecture** — Data sources are single Python files. Drop a new plugin into `/src/plugins/` and it is hot-swapped into the running system within ~2 seconds. No restart, no config change, no deployment pipeline.
-- **Data Destinations (Sinks)** — Hot-swappable destination connectors in `/src/sinks/` sync plugin output to remote Knowledge Bases / datasets (Data Targets) — e.g. Open WebUI Knowledge Bases. A reconciliation engine diffs `/output/` against remote state after every run.
-- **Built-In Seeding** — On startup, the built-in plugins/sinks baked into the image (`/src/builtin_plugins/`, `/src/builtin_sinks/`) are copied into the live (host-mounted) `/src/plugins/` and `/src/sinks/` directories **only if they don't already exist**. Same-name user files are never overwritten, so upgrades can ship new built-ins without clobbering customizations.
+- **Data Destinations (Sinks)** — Hot-swappable destination connectors in `/src/sinks/` sync plugin output to remote Knowledge Bases / datasets (Data Targets) — Open WebUI, RAGFlow, and LightRAG are built in. A reconciliation engine diffs `/output/` against remote state after every run.
+- **Built-In Seeding** — On startup, the built-in plugins/sinks baked into the image (`/src/builtin_plugins/`, `/src/builtin_sinks/`) are copied into the live (host-mounted) `/src/plugins/` and `/src/sinks/` directories **only if they don't already exist**. Same-name user files are never overwritten, so upgrades can ship new built-ins without clobbering customizations. Existing built-ins are not auto-updated; see [Built-in Seeding and Upgrade Recovery](#built-in-seeding-and-upgrade-recovery).
 - **Dual Interface** — Full-featured dark-mode Web UI (SPA with SSE live updates) for human operators, plus an MCP (Model Context Protocol) server that lets AI assistants act as remote administrators.
 - **Two-Tier Queue with Aggressive Collapsing** — Redis-backed P-Queue / S-Queue design ensures the **One Worker per Subscription** invariant while handling high-frequency event bursts. Duplicate triggers are collapsed before execution.
 - **Process-Level Isolation** — Each `getData()` call runs in a dedicated child subprocess with heartbeat monitoring, cancellation support, and timeout enforcement. A crash in one plugin never affects another.
 - **Schema-Immutable Contracts** — Plugin `get_schema()` output is SHA-256 hashed and treated as an immutable contract. Breaking schema changes are detected, blocked, and reported via SMTP — existing subscriptions are never silently invalidated.
 - **Live SSE Updates** — PostgreSQL `LISTEN`/`NOTIFY` bridges every state change to browser and MCP clients in real time. No polling required.
-- **SMTP Notifications** — Configurable email alerts for heartbeat timeouts, runtime errors, schema validation failures, schema-breaking changes, and watchdog force-releases.
+- **SMTP Notifications** — Configurable email alerts for heartbeat timeouts, runtime errors, schema validation failures, schema-breaking changes, watchdog force-releases, and aggregated duplicate-content blocks (one summary per target/KB per run).
 - **Forward-Compatible Schema Evolution** — Three reserved `_extra_param_*` fields in every plugin schema allow future credential additions without requiring operators to recreate subscriptions.
 
 ---
@@ -69,12 +69,12 @@ Worker pops from P-Queue ──► acquires Redis lock ──► drains both que
             compares /output/ vs DB ──► add/update/remove datafiles
                          │
                          ▼
-         Data Target (remote KB / dataset, e.g. Open WebUI)
+         Data Target (remote KB / dataset, e.g. Open WebUI, RAGFlow, LightRAG)
 
 PostgreSQL pg_notify ──► Manager asyncpg LISTEN ──► SSE clients (Web UI / MCP)
 ```
 
-The Manager's watchdog monitors `last_heartbeat` timestamps at `HEARTBEAT_TIMEOUT × 3` intervals, force-releasing stale locks and marking subscriptions as `ERROR` with full SMTP notification.
+The Manager's watchdog monitors `last_heartbeat` timestamps at `AUTOKB_HEARTBEAT_TIMEOUT × 3` intervals, force-releasing stale locks and marking subscriptions as `ERROR` with full SMTP notification.
 
 ---
 
@@ -83,7 +83,7 @@ The Manager's watchdog monitors `last_heartbeat` timestamps at `HEARTBEAT_TIMEOU
 AutoKB can push plugin output beyond the local `/output/` directory into remote Knowledge Bases / datasets. The pieces:
 
 - **Source plugin** (Data Source) — a plugin in `/src/plugins/` that fetches data and writes files via `move_to_destination()`.
-- **Destination connector** (Sink) — a single Python file in `/src/sinks/` that knows how to talk to one remote service type (e.g. Open WebUI). Sinks are hot-swapped into the running system like plugins.
+- **Destination connector** (Sink) — a single Python file in `/src/sinks/` that knows how to talk to one remote service type (e.g. Open WebUI, RAGFlow, LightRAG). Sinks are hot-swapped into the running system like plugins.
 - **Data Target** — a configured remote instance of a sink service (a URL, an API key, and a set of linked subscriptions). Targets are DB rows you manage from the Web UI.
 - **Reconciliation** — after every full subscription run, and on demand via a `SINK_ONLY` queue operation, the Worker compares `/output/{plugin}/{subscription}/` against the database and the remote, calling the sink's add/update/remove methods to bring the remote in sync.
 
@@ -94,22 +94,38 @@ A sink subclasses `BaseSink` (in `src/utils/sink_base.py`) and implements six re
 | Method | Trigger | Returns |
 |---|---|---|
 | `add_datafile(path)` | new file on disk | remote datafile ID |
-| `update_datafile(remote_id, path)` | content changed (hash diff) | new remote datafile ID |
+| `update_datafile(remote_id, path, previous_hash=None, new_hash=None, datafile_id=None)` | content changed (hash diff) | new remote datafile ID |
 | `remove_datafile(remote_id)` | file deleted on disk | — |
 | `add_target()` | first recon for a target | remote target ID |
 | `remove_target()` | Target explicitly deleted | — |
 | `clear_target()` | contract-only (not yet invoked) | — |
 
+The optional `previous_hash` / `new_hash` / `datafile_id` arguments let content-addressed sinks avoid deleting a new version's remote data and let shared-file sinks refcount remote ids. Sinks should accept these keyword arguments even if they ignore them.
+
 Registration mirrors plugins: files matching `*Sink.py` in `/src/sinks/` are scanned by `SinkRegistry`, and the file stem must equal the sanitized `metadata["name"]`. Full authoring guide: [`assets/sink-development.md`](assets/sink-development.md).
 
 ### Built-in Sinks
 
-| Sink | Service | Status |
+| Sink | Service | Notes |
 |---|---|---|
-| **Open WebUI Knowledge Base** (`openWebUISink`) | Syncs output into an Open WebUI KB via its REST API (`AutoKB_{target}`) | Implemented |
-| **Cognee Dataset** (`cogneeSink`) | Graph-memory dataset sync for Cognee | Stub (`NotImplementedError`) |
+| **Open WebUI Knowledge Base** (`openWebUISink`) | Per-target KB `AutoKB_{target}` via the Open WebUI REST API | Uploads into Open WebUI's global file repo, links into the KB, reuses an existing owner on duplicate content, and refcounts shared remote files. |
+| **RAGFlow Dataset** (`ragflowSink`) | Per-target dataset `AutoKB_{target}` via the RAGFlow REST API | Uses the General chunking method with the Docling parser; documents are re-created on content change because RAGFlow cannot replace them in place. |
+| **LightRAG Knowledge Base** (`lightRagSink`) | Shared LightRAG instance via its REST API | Deterministic `autokb_{target}_` document names, page-bounded upload batches, background indexing, and target-scoped deletion from a shared KB. |
 
 API keys for targets are encrypted at rest and decrypted only at reconciliation time; sink-specific defaults can be provided via the sink's `default_api_url` / `api_key_env_var` (see Environment Variables).
+
+#### Duplicate-content handling
+
+A sink may reject a document because its content already exists remotely. AutoKB treats that as a **per-document outcome**, not a target-wide failure:
+
+- the link stays `ENABLED`;
+- the document is recorded with state `DUPLICATE_BLOCKED` (`target_datafile.state` / `last_error` / `last_attempt`);
+- an existing linked owner is reused when one can be found, avoiding delete/re-embed churn;
+- unchanged blocked documents are skipped on later passes;
+- pressing **Update** on the target clears blocked outcomes and retries them;
+- one aggregated notification email is sent per target/KB per run when blocked documents are attempted.
+
+Actual orphan-vector cleanup remains a remote-service operation (for example, resetting an Open WebUI knowledge base), followed by an AutoKB **Update**.
 
 ---
 
@@ -123,6 +139,46 @@ API keys for targets are encrypted at rest and decrypted only at reconciliation 
 | **Paperless Docling Parser** (`ePaperlessDoclingPlugin`) | SCHEDULED | Queries Paperless-ngx documents matching a filter, sends new and changed documents to Docling for OCR and parsing, and writes chunked markdown output (~490 tokens per chunk) |
 | **IMAP Folder Watch** (`imapFolderWatchPlugin`) | EVENT_BASED | Watches IMAP folders via IDLE push notifications, downloads new emails, chunks long messages |
 | **YouTube Transcriptions** (`youTubeTranscriptionPlugin`) | SCHEDULED | Downloads channel transcripts via YouTube API, chunks by token budget (~490 tokens), supports multiple languages |
+| **HSHQ Help** (`hshqPlugin`) | SCHEDULED | Scans HSHQ Script-Server functions and extracts function names and descriptions to markdown |
+| **Nextcloud / Twenty Contact Sync** (`nextcloudTwentyContactSyncPlugin`) | SCHEDULED | Reconciles contacts between Twenty CRM People and a Nextcloud Global address book, using AutoKB files as the source of truth and writing corrections back to both systems |
+
+### Built-in Seeding and Upgrade Recovery
+
+On startup, the built-in plugins and sinks baked into the image are copied from `/src/builtin_plugins/` and `/src/builtin_sinks/` into the live, host-mounted `/src/plugins/` and `/src/sinks/` directories **only when a same-name file does not already exist**.
+
+That protects user customisations, but it has an important upgrade consequence:
+
+> If a newer image fixes a built-in plugin or sink, the old live copy keeps being loaded until you remove it. The image never overwrites an existing file.
+
+If a built-in is not behaving correctly after an image upgrade, and you have **not modified it**, the safe recovery is:
+
+1. Inspect the live file against the image copy while the stack is running.
+2. Stop the stack.
+3. Back up the live plugin/sink directories.
+4. Delete only the affected built-in file(s) from the host directory mounted at `/src/plugins/` or `/src/sinks/`.
+5. Start the stack again. The new image re-seeds the missing built-in file from `/src/builtin_plugins/` or `/src/builtin_sinks/`.
+
+```bash
+# Inspect whether the live file differs from the image copy (while running).
+docker compose exec autokb-manager \
+  diff /src/sinks/ragflowSink.py /src/builtin_sinks/ragflowSink.py
+
+# Stop writers.
+docker compose stop autokb-manager autokb-worker
+
+# Back up, then remove only the affected unmodified built-in.
+cp -a <host-sinks-dir>/ragflowSink.py <host-sinks-dir>/ragflowSink.py.bak
+rm <host-sinks-dir>/ragflowSink.py
+
+docker compose up -d
+```
+
+Notes:
+
+- These directories may also contain **custom** plugins/sinks. Do not delete the whole directory unless you have backed it up and confirmed every file is a stock built-in.
+- If you **did** modify the built-in, do not delete it: back it up, compare it against the new image copy, and merge your changes manually.
+- Removing a code file does not delete subscriptions, targets, target links, or other database state. The newly seeded built-in is picked up under the same name.
+- A schema change in a re-seeded plugin still follows the normal schema-validation rules and may require creating a new subscription.
 
 ---
 
@@ -212,7 +268,7 @@ Full documentation: [`mcp/README.md`](mcp/README.md)
    docker compose up -d
    ```
 
-4. Access the Web UI at `http://<host>:<web-port>` (default: port 80).
+4. Access the Web UI at `http://<host>:<web-port>`. The reference `docker-compose.yml` exposes services only on the internal Docker network, so either place it behind a reverse proxy or add a `ports:` mapping for `autokb-web` (container port `80`).
 
 5. Log in with `AUTOKB_ADMIN_USERNAME` / `AUTOKB_ADMIN_PASSWORD`.
 
@@ -260,7 +316,7 @@ notifications never reach real recipients.
 
 ### MCP Client Connection
 
-Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sending `Authorization: Bearer <AUTOKB_API_KEY>`.
+Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sending `Authorization: Bearer <AUTOKB_API_KEY>`. As with the Web UI, the reference compose does not publish the MCP port; add a `ports:` mapping or reach it through your reverse proxy.
 
 ---
 
@@ -274,18 +330,42 @@ Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sendin
 | `AUTOKB_ADMIN_USERNAME` | `admin` | Web UI login username |
 | `AUTOKB_ADMIN_PASSWORD` | _(required)_ | Web UI login password |
 | `AUTOKB_API_KEY` | _(required)_ | Bearer token for MCP → Web UI auth |
-| `AUTOKB_BACKEND_API_KEY` | _(auto-generated)_ | Internal Web UI → Manager auth |
+| `AUTOKB_BACKEND_API_KEY` | _(required)_ | Internal Web UI → Manager auth key |
+| `AUTOKB_WEBHOOK_API_KEY` | — | Webhook/API authentication key used by the web layer |
+| `AUTOKB_MANAGER_URL` | `http://autokb-manager:80` | Manager URL used by the Web UI proxy |
+| `AUTOKB_BASE_URL` | — | Web URL used by the MCP container (compose sets `http://autokb-web:80`) |
+| `AUTOKB_USE_HTTPS` | `0` | Set to `1` to mark session cookies `Secure` behind HTTPS |
+| `AUTOKB_ASSETS_DIR` | `/assets` | Asset directory served by the Web UI |
 | `DATABASE_URL` | `postgresql://autokb:autokb@autokb-db:5432/autokb` | PostgreSQL connection |
 | `REDIS_URL` | `redis://autokb-redis:6379/0` | Redis connection |
-| `ENCRYPTION_KEY` | _(required)_ | Fernet key for password field encryption |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `autokb` / `autokb` / `autokb` | PostgreSQL container credentials/database |
+| `ENCRYPTION_KEY` | _(required)_ | Fernet key **or passphrase** for password-field encryption; passphrases are derived with PBKDF2 |
 | `WORKER_COUNT` | `4` | Number of parallel worker processes |
-| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_NOTIFY_EMAIL` | — | SMTP notification configuration |
-| `HEARTBEAT_TIMEOUT` | `300` | Seconds before watcher terminates unresponsive plugin |
 | `WORKER_STARTUP_DELAY_S` | `5` | Delay before worker initializes sink components (lets Manager run migrations) |
+| `AUTOKB_HEARTBEAT_TIMEOUT` | `300` | Seconds before the watcher terminates an unresponsive plugin |
+| `AUTOKB_MONITOR_ERROR_SLEEP` | `10` | Delay after a monitor exception before retrying |
+| `AUTOKB_LOCK_TTL` | `3600` | Redis safety-lock TTL in seconds |
+| `AUTOKB_DEBOUNCE_SECONDS` | `2` | Plugin/sink hot-swap debounce delay |
+| `AUTOKB_DEBOUNCE_PHASE_SECONDS` | `5` | Sleep after a successful execution before re-evaluation |
+| `AUTOKB_WATCHDOG_INTERVAL` | `5` | Manager watchdog poll interval |
+| `AUTOKB_SSE_KEEPALIVE` | `30` | SSE keepalive comment interval |
+| `AUTOKB_ORPHAN_SWEEP_SECONDS` | `30` | Worker orphan-process sweep interval |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | — | SMTP server configuration |
+| `SMTP_FROM` | `autokb@localhost` | Notification sender address |
+| `SMTP_NOTIFY_EMAIL` | — | Notification recipient |
+| `SMTP_USE_TLS` / `SMTP_USE_SSL` | `True` / `False` | SMTP transport security |
+| `CRAWL4AI_API_URL` | `http://crawl4ai-app:11235` | Crawl4AI API base URL used by `crawl4AIWebScraperPlugin` |
 | `FASTCRW_API_URL` | `http://fastcrw-app:3000` | FastCRW API base URL used by `fastCRWWebScraperPlugin` |
 | `FASTCRW_API_KEY` | — | Default FastCRW bearer token; per-subscription `api_key` overrides it |
+| `PAPERLESS_URL` | `http://paperless-app:8000` | Default Paperless-ngx URL for `ePaperlessDoclingPlugin` |
+| `PAPERLESS_TOKEN` | — | Default Paperless-ngx API token |
+| `DOCLING_URL` | `http://docling-app:5001` | Docling service URL used by ingestion plugins |
+| `DOCLING_API_KEY` | — | Docling API key |
 | `OPENWEBUI_API_KEY` | — | Default API key fallback for the Open WebUI sink |
-| `COGNEE_API_KEY` | — | Default API key fallback for the Cognee sink |
+| `RAGFLOW_API_KEY` | — | Default API key fallback for the RAGFlow sink |
+| `LIGHTRAG_API_KEY` | — | Default API key fallback for the LightRAG sink |
+
+Plugin and sink defaults are used to pre-fill subscription/target forms and as fallbacks when a per-subscription or per-target value is blank.
 
 ---
 
@@ -293,28 +373,36 @@ Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sendin
 
 ```
 ├── DesignSpecification.md       # Full system specification
-├── docker-compose.yml           # 6-container orchestration
+├── docker-compose.yml           # Production/reference 6-container orchestration
+├── docker-compose.dev.yml       # Isolated autokb-dev development stack
+├── docker-compose.test.yml      # Isolated autokb-test CI/test stack
 ├── Dockerfile                   # Unified base image (Manager, Worker, Web UI)
 ├── requirements.txt             # Python dependencies
-├── stack.env                    # Environment configuration
-├── assets/                      # Plugin/sink icons, brand assets, dev guides
-├── output/                      # Plugin output data (mounted volume)
-├── logs/                        # Per-container log files (mounted volume)
-├── src/
-│   ├── manager/                 # FastAPI app, scheduler, routes, registry, alembic migrations
-│   ├── worker/                  # Multiprocessing pool, execution engine, sink reconciliation
-│   ├── builtin_plugins/         # Built-in data source plugins (seeded into plugins/ at startup)
-│   ├── builtin_sinks/           # Built-in destination connectors (seeded into sinks/ at startup)
-│   ├── plugins/                 # Live data source plugins (host-mounted; seeded, never overwritten)
-│   ├── sinks/                   # Live destination connectors (host-mounted; seeded, never overwritten)
-│   ├── web/                     # aiohttp SPA with dark-mode UI
-│   ├── utils/                   # Shared components (DB, queue, crypto, schema, sink base/registry)
-│   └── testing/                 # Automated test suite + 26 test plugins + test sinks
+├── stack.env                    # Production/reference environment configuration
+├── stack.dev.env                # Dev-only environment configuration
+├── .dockerignore                # Keeps dev/runtime data out of image builds
+├── assets/                      # Plugin/sink icons, brand assets, development guides
+├── scripts/                     # dev-up/dev-down/dev-reset/dev-exec helpers
+├── output/                      # Plugin output data (runtime mount; gitignored)
+├── logs/                        # Per-container log files (runtime mount; gitignored)
+├── mcp/                         # MCP server source and its own Docker image
+└── src/
+    ├── manager/                 # FastAPI app, scheduler, routes, registry, alembic migrations
+    ├── worker/                  # Multiprocessing pool, execution engine, sink reconciliation
+    ├── builtin_plugins/         # Built-in data sources (seeded into plugins/ at startup)
+    ├── builtin_sinks/           # Built-in destinations (seeded into sinks/ at startup)
+    ├── plugins/                 # Live data sources (host-mounted at runtime; seeded, never overwritten)
+    ├── sinks/                   # Live destinations (host-mounted at runtime; seeded, never overwritten)
+    ├── web/                     # aiohttp SPA with dark-mode UI
+    ├── utils/                   # Shared components (DB, queue, crypto, schema, sink base/registry)
+    └── testing/                 # Test runner, sinks/plugins fixtures, and unit_tests/
 ```
 
 ---
 
-## Subscription States
+## Subscription and Target States
+
+### Subscription states
 
 | State | Description |
 |---|---|
@@ -325,18 +413,38 @@ Connect to `http://<host>:<mcp-port>/mcp` with streamable HTTP transport, sendin
 | `DISABLED` | User-paused — not eligible for triggering |
 | `DELETED` | Terminal state — pending output directory cleanup and row deletion |
 
+### Target-link states (`target_subscriptions`)
+
+| State | Description |
+|---|---|
+| `ENABLED` | Link is active and reconciled |
+| `ENQUEUED` | A downstream sync is queued |
+| `IN_PROGRESS` | Recon is currently running for this link |
+| `ERROR` | Persistent sink failure; **Update** clears it and retries |
+| `DISABLED` | Operator paused this link |
+| `DELETED` | Link is being removed and cleaned up |
+
+### Per-document sink states (`target_datafile`)
+
+| State | Description |
+|---|---|
+| `SYNCED` | Remote copy exists and matches the tracked content |
+| `DUPLICATE_BLOCKED` | Remote rejected the content as duplicate; the link stays `ENABLED`, repeat passes skip unchanged content, and **Update** retries |
+
 ---
 
 ## Testing
 
-The project includes 26 test plugins and a test sink covering every major behavior path (happy path, heartbeat timeout, cancellation, schema-breaking changes, password encryption, custom routes, cron randomization, sink reconciliation, etc.). The full suite runs 46 checks: 28 integration tests (26 plugin behavior + 2 sink pipeline), 17 sink unit tests (CRUD, queue encoding, registry, service wrappers, reconciliation), plus a leak check.
+The project includes 26 test plugins and a test sink covering every major behavior path (happy path, heartbeat timeout, cancellation, schema-breaking changes, password encryption, custom routes, cron randomization, sink reconciliation, duplicate-content handling, etc.). The current suite runs 78 checks: 33 integration tests (26 plugin behavior + 7 sink/target flows), 44 sink unit tests (CRUD, queue encoding, registry, service wrappers, reconciliation), plus a leak check.
+
+Run the suite from inside the Manager container (it talks to the Manager over HTTP):
 
 ```bash
-cd /repos/autokb
-python /src/testing/test_runner.py confirm [--reset]
+docker exec -e MANAGER_URL=http://autokb-manager:80 \
+  autokb-manager python /src/testing/test_runner.py confirm --reset
 ```
 
-The `--reset` flag wipes all subscriptions, event logs, and output directories before running. Test subscriptions use an `akbtest-` / `e2e-` prefix so cleanup never touches real subscriptions. Test constants like `HEARTBEAT_TIMEOUT` can be overridden via environment variables for faster iteration.
+The `--reset` flag wipes all subscriptions, event logs, and output directories before running. Test subscriptions use an `akbtest-` / `e2e-` prefix so cleanup never touches real subscriptions. Test timing constants such as `AUTOKB_HEARTBEAT_TIMEOUT`, `AUTOKB_LOCK_TTL`, and `AUTOKB_DEBOUNCE_PHASE_SECONDS` can be overridden via environment variables for faster iteration.
 
 For a quick standalone sink-pipeline smoke test (2 e2e + 4 unit checks):
 

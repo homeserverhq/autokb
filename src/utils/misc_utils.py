@@ -111,12 +111,12 @@ def get_logger(component: str, log_file: Optional[str] = None) -> structlog.stdl
 # ---------------------------------------------------------------------------
 # sanitize_name
 # ---------------------------------------------------------------------------
-_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9.\-]")
+_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9._\-]")
 _PERIOD_RE = re.compile(r"\.+")
 
 
 def sanitize_name(name: str) -> str:
-    """Strip everything except ``[a-zA-Z0-9.\\-]``; enforce period rules.
+    """Strip everything except ``[a-zA-Z0-9._\\-]``; enforce period rules.
 
     Rules:
       * After stripping, no two periods may be adjacent.

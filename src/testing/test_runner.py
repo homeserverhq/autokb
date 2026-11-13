@@ -1395,12 +1395,11 @@ def _read_sub_output(sub_name: str) -> str:
     """Read the contents of the file produced by an editMatchPlugin sub.
 
     The plugin writes a single temp file whose name is sanitized by
-    ``sanitize_name`` (strips everything except ``[a-zA-Z0-9.\-]``) on
-    the way to its canonical destination, so the underscores in
-    ``editMatchPlugin_output.txt`` are dropped → ``editMatchPluginoutput.txt``.
-    We glob the sub's output directory rather than hard-coding a path
-    so a future sanitization-rule change does not silently break the
-    test."""
+    ``sanitize_name`` (strips everything except ``[a-zA-Z0-9._\\-]``) on
+    the way to its canonical destination. Underscores are preserved, so
+    the output file is ``editMatchPlugin_output.txt``. We glob the sub's
+    output directory rather than hard-coding a path so a future
+    sanitization-rule change does not silently break the test."""
     import glob
     out_dir = f"/output/editMatchPlugin/{sub_name}"
     matches = sorted(glob.glob(f"{out_dir}/*.txt"))

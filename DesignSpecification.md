@@ -166,7 +166,7 @@ Every data source must be a single Python file in `/src/plugins/`.
 
 #### 3.2 The `sanitize_name()` Function
 
-Strips all characters except `[a-zA-Z0-9.\-]`. If a period is present, the first and last characters must be non-period (alphanumeric). Consecutive periods are not permitted. Raises `ValueError` if the input has no valid content after sanitization or if the period constraints are violated. Callers must catch `ValueError`.
+Strips all characters except `[a-zA-Z0-9._\-]`. If a period is present, the first and last characters must be non-period (alphanumeric). Consecutive periods are not permitted. Raises `ValueError` if the input has no valid content after sanitization or if the period constraints are violated. Callers must catch `ValueError`.
 
 The function is idempotent (applying it twice yields the same result). All stored names must pass the idempotency check: `sanitize_name(name) == name`.
 

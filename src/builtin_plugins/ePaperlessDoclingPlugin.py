@@ -338,7 +338,13 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                 if not os.path.isfile(os.path.join(output_dir, fname)):
                     continue
                 parsed = self._parse_disk_name(fname)
-                if parsed and parsed[1] not in api_ids:
+                if parsed:
+                    if parsed[1] not in api_ids:
+                        os.remove(os.path.join(output_dir, fname))
+                        stray_count += 1
+                elif not fname.startswith("."):
+                    # The subscription owns this directory. Remove any regular
+                    # file that is not a recognized output name.
                     os.remove(os.path.join(output_dir, fname))
                     stray_count += 1
             if stray_count:

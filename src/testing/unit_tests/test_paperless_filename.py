@@ -40,6 +40,7 @@ except ImportError:
     tiktoken_stub.get_encoding = lambda _name: _Encoding()
     sys.modules["tiktoken"] = tiktoken_stub
 
+from utils.misc_utils import sanitize_name
 from utils.plugin_loading import find_plugin_subclass, load_plugin_module
 
 CHECKSUM = "cf2d32af4c6dee9e" + ("a" * 48)
@@ -244,6 +245,36 @@ def test_original_name_is_sanitized():
         assert _files(td) == {f"MyFile1_32.{HASH}.md"}
 
 
+def test_sanitize_name_preserves_underscores():
+    assert sanitize_name("my_file") == "my_file"
+    assert sanitize_name("my file (1)") == "myfile1"
+    assert sanitize_name("my_file_32.hash.md") == "my_file_32.hash.md"
+
+
+def test_output_filename_survives_sanitize_name():
+    cls = _load_plugin()
+    name = cls._output_filename("myfile", 32, HASH, "md")
+    assert name == f"myfile_32.{HASH}.md"
+    assert sanitize_name(name) == name
+
+
+def test_unrecognized_files_are_removed():
+    cls = _load_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        for name in (f"myfile32.{HASH}.md", "notes.tmp"):
+            with open(os.path.join(td, name), "w", encoding="utf-8") as f:
+                f.write("unrecognized")
+        with open(os.path.join(td, ".keep"), "w", encoding="utf-8") as f:
+            f.write("hidden file")
+
+        plugin = _make_plugin(cls, td, [_doc()])
+        _run(plugin)
+
+        assert not os.path.exists(os.path.join(td, f"myfile32.{HASH}.md"))
+        assert not os.path.exists(os.path.join(td, "notes.tmp"))
+        assert _files(td) == {f"myfile_32.{HASH}.md", ".keep"}
+
+
 def main():
     for fn in (
         test_output_includes_original_name_doc_id_and_hash,
@@ -257,6 +288,9 @@ def main():
         test_parser_handles_dots_in_original_name_and_legacy_names,
         test_long_original_name_is_truncated_before_fixed_suffix,
         test_original_name_is_sanitized,
+        test_sanitize_name_preserves_underscores,
+        test_output_filename_survives_sanitize_name,
+        test_unrecognized_files_are_removed,
     ):
         fn()
         print(f"  ok: {fn.__name__}")

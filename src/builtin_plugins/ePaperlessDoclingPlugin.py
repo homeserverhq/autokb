@@ -8,7 +8,11 @@ import time
 import requests
 import tiktoken
 
-from utils.misc_utils import SubscriptionCancelledError, send_smtp_notification
+from utils.misc_utils import (
+    SubscriptionCancelledError,
+    sanitize_name,
+    send_smtp_notification,
+)
 from utils.plugin_base import BaseSubscription
 
 _DOCLING_OPTIONS = {
@@ -24,6 +28,15 @@ _DOCLING_OPTIONS = {
 }
 _CHUNKING_MAX_TOKENS = 490
 _HEARTBEAT_INTERVAL = 20
+_MAX_FILENAME_LEN = 240
+_DISK_NAME_RE = re.compile(
+    r"^(?P<stem>.+)\.(?P<doc_id>\d+)\.(?P<hash>[a-f0-9]{16})"
+    r"(?:-(?P<chunk>\d+))?\.(?P<ext>[a-z0-9]+)$"
+)
+_LEGACY_DISK_NAME_RE = re.compile(
+    r"^(?P<doc_id>\d+)\.(?P<hash>[a-f0-9]{16})"
+    r"(?:-(?P<chunk>\d+))?\.(?P<ext>[a-z0-9]+)$"
+)
 
 
 class DoclingAuthError(RuntimeError):
@@ -158,35 +171,50 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         api_index = {}
         for doc in documents:
             doc_id = doc["id"]
-            checksum = doc["versions"][0]["checksum"]
-            original_file_name = doc.get(
-                "original_file_name", f"document-{doc_id}.pdf"
+            checksum = (doc["versions"][0]["checksum"] or "").lower()
+            original_file_name = (
+                doc.get("original_file_name") or f"document-{doc_id}.pdf"
+            )
+            stem, source_ext = self._original_name_parts(
+                original_file_name, doc_id
             )
             if doc.get("archived_file_name"):
-                ext = "pdf"
-            else:
-                ext = os.path.splitext(original_file_name)[1].lstrip(".").lower() or "pdf"
+                source_ext = "pdf"
             api_index[doc_id] = {
                 "checksum": checksum,
                 "checksum_prefix": checksum[:16],
                 "title": doc.get("title", "Untitled"),
                 "original_file_name": original_file_name,
-                "ext": ext,
+                "stem": stem,
+                "ext": source_ext,
             }
 
         # 4. Build disk index from output directory
         output_dir = self.get_destination_path()
-        disk_index = {}  # doc_id -> {"prefix": str, "chunked": bool, "ext": str}
-        disk_name_re = re.compile(r"^(\d+)\.([a-f0-9]{16})(?:-(\d+))?\.([a-z0-9]+)$")
+        disk_index = {}
         if os.path.isdir(output_dir):
             for fname in os.listdir(output_dir):
-                match = disk_name_re.match(fname)
-                if match:
-                    disk_index[int(match.group(1))] = {
-                        "prefix": match.group(2),
-                        "chunked": match.group(3) is not None,
-                        "ext": match.group(4),
-                    }
+                if not os.path.isfile(os.path.join(output_dir, fname)):
+                    continue
+                parsed = self._parse_disk_name(fname)
+                if not parsed:
+                    continue
+                stem, doc_id, checksum_prefix, chunked, ext = parsed
+                entry = disk_index.setdefault(
+                    doc_id,
+                    {
+                        "stems": set(),
+                        "hashes": set(),
+                        "chunked": False,
+                        "exts": set(),
+                        "files": [],
+                    },
+                )
+                entry["stems"].add(stem)
+                entry["hashes"].add(checksum_prefix)
+                entry["chunked"] = entry["chunked"] or chunked
+                entry["exts"].add(ext)
+                entry["files"].append(fname)
 
         expected_chunked = False if raw_pdf else chunking_enabled
 
@@ -201,13 +229,17 @@ class ePaperlessDoclingPlugin(BaseSubscription):
 
         for doc_id in api_ids & disk_ids:
             disk_entry = disk_index[doc_id]
-            checksum_matches = api_index[doc_id]["checksum"].startswith(disk_entry["prefix"])
-            expected_ext = api_index[doc_id]["ext"] if raw_pdf else "md"
+            api_entry = api_index[doc_id]
+            expected_ext = api_entry["ext"] if raw_pdf else "md"
+            checksum_matches = disk_entry["hashes"] == {
+                api_entry["checksum_prefix"]
+            }
+            name_matches = disk_entry["stems"] == {api_entry["stem"]}
             pattern_matches = (
                 disk_entry["chunked"] == expected_chunked
-                and disk_entry["ext"] == expected_ext
+                and disk_entry["exts"] == {expected_ext}
             )
-            if checksum_matches and pattern_matches:
+            if checksum_matches and name_matches and pattern_matches:
                 to_skip.add(doc_id)
             else:
                 to_update.add(doc_id)
@@ -234,18 +266,18 @@ class ePaperlessDoclingPlugin(BaseSubscription):
 
             try:
                 # Remove any stale output files for an update before writing
-                # fresh ones, otherwise the just-written file(s) would match
-                # ``^<doc_id>.`` and be deleted again below.
+                # fresh ones (including legacy doc-id-only names).
                 if doc_id in to_update:
-                    for fname in os.listdir(output_dir):
-                        if re.match(rf"^{doc_id}\.", fname):
-                            os.remove(os.path.join(output_dir, fname))
+                    self._remove_doc_files(output_dir, doc_id)
 
                 if raw_pdf:
                     file_bytes = self._download_document(
                         pl_url, pl_headers, doc_id
                     )
-                    tmp = f"/tmp/{doc_id}.{checksum_prefix}.{entry['ext']}"
+                    output_name = self._output_filename(
+                        entry["stem"], doc_id, checksum_prefix, entry["ext"]
+                    )
+                    tmp = f"/tmp/{output_name}"
                     with open(tmp, "wb") as f:
                         f.write(file_bytes)
                     self.move_to_destination(tmp)
@@ -267,8 +299,14 @@ class ePaperlessDoclingPlugin(BaseSubscription):
                             dl_url, dl_key, pdf_bytes, original_name, chunking_enabled, progress_callback, pct
                         )
                     for chunk in chunks:
-                        suffix = f"-{chunk['chunk_index']:03d}" if chunking_enabled else ""
-                        tmp = f"/tmp/{doc_id}.{checksum_prefix}{suffix}.md"
+                        chunk_index = (
+                            chunk["chunk_index"] if chunking_enabled else None
+                        )
+                        output_name = self._output_filename(
+                            entry["stem"], doc_id, checksum_prefix, "md",
+                            chunk_index,
+                        )
+                        tmp = f"/tmp/{output_name}"
                         with open(tmp, "w", encoding="utf-8") as f:
                             f.write(f"Original file: {original_name}\n\n{chunk['text']}")
                         self.move_to_destination(tmp)
@@ -285,9 +323,7 @@ class ePaperlessDoclingPlugin(BaseSubscription):
             pct = 10 + int(80 * done_work / total_work) if total_work else 90
             progress_callback(pct, message=f"Removing document {doc_id}")
 
-            for fname in os.listdir(output_dir):
-                if re.match(rf"^{doc_id}\.", fname):
-                    os.remove(os.path.join(output_dir, fname))
+            self._remove_doc_files(output_dir, doc_id)
             self.log.debug("deleted", doc_id=doc_id)
             done_work += 1
 
@@ -295,8 +331,10 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         if os.path.isdir(output_dir):
             stray_count = 0
             for fname in os.listdir(output_dir):
-                match = disk_name_re.match(fname)
-                if match and int(match.group(1)) not in api_ids:
+                if not os.path.isfile(os.path.join(output_dir, fname)):
+                    continue
+                parsed = self._parse_disk_name(fname)
+                if parsed and parsed[1] not in api_ids:
                     os.remove(os.path.join(output_dir, fname))
                     stray_count += 1
             if stray_count:
@@ -336,6 +374,89 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         if not sent:
             self.log.warning("notification_send_failed", error="smtp")
         progress_callback(100, message=f"Run aborted (emailed): {exc}")
+
+    # ------------------------------------------------------------------
+    # Output naming helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _original_name_parts(original_file_name, doc_id):
+        """Return a sanitized (stem, extension) from a Paperless filename."""
+        base = os.path.basename(original_file_name or "")
+        stem, ext = os.path.splitext(base)
+        if not stem:
+            stem, ext = base, ""
+        stem = stem.strip(".")
+        try:
+            stem = sanitize_name(stem)
+        except ValueError:
+            stem = f"document-{doc_id}"
+        if not stem:
+            stem = f"document-{doc_id}"
+
+        ext = ext.lstrip(".").lower()
+        if not re.fullmatch(r"[a-z0-9]+", ext):
+            ext = "pdf"
+        return stem, ext
+
+    @staticmethod
+    def _output_filename(stem, doc_id, checksum_prefix, ext, chunk_index=None):
+        """Build ``<original-stem>.<doc-id>.<hash>[-<chunk>].<ext>``."""
+        chunk_suffix = (
+            f"-{chunk_index:03d}" if chunk_index is not None else ""
+        )
+        suffix = f".{doc_id}.{checksum_prefix}{chunk_suffix}.{ext}"
+        max_stem_len = _MAX_FILENAME_LEN - len(suffix)
+        if max_stem_len < 1:
+            max_stem_len = 1
+        if len(stem) > max_stem_len:
+            stem = stem[:max_stem_len].rstrip(".")
+            if not stem:
+                stem = "d"
+        return f"{stem}{suffix}"
+
+    @staticmethod
+    def _parse_disk_name(filename):
+        """Parse a new or legacy output name.
+
+        Returns ``(stem, doc_id, hash, chunked, ext)``. ``stem`` is ``None``
+        for legacy ``<doc_id>.<hash>[-<chunk>].<ext>`` names.
+        """
+        match = _DISK_NAME_RE.match(filename)
+        if match:
+            return (
+                match.group("stem"),
+                int(match.group("doc_id")),
+                match.group("hash"),
+                match.group("chunk") is not None,
+                match.group("ext"),
+            )
+
+        match = _LEGACY_DISK_NAME_RE.match(filename)
+        if match:
+            return (
+                None,
+                int(match.group("doc_id")),
+                match.group("hash"),
+                match.group("chunk") is not None,
+                match.group("ext"),
+            )
+        return None
+
+    @classmethod
+    def _remove_doc_files(cls, output_dir, doc_id):
+        """Remove every new- or legacy-named file belonging to ``doc_id``."""
+        removed = 0
+        if not os.path.isdir(output_dir):
+            return removed
+        for fname in os.listdir(output_dir):
+            path = os.path.join(output_dir, fname)
+            if not os.path.isfile(path):
+                continue
+            parsed = cls._parse_disk_name(fname)
+            if parsed and parsed[1] == doc_id:
+                os.remove(path)
+                removed += 1
+        return removed
 
     # ------------------------------------------------------------------
     # Paperless helpers

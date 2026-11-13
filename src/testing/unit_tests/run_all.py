@@ -14,6 +14,7 @@ SCRIPTS = [
     "test_cipher.py",
     "test_plugin_loading.py",
     "test_empty_source_reconcile.py",
+    "test_paperless_filename.py",
     "test_openwebui_duplicate.py",
 ]
 

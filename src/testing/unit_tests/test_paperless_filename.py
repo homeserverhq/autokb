@@ -99,7 +99,7 @@ def test_output_includes_original_name_doc_id_and_hash():
     with tempfile.TemporaryDirectory() as td:
         plugin = _make_plugin(cls, td, [_doc()])
         _run(plugin)
-        assert _files(td) == {f"myfile.32.{HASH}.md"}
+        assert _files(td) == {f"myfile_32.{HASH}.md"}
 
 
 def test_chunked_output_uses_hash_then_chunk_id():
@@ -112,8 +112,8 @@ def test_chunked_output_uses_hash_then_chunk_id():
         plugin = _make_plugin(cls, td, [_doc()], chunks=chunks)
         _run(plugin, {"chunking_enabled": True})
         assert _files(td) == {
-            f"myfile.32.{HASH}-000.md",
-            f"myfile.32.{HASH}-001.md",
+            f"myfile_32.{HASH}-000.md",
+            f"myfile_32.{HASH}-001.md",
         }
 
 
@@ -123,7 +123,7 @@ def test_raw_pdf_uses_original_extension():
         plugin = _make_plugin(cls, td, [_doc()])
         plugin._download_document = lambda *args, **kwargs: b"%PDF-1.4"
         _run(plugin, {"processing_mode": "Raw PDF"})
-        assert _files(td) == {f"myfile.32.{HASH}.pdf"}
+        assert _files(td) == {f"myfile_32.{HASH}.pdf"}
 
 
 def test_legacy_doc_id_name_is_replaced():
@@ -137,7 +137,21 @@ def test_legacy_doc_id_name_is_replaced():
         _run(plugin)
 
         assert not os.path.exists(legacy)
-        assert _files(td) == {f"myfile.32.{HASH}.md"}
+        assert _files(td) == {f"myfile_32.{HASH}.md"}
+
+
+def test_dot_separated_original_name_is_replaced():
+    cls = _load_plugin()
+    with tempfile.TemporaryDirectory() as td:
+        old = os.path.join(td, f"myfile.32.{HASH}.md")
+        with open(old, "w", encoding="utf-8") as f:
+            f.write("old dot format")
+
+        plugin = _make_plugin(cls, td, [_doc()])
+        _run(plugin)
+
+        assert not os.path.exists(old)
+        assert _files(td) == {f"myfile_32.{HASH}.md"}
 
 
 def test_filename_change_repulls_and_removes_old_name():
@@ -151,13 +165,13 @@ def test_filename_change_repulls_and_removes_old_name():
         _run(plugin)
 
         assert not os.path.exists(old)
-        assert _files(td) == {f"newname.32.{HASH}.md"}
+        assert _files(td) == {f"newname_32.{HASH}.md"}
 
 
 def test_matching_file_is_skipped_without_fetching():
     cls = _load_plugin()
     with tempfile.TemporaryDirectory() as td:
-        name = f"myfile.32.{HASH}.md"
+        name = f"myfile_32.{HASH}.md"
         with open(os.path.join(td, name), "w", encoding="utf-8") as f:
             f.write("already current")
 
@@ -183,16 +197,23 @@ def test_duplicate_names_with_same_checksum_get_distinct_files():
         plugin = _make_plugin(cls, td, docs)
         _run(plugin)
         assert _files(td) == {
-            f"myfile.32.{HASH}.md",
-            f"myfile.33.{HASH}.md",
+            f"myfile_32.{HASH}.md",
+            f"myfile_33.{HASH}.md",
         }
 
 
 def test_parser_handles_dots_in_original_name_and_legacy_names():
     cls = _load_plugin()
     assert cls._parse_disk_name(
-        f"my.file.32.{HASH}-001.md"
+        f"my.file_32.{HASH}-001.md"
     ) == ("my.file", 32, HASH, True, "md")
+    assert cls._parse_disk_name(f"my.file.32.{HASH}.md") == (
+        None,
+        32,
+        HASH,
+        False,
+        "md",
+    )
     assert cls._parse_disk_name(f"32.{HASH}.md") == (
         None,
         32,
@@ -212,7 +233,7 @@ def test_long_original_name_is_truncated_before_fixed_suffix():
         assert len(files) == 1
         name = files.pop()
         assert len(name) <= 240
-        assert name.endswith(f".32.{HASH}.md")
+        assert name.endswith(f"_32.{HASH}.md")
 
 
 def test_original_name_is_sanitized():
@@ -220,7 +241,7 @@ def test_original_name_is_sanitized():
     with tempfile.TemporaryDirectory() as td:
         plugin = _make_plugin(cls, td, [_doc(name="My File (1).pdf")])
         _run(plugin)
-        assert _files(td) == {f"MyFile1.32.{HASH}.md"}
+        assert _files(td) == {f"MyFile1_32.{HASH}.md"}
 
 
 def main():
@@ -229,6 +250,7 @@ def main():
         test_chunked_output_uses_hash_then_chunk_id,
         test_raw_pdf_uses_original_extension,
         test_legacy_doc_id_name_is_replaced,
+        test_dot_separated_original_name_is_replaced,
         test_filename_change_repulls_and_removes_old_name,
         test_matching_file_is_skipped_without_fetching,
         test_duplicate_names_with_same_checksum_get_distinct_files,

@@ -30,6 +30,10 @@ _CHUNKING_MAX_TOKENS = 490
 _HEARTBEAT_INTERVAL = 20
 _MAX_FILENAME_LEN = 240
 _DISK_NAME_RE = re.compile(
+    r"^(?P<stem>.+)_(?P<doc_id>\d+)\.(?P<hash>[a-f0-9]{16})"
+    r"(?:-(?P<chunk>\d+))?\.(?P<ext>[a-z0-9]+)$"
+)
+_DOT_DISK_NAME_RE = re.compile(
     r"^(?P<stem>.+)\.(?P<doc_id>\d+)\.(?P<hash>[a-f0-9]{16})"
     r"(?:-(?P<chunk>\d+))?\.(?P<ext>[a-z0-9]+)$"
 )
@@ -400,11 +404,11 @@ class ePaperlessDoclingPlugin(BaseSubscription):
 
     @staticmethod
     def _output_filename(stem, doc_id, checksum_prefix, ext, chunk_index=None):
-        """Build ``<original-stem>.<doc-id>.<hash>[-<chunk>].<ext>``."""
+        """Build ``<original-stem>_<doc-id>.<hash>[-<chunk>].<ext>``."""
         chunk_suffix = (
             f"-{chunk_index:03d}" if chunk_index is not None else ""
         )
-        suffix = f".{doc_id}.{checksum_prefix}{chunk_suffix}.{ext}"
+        suffix = f"_{doc_id}.{checksum_prefix}{chunk_suffix}.{ext}"
         max_stem_len = _MAX_FILENAME_LEN - len(suffix)
         if max_stem_len < 1:
             max_stem_len = 1
@@ -419,12 +423,27 @@ class ePaperlessDoclingPlugin(BaseSubscription):
         """Parse a new or legacy output name.
 
         Returns ``(stem, doc_id, hash, chunked, ext)``. ``stem`` is ``None``
-        for legacy ``<doc_id>.<hash>[-<chunk>].<ext>`` names.
+        for legacy ``<doc_id>.<hash>[-<chunk>].<ext>`` names and for the
+        intermediate dot-separated original-name format.
         """
         match = _DISK_NAME_RE.match(filename)
         if match:
             return (
                 match.group("stem"),
+                int(match.group("doc_id")),
+                match.group("hash"),
+                match.group("chunk") is not None,
+                match.group("ext"),
+            )
+
+        # Files written by the previous version used
+        # ``<original-stem>.<doc-id>.<hash>[-<chunk>].<ext>``. Treat them as
+        # stale so reconciliation replaces them with underscore-separated
+        # names instead of skipping them forever.
+        match = _DOT_DISK_NAME_RE.match(filename)
+        if match:
+            return (
+                None,
                 int(match.group("doc_id")),
                 match.group("hash"),
                 match.group("chunk") is not None,
